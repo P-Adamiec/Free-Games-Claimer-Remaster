@@ -1,0 +1,24 @@
+services:
+  # ---------------------------------------------------------------
+  # Free Games Claimer Remaster
+  # ---------------------------------------------------------------
+  app:
+    image: free-games-claimer-remaster
+    container_name: fgc-remaster
+    build: .
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    ports:
+      - "${NOVNC_PORT:-7080}:7080"
+    volumes:
+      - fgc_data:/fgc/data
+    env_file:
+      - .env
+    healthcheck:
+      test: pgrep python3 && curl --fail http://localhost:7080 || exit 1
+      interval: 10s
+      timeout: 5s
+
+volumes:
+  fgc_data:

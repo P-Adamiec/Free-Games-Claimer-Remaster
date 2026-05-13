@@ -1,0 +1,21 @@
+# Environment & secrets
+.env
+!.env.example
+
+# Runtime data
+data/
+steamdb_dump.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

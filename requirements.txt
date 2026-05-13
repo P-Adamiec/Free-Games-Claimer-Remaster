@@ -1,0 +1,27 @@
+# Core browser automation
+nodriver>=0.38
+
+# Database
+sqlalchemy[asyncio]>=2.0
+aiosqlite>=0.20
+
+# Notifications
+apprise>=1.9
+
+# Retry logic
+tenacity>=9.0
+
+# Scheduler
+APScheduler>=3.11
+
+# OTP / 2FA
+pyotp>=2.9
+
+# Configuration
+python-dotenv>=1.1
+
+# Logging / Console output
+rich>=14.0
+
+# HTTP client
+httpx>=0.28

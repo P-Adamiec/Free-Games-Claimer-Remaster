@@ -1,0 +1,109 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    tags:
+      - "v*.*"       # Release tags from main: v1.0, v1.1, v2.0, etc.
+      - "v*.*d"      # Dev tags from dev branch: v1.1d, v1.2d, etc.
+  workflow_dispatch:
+    inputs:
+      tag_override:
+        description: "Override image tag (e.g. 1.0, 1.1d)"
+        required: false
+
+env:
+  REGISTRY_GHCR: ghcr.io
+  REGISTRY_DOCKER: docker.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # For creating GitHub Releases
+      packages: write    # For pushing to GHCR
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tag_override }}" ]; then
+            VERSION="${{ github.event.inputs.tag_override }}"
+          else
+            # Strip 'v' prefix from git tag: v1.0 -> 1.0, v1.1d -> 1.1d
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Determine if this is a dev build (tag ends with 'd')
+          if [[ "$VERSION" == *d ]]; then
+            echo "is_dev=true" >> "$GITHUB_OUTPUT"
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_dev=false" >> "$GITHUB_OUTPUT"
+            echo "is_latest=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_GHCR }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_DOCKER }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            COMMIT=${{ github.sha }}
+            BRANCH=${{ github.ref_name }}
+            NOW=${{ github.event.head_commit.timestamp }}
+          tags: |
+            ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/fgc-remaster:${{ steps.version.outputs.version }}
+            ${{ steps.version.outputs.is_latest == 'true' && format('{0}/{1}:latest', env.REGISTRY_GHCR, env.IMAGE_NAME) || '' }}
+            ${{ steps.version.outputs.is_latest == 'true' && format('{0}/{1}/fgc-remaster:latest', env.REGISTRY_DOCKER, secrets.DOCKERHUB_USERNAME) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract changelog for release
+        if: steps.version.outputs.is_dev == 'false'
+        id: changelog
+        run: |
+          # Extract the section for this version from CHANGELOG.md
+          VERSION="${{ steps.version.outputs.version }}"
+          BODY=$(awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md)
+          if [ -z "$BODY" ]; then
+            BODY="Release v${VERSION}"
+          fi
+          # Write to file to avoid escaping issues
+          echo "$BODY" > /tmp/release_body.md
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.is_dev == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "v${{ steps.version.outputs.version }}"
+          body_path: /tmp/release_body.md
+          draft: false
+          prerelease: false
