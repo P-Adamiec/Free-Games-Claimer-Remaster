@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3] - 2026-07-05
+
+### Added
+- **AliExpress Daily Check-in module** (`src/stores/aliexpress.py`) – reimagined and added as a lightweight daily coin check-in module using mobile viewport emulation, mobile Chromium user-agent, automated coin collection, and custom JavaScript protocol blocking (`aliexpress://`, `taobao://`, `intent://`) to prevent system dialogs.
+- **Standardized VNC Web Client URL (`http://{cfg.vnc_ip}:{cfg.novnc_port}`)** – standardized explicit clickable VNC notification links across all store modules (`prime.py`, `aliexpress.py`, `gog.py`, `epic.py`, `steam.py`) and added `"7080"` default initialization for `novnc_port` in `src/core/config.py` for improved code readability.
+- **Parallel Discord + Apprise notifications** – removed Discord-priority logic from the notification dispatcher. Both `DISCORD_WEBHOOK` and `NOTIFY` (Apprise) now fire simultaneously via `asyncio.gather()` when both are configured. Users no longer need to comment out one service to use the other.
+- **Test Notification feature (`NOTIFY_TEST`)** – added a new `NOTIFY_TEST=true` environment variable that sends a test notification on container startup, allowing users to verify their Discord/Apprise setup works before waiting for a full claiming run.
+- **Dry Run Summary Notifications (`DRYRUN=true`)** – added automatic summary notification dispatch when running in dry-run mode (`DRYRUN=true`). The bot now compiles a formatted summary report (`🛑 DRY RUN SUMMARY — Games Remaining to be Claimed`) listing all available giveaways detected across enabled stores without claiming them.
+- **Apprise multi-link & self-hosted API support** – verified and documented that `NOTIFY` supports multiple comma-separated URLs (e.g. `ntfy://topic, tgram://bot/chat`). Expanded `.env.example` with detailed instructions for self-hosted Apprise API instances (`http://[IP]:[PORT]/cfg/code` → `apprise://[IP]:[PORT]/code`), and clarified that fine-tuning notification flags (`NOTIFY_ERRORS`, `NOTIFY_SUMMARY`, etc.) apply globally to both Discord and Apprise.
+
+### Fixed
+- **Amazon Prime Gaming / Luna passkey loops & anti-bot stealth** – eliminated "Sign in with a passkey" loops by injecting a browser-level WebAuthn API neutralization script (`window.PublicKeyCredential = undefined`) before page load so Amazon never renders passkey challenges. Replaced brittle DOM button search loops with native Enter key (`\r`) form submission in the password field for stealth, human-like login without triggering bot detection. Also fixed the "Switch accounts" profile selector to accurately match multi-line profile cards and icon-prefixed "Add account" buttons across languages.
+- **Epic Games 2FA redirect wait loop & modern UI login detection** – fixed a CDP limitation where `self.page.url` remained stale after clicking "Maybe later" on the 2FA setup interstitial, causing the wait loop to hang. The loop now actively checks live `window.location.href` to exit immediately upon redirect to `store.epicgames.com`. Added fallback login verification (Signal 5) in `_is_logged_in()` to correctly recognize authenticated sessions on Epic's modern UI redesign (which renders text-initial badges instead of `<img alt="avatar">` and encapsulates navbar items inside Shadow DOM).
+- **Duplicate summary notifications on GOG Auto-Redeemer** – removed a redundant `await notify(msg)` call inside `gog.py`'s `_redeem_pending_codes()`. Previously, GOG Auto-Redeemer fired an immediate standalone summary notification when redeeming Prime Gaming codes, and `main.py` subsequently dispatched a duplicate summary notification containing the exact same games. Redeemed GOG codes are now cleanly aggregated and included once in the unified final summary report.
+
 ## [1.2] - 2026-07-01
 
 ### Added

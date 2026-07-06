@@ -177,6 +177,15 @@ class BaseClaimer:
             prefs["credentials_enable_autosignin"] = False
             prefs.setdefault("profile", {})
             prefs["profile"]["password_manager_enabled"] = False
+            prefs.setdefault("protocol_handler", {})
+            prefs["protocol_handler"]["excluded_schemes"] = {
+                "aliexpress": True,
+                "intent": True,
+                "market": True,
+                "android-app": True,
+                "alipay": True,
+                "taobao": True,
+            }
             prefs_file.write_text(_json.dumps(prefs), encoding="utf-8")
         except Exception:
             pass  # Non-critical

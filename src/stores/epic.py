@@ -151,6 +151,18 @@ class EpicGamesClaimer(BaseClaimer):
                         if (avatar) return true;
                     }
 
+                    // Signal 5: Modern Epic redesign check — if on store.epicgames.com and Wishlist/Cart/Gifts text is visible without any Sign In link
+                    const allLinks = [...document.querySelectorAll('a')];
+                    const hasSignIn = allLinks.some(a => {
+                        const href = (a.getAttribute('href') || '').toLowerCase();
+                        const txt = (a.innerText || a.textContent || '').toLowerCase();
+                        return (href.includes('/login') || href.includes('id.epicgames.com')) && (txt.includes('sign in') || txt.includes('zaloguj'));
+                    });
+                    if (!hasSignIn && window.location.hostname.includes('store.epicgames.com')) {
+                        const bodyTxt = (document.body?.innerText || '').toLowerCase();
+                        if (bodyTxt.includes('wishlist') || bodyTxt.includes('cart') || bodyTxt.includes('koszyk') || bodyTxt.includes('listy życzeń')) return true;
+                    }
+
                     return false;
                 })()
                 """
@@ -210,12 +222,16 @@ class EpicGamesClaimer(BaseClaimer):
             
             # Wait loop to detect auth completion or interstitial
             for wait_sec in range(120):
+                try:
+                    curr_url = str(await self.page.evaluate("window.location.href") or self.page.url)
+                except Exception:
+                    curr_url = str(self.page.url)
+
                 # We know auth is complete when Epic redirects us back to the store domain.
-                # Checking for "login not in url" was fragile because CAPTCHAs use /id/challenge.
-                if url_has_allowed_host(self.page.url, "store.epicgames.com"):
+                if url_has_allowed_host(curr_url, "store.epicgames.com"):
                     break
                     
-                if "login/review" in self.page.url:
+                if "login/review" in curr_url:
                     logger.info("Account review interstitial detected, auto-confirming...")
                     try:
                         clicked_yes = await self.page.evaluate('''
@@ -244,12 +260,12 @@ class EpicGamesClaimer(BaseClaimer):
                     ''')
                     if clicked_maybe:
                         logger.info("Auto-clicked 'Maybe later' on 2FA setup screen.")
-                        await self.sleep(2)
+                        await self.sleep(3)
                 except Exception:
                     pass
                 
                 if wait_sec == 3:
-                    logger.warning("Waiting for login to finish. If Captcha appeared, solve it via VNC! (2 min limit)")
+                    logger.warning(f"Waiting for login to finish. If Captcha appeared, open http://{cfg.vnc_ip}:{cfg.novnc_port} and solve it via VNC! (2 min limit)")
                 await self.sleep(1)
 
             # verify success
@@ -633,7 +649,7 @@ class EpicGamesClaimer(BaseClaimer):
 
             if cfg.dryrun:
                 logger.info("DRYRUN – skipped '%s'.", title)
-                notify_game["status"] = "skipped"
+                notify_game["status"] = "available (dry run)"
                 await session.commit()
                 return
 

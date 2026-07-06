@@ -15,6 +15,7 @@ Automatically claims free games on:
 - <img alt="logo epic-games" src="https://github.com/user-attachments/assets/82e9e9bf-b6ac-4f20-91db-36d2c8429cb6" width="20" align="middle" /> **Epic Games Store** – weekly free games
 - <img alt="logo prime-gaming" src="https://github.com/user-attachments/assets/7627a108-20c6-4525-a1d8-5d221ee89d6e" width="20" align="middle" /> **Amazon Prime Gaming** – monthly Prime Gaming catalogue + GOG key redemption
 - <img alt="logo gog" src="https://github.com/user-attachments/assets/49040b50-ee14-4439-8e3c-e93cafd7c3a5" width="20" align="middle" /> **GOG** – periodic free giveaways
+- <img alt="logo aliexpress" src="https://www.aliexpress.com/favicon.ico" width="20" align="middle" /> **AliExpress** – automated daily check-in verification for check-in points
 
 **Gamerpower API** routing to indirect stores:
 - <img alt="logo fanatical" src="https://www.fanatical.com/favicon.ico" width="20" align="middle" /> **Fanatical** – auto-bypasses cookie banners and hooks Steam accounts to grab weekly PC drops.
@@ -60,6 +61,10 @@ GOG_PASSWORD=your_password
 # Steam
 STEAM_USERNAME=your_username
 STEAM_PASSWORD=your_password
+
+# AliExpress
+AE_EMAIL=your@email.com
+AE_PASSWORD=your_password
 
 # Notifications
 DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
@@ -127,6 +132,8 @@ Options are set via environment variables in `.env`:
 | `GOG_OTP_CODES` | | Comma-separated list of GOG backup codes. |
 | `STEAM_USERNAME` | | Steam username. |
 | `STEAM_PASSWORD` | | Steam password. |
+| `AE_EMAIL` | | AliExpress login email. |
+| `AE_PASSWORD` | | AliExpress login password. |
 | `STORES` | *(all)* | Comma-separated list of stores to run. |
 | `RESET_DB_GAMES` | `false` | Retroactively erase any database claims recorded within the last 7 days upon execution. Assists in clearing false positives. |
 | `FANATICAL_ENABLE`| `false`| Enable Fanatical claiming via GamerPower. |
@@ -141,13 +148,15 @@ Options are set via environment variables in `.env`:
 | `INDIEGALA_PASSWORD`| | IndieGala account password. |
 | `UNKNOWN_STORES_ENABLE`| `false`| Open unsupported external stores for manual claiming via VNC. |
 | `BROWSER_DIR` | `data/browser` | Browser profile directory (persists cookies/sessions). |
-| `DEBUG` | `0` | Shows verbose actions the bot takes. |
-| `DRYRUN`| `0` | Click "claim" buttons but do not submit / perform final purchase. |
+| `DEBUG` | `false` | Shows verbose actions the bot takes. |
+| `DRYRUN`| `false` | Simulate a run without claiming games. Detects available giveaways and sends a summary report. |
 | `DISCORD_WEBHOOK` | | Discord webhook URL for notifications. |
-| `NOTIFY_SUMMARY` | `1` | Set to 0 to disable game claim summaries. |
-| `NOTIFY_ERRORS` | `1` | Set to 0 to disable fatal error alerts. |
-| `NOTIFY_CLAIM_FAILS`| `1` | Set to 0 to disable alerts for unclaimable games. |
-| `NOTIFY_LOGIN_REQUEST`| `1` | Set to 0 to disable VNC login request pings. |
+| `NOTIFY` | | Apprise URL(s) for Telegram, Slack, ntfy, etc. Multiple services can be separated by commas. |
+| `NOTIFY_TEST` | `false` | Send a test notification on startup to verify your setup works. |
+| `NOTIFY_SUMMARY` | `true` | Set to false to disable game claim summaries. (Applies to all services) |
+| `NOTIFY_ERRORS` | `true` | Set to false to disable fatal error alerts. (Applies to all services) |
+| `NOTIFY_CLAIM_FAILS`| `true` | Set to false to disable alerts for unclaimable games. (Applies to all services) |
+| `NOTIFY_LOGIN_REQUEST`| `true` | Set to false to disable VNC login request pings. (Applies to all services) |
 
 ### Scheduler
 
@@ -232,9 +241,12 @@ free-games-claimer-remaster/
 
 ## Notifications
 
-Set `DISCORD_WEBHOOK` in `.env` for Discord notifications about claimed games and errors. Use the respective `NOTIFY_...=0` flags to silence notification subsets if they generate too much noise.
+Both Discord and Apprise can be configured simultaneously — notifications are sent to ALL configured services in parallel via async dispatch.
 
-For other services, [apprise](https://github.com/caronc/apprise) natively supports sending to Telegram, Slack, Matrix and more – just set the `NOTIFY` variable!
+- **Discord**: Set `DISCORD_WEBHOOK` in `.env`.
+- **Apprise (Telegram, Slack, Email, ntfy, etc.)**: Set `NOTIFY` in `.env`. You can provide multiple URLs separated by commas (e.g. `NOTIFY=ntfy://topic, tgram://token/id`).
+- **Fine-Tune Filtering**: Use `NOTIFY_SUMMARY=false`, `NOTIFY_ERRORS=false`, etc., to silence specific notification subsets across all services globally.
+- **Testing**: Set `NOTIFY_TEST=true` to receive a test notification whenever the container starts.
 
 ---
 

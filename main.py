@@ -26,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from src.core.config import cfg
 from src.core.database import init_db
+from src.stores.aliexpress import claim_aliexpress
 from src.stores.epic import claim_epic
 from src.stores.gamerpower import claim_gamerpower
 from src.stores.gog import claim_gog
@@ -47,8 +48,8 @@ class StorePrefixFilter(logging.Filter):
     def filter(self, record):
         if record.name.startswith("fgc."):
             store = record.name.split(".")[-1]
-            if store in ("epic", "steam", "gog", "prime"):
-                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime"}
+            if store in ("epic", "steam", "gog", "prime", "aliexpress"):
+                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "aliexpress": "AliExpress"}
                 prefix = escape(f"[{store_map[store]}]")
                 # Prepend to the message template
                 record.msg = f"{prefix} {record.msg}"
@@ -90,6 +91,7 @@ ALL_CLAIMERS: dict[str, tuple[str, object]] = {
     "prime":      ("Prime Gaming", claim_prime),
     "gog":        ("GOG",          claim_gog),
     "gamerpower": ("GamerPower",   claim_gamerpower),
+    "aliexpress": ("AliExpress",   claim_aliexpress),
 }
 
 # Accepted aliases → canonical name
@@ -106,6 +108,8 @@ _ALIASES: dict[str, str] = {
     "gog":           "gog",
     "gamerpower":    "gamerpower",
     "gp":            "gamerpower",
+    "aliexpress":    "aliexpress",
+    "ae":            "aliexpress",
 }
 
 _FIXED_TIME_RE = re.compile(r"^\d{2}:\d{2}$")
@@ -199,7 +203,7 @@ def _get_active_claimers() -> list[tuple[str, object]]:
     elif cfg.stores:
         selected = _resolve_stores([s for s in cfg.stores.split(",") if s.strip()])
     else:
-        selected = ["steam", "epic", "prime", "gog"]
+        selected = ["steam", "epic", "prime", "gog", "aliexpress"]
 
     return [(ALL_CLAIMERS[k][0], ALL_CLAIMERS[k][1]) for k in selected if k in ALL_CLAIMERS]
 
@@ -298,13 +302,13 @@ async def run_claimers() -> None:
         from src.core.notifier import format_game_list
         msg_parts = []
         for result in aggregated_results:
-            # Filter out games that were "existed" or "already redeemed"
+            # Filter out games that were "existed" or "already redeemed", unless it's a dry run
             relevant_games = [
                 g for g in result["games"]
                 if "status" in g 
                 and "exist" not in g["status"].lower() 
                 and "already" not in g["status"].lower()
-                and "skip" not in g["status"].lower()
+                and ("skip" not in g["status"].lower() or "dry run" in g["status"].lower())
             ]
             
             if not relevant_games:
@@ -315,6 +319,8 @@ async def run_claimers() -> None:
             
         if msg_parts:
             final_msg = "\n\n".join(msg_parts)
+            if cfg.dryrun:
+                final_msg = "🛑 **DRY RUN SUMMARY — Games Remaining to be Claimed:**\n\n" + final_msg
             await notify(final_msg)
 
     logger.info("✔ Claiming run complete.")
@@ -354,6 +360,23 @@ async def main() -> None:
                 await session.commit()
         except Exception as e:
             logger.error("Failed to reset DB games: %s", e)
+
+    # Send a test notification if NOTIFY_TEST=true (for verifying notification setup)
+    if cfg.notify_test:
+        logger.info("🔔 NOTIFY_TEST=true — sending test notification...")
+        services = ", ".join(filter(None, [
+            "Discord" if cfg.discord_webhook else None,
+            "Apprise" if cfg.notify_url else None,
+        ])) or "⚠️ None configured"
+        test_msg = (
+            "🔔 **Free Games Claimer — Test Notification**\n\n"
+            "✅ If you see this message, your notification setup is working correctly!\n\n"
+            f"**Version:** v{__version__}\n"
+            f"**Services:** {services}"
+        )
+        await notify(test_msg)
+        logger.info("✅ Test notification dispatched! Check your configured services. "
+                     "Set NOTIFY_TEST=0 in your .env to disable this on future restarts.")
 
     # If --once flag is set, run a single pass and exit
     if "--once" in sys.argv:

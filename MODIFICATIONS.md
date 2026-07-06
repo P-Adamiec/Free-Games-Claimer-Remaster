@@ -22,7 +22,7 @@ The **Python Remaster** was built from the ground up to solve two critical flaws
 
 The following scripts from the original `free-games-claimer-dev` were deemed out-of-scope for a core gaming claimer or misleading, and were **deleted**:
 
-- ❌ `aliexpress.js`: The original project contained an AliExpress coin scraper. This has been removed to keep the focus strictly on gaming.
+- 🔄 `aliexpress.js`: Originally removed as a coin scraper, this module has been reimagined and re-added as `aliexpress.py` per user request. Since internal point collection buttons no longer function, this lightweight module strictly performs daily check-ins by navigating to the mobile coin index page while authenticated.
 - ❌ `unrealengine.js`: Removed. Claiming free Unreal Engine marketplace assets is outside the scope of consumer gaming.
 - ❌ `steam-games.js` (Original): The original JS project contained a file named `steam-games.js`, **but it never claimed games.** It only scraped your public Steam profile to read playtime hours and achievements. It was deleted and completely replaced with a real auto-claimer.
 - ❌ `package.json` / `package-lock.json` / `eslint.config.js`: Entire Node.js ecosystem files removed in favor of Python's `requirements.txt`.
@@ -43,6 +43,7 @@ Instead of duplicating browser launch logic in every single store file (as the J
 - 🟢 `prime.py`: Fixed critical DOM selector bugs from the JS version. Amazon recently injected "Sign in with Passkey" prompts which trapped the old script in an infinite loop. The Python port explicitly targets the standard form. Additionally, it intelligently differentiates between natively claimed Amazon games and external keys (e.g., extracting GOG activation codes).
 - 🟢 `gog.py`: Streamlined the giveaway banner parsing logic. Most importantly, it binds natively to Chromium's `--restore-last-session` boot flag. This prevents Docker restarts from wiping out your ephemeral `gog-al` session cookies (which previously caused random logouts).
 - 🟢 `steam.py` (**Completely New Feature**): Replacing the useless original script, this entirely new module actively searches for "100% Free to Keep" titles. It queries the `GamerPower` API and stealthily scrapes `SteamDB` (using the browser to bypass Cloudflare), then logs into Steam to finalize 100% discount purchases securely.
+- 🟢 `aliexpress.py`: A reimagined lightweight daily check-in module. Navigates to the mobile coin index page with a mobile Chromium user-agent and handles automated authentication or VNC login fallback to claim daily check-in points.
 
 ### C. Docker Infrastructure
 - 🟢 `Dockerfile`: Migrated the base image to `ubuntu:noble` pulling `python3` and `google-chrome-stable`. The stack still includes `TurboVNC`, `VirtualGL`, and `noVNC` pointing to `localhost:7080` so you can visually verify or solve captchas exactly as before.

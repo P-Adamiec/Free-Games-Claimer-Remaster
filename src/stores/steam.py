@@ -366,7 +366,7 @@ class SteamClaimer(BaseClaimer):
             ''')
             
             if has_guard:
-                logger.warning("⚠ Steam Guard detected! Please enter the code via VNC or approve on your phone. (Waiting up to 2 min)")
+                logger.warning(f"⚠ Steam Guard detected! Open http://{cfg.vnc_ip}:{cfg.novnc_port} to enter the code via VNC or approve on your phone. (Waiting up to 2 min)")
                 if cfg.notify_errors:
                     await notify("Steam Guard code required! Open VNC and enter the code, or approve on your mobile app.")
                 
@@ -590,6 +590,11 @@ class SteamClaimer(BaseClaimer):
                            "Will not purchase paid content.", page_title, paid_price)
             notify_game["status"] = "skipped:paid"
             await self.take_screenshot(f"steam_paid_skip_{filenamify(page_title)}")
+            return
+
+        if cfg.dryrun:
+            logger.info("DRYRUN – skipped '%s'.", page_title)
+            notify_game["status"] = "available (dry run)"
             return
 
         # Try to claim – look for various claim buttons (language-agnostic)

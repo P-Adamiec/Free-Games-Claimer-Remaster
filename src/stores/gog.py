@@ -323,7 +323,7 @@ class GOGClaimer(BaseClaimer):
                 logged_in = await self._wait_for_vnc_login(
                     _vnc_check_gog_2fa, 
                     timeout=180,
-                    custom_msg=f"GOG requires 2FA verification! Open http://{cfg.vnc_ip}:{cfg.novnc_port or 7080} to enter the code via VNC..."
+                    custom_msg=f"GOG requires 2FA verification! Open http://{cfg.vnc_ip}:{cfg.novnc_port} to enter the code via VNC..."
                 )
                 if logged_in:
                     self.log_signed_in()
@@ -405,6 +405,7 @@ class GOGClaimer(BaseClaimer):
         # In dry run mode, log the game but don't actually claim it
         if cfg.dryrun:
             logger.info("DRYRUN – skipped '%s'.", title)
+            self.notify_games.append({"title": title, "url": "https://www.gog.com", "status": "available (dry run)"})
             return
 
         # GOG has a direct claim endpoint that returns a JSON response.
@@ -527,13 +528,6 @@ class GOGClaimer(BaseClaimer):
             # Redeem each GOG code one by one
             for g in gog_games:
                 await self._redeem_gog_code(g.code, g.title, g.url)
-                
-            # Send a notification summary of all redeemed codes
-            claimed = [g for g in self.notify_games if g["status"] != "existed"]
-            if claimed and cfg.notify_summary:
-                from src.core.notifier import format_game_list, notify
-                msg = f"**GOG Auto-Redeemer**:\n{format_game_list(self.notify_games)}"
-                await notify(msg)
         except Exception:
             logger.exception("Fatal error during pending codes redemption")
         finally:

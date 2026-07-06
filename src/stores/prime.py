@@ -59,6 +59,24 @@ class PrimeGamingClaimer(BaseClaimer):
         try:
             # Step 1: Open a browser and navigate to the Prime Gaming claims page
             await self.start_browser()
+
+            # Neutralize WebAuthn / Passkey APIs to prevent Amazon from rendering passkey challenge UI
+            try:
+                await self.page.send(
+                    uc.cdp.page.add_script_to_evaluate_on_new_document(
+                        source="""
+                            try {
+                                Object.defineProperty(window, 'PublicKeyCredential', { get: () => undefined });
+                                if (navigator.credentials) {
+                                    Object.defineProperty(navigator, 'credentials', { get: () => undefined });
+                                }
+                            } catch (e) {}
+                        """
+                    )
+                )
+            except Exception as e:
+                self.logger.debug("Passkey neutralization script injection exception: %s", e)
+
             await self.page.get(URL_CLAIM)
             await self.sleep(4)
 
@@ -263,27 +281,38 @@ class PrimeGamingClaimer(BaseClaimer):
         # the user's previous login, presenting a "Switch accounts" selection.
         await self.page.evaluate('''
             (() => {
-                const targetEmail = %s;
+                const targetEmail = (%s || '').toLowerCase().trim();
                 const bodyText = (document.body.innerText || '').toLowerCase();
-                if (bodyText.includes('switch accounts') || bodyText.includes('add account')) {
-                    const els = [...document.querySelectorAll('div, span, a, button')];
-                    // 1. Try to click the existing profile block matching our target email
-                    for (const el of els) {
-                        const t = (el.innerText || '').toLowerCase().trim();
-                        if (t === targetEmail.toLowerCase()) {
-                            const clickable = el.closest('a, button, [role="button"], [role="link"], .cvf-account-switcher-profile') || el;
+                const isSwitchScreen = bodyText.includes('switch accounts') || bodyText.includes('add account') || bodyText.includes('przełącz konto') || bodyText.includes('dodaj konto');
+                if (!isSwitchScreen) return;
+
+                const allEls = [...document.querySelectorAll('div, span, a, button, li, label')].filter(el => {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    return t && el.tagName !== 'BODY' && el.tagName !== 'HTML' && !el.className.includes('header');
+                });
+                // Sort by length ascending to match the most specific (deepest) elements first
+                allEls.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+
+                // 1. Try to click existing profile whose text includes our target email
+                if (targetEmail) {
+                    for (const el of allEls) {
+                        const t = (el.innerText || el.textContent || '').toLowerCase();
+                        if (t.includes(targetEmail)) {
+                            const clickable = el.closest('a, button, [role="button"], [role="link"], li, [class*="profile"], [class*="switcher"], [class*="account"], [class*="item"]') || el;
                             clickable.click();
                             return;
                         }
                     }
-                    // 2. If the desired profile isn't listed, click "Add account" to revert to normal email input
-                    for (const el of els) {
-                        const t = (el.innerText || '').toLowerCase().trim();
-                        if (t === 'add account' || t === 'use another account') {
-                            const clickable = el.closest('a, button, [role="button"], [role="link"]') || el;
-                            clickable.click();
-                            return;
-                        }
+                }
+
+                // 2. If target profile not found or email empty, click "Add account" / "Use another account"
+                const addKeywords = ['add account', 'use another account', 'dodaj konto', 'użyj innego konta', 'another account', 'innego konta'];
+                for (const el of allEls) {
+                    const t = (el.innerText || el.textContent || '').toLowerCase();
+                    if (addKeywords.some(kw => t.includes(kw))) {
+                        const clickable = el.closest('a, button, [role="button"], [role="link"], li, [class*="add"], [class*="account"], [class*="item"]') || el;
+                        clickable.click();
+                        return;
                     }
                 }
             })()
@@ -309,25 +338,18 @@ class PrimeGamingClaimer(BaseClaimer):
         if password_input:
             await password_input.apply('(el) => { let setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set; if(setter) setter.call(el, ""); el.dispatchEvent(new Event("input", {bubbles: true})); }')
             await password_input.send_keys(password)
+            await self.sleep(1)
+            # Send Enter key directly to submit form natively (most stealthy anti-bot approach)
+            await password_input.send_keys("\r")
+            await self.sleep(3)
 
-        # Submit button (explicitly filtering out "Sign in with a passkey" to avoid loops)
-        await self.page.evaluate('''
-            (() => {
-                const btns = [...document.querySelectorAll('input[type="submit"], button, .a-button-input')];
-                for (const b of btns) {
-                    const text = (b.value || b.innerText || b.textContent || '').toLowerCase();
-                    if (text.includes('passkey')) continue;
-                    
-                    if (b.id === 'signInSubmit' || b.id === 'continue' || text === 'sign in') {
-                        const rect = b.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && !b.disabled) {
-                            b.click();
-                            return;
-                        }
-                    }
-                }
-            })()
-        ''')
+        # Fallback check: if form did not submit via Enter and #signInSubmit is still present, click ONLY #signInSubmit
+        try:
+            submit_btn = await self.page.find("#signInSubmit", timeout=2)
+            if submit_btn:
+                await submit_btn.click()
+        except Exception:
+            pass
         await self.sleep(4)
 
         # Handle MFA (TOTP authenticator app)
@@ -385,8 +407,8 @@ class PrimeGamingClaimer(BaseClaimer):
         if not is_security_page:
             return
 
-        logger.warning("⚠️ Amazon security code verification required! "
-                       "Enter the code via VNC (noVNC web interface).")
+        logger.warning(f"⚠️ Amazon security code verification required! "
+                       f"Open http://{cfg.vnc_ip}:{cfg.novnc_port} to enter the code via VNC.")
 
         # _wait_for_vnc_login already sends a clean notification with the
         # correct localhost URL, so we don't send a separate one here.
@@ -407,7 +429,7 @@ class PrimeGamingClaimer(BaseClaimer):
             )
 
         msg = (f"**{self.store_name}** requires Amazon SMS/2FA Verification! "
-               f"Open http://{cfg.vnc_ip}:{cfg.novnc_port or 7080} to enter the OTP code via VNC "
+               f"Open http://{cfg.vnc_ip}:{cfg.novnc_port} to enter the OTP code via VNC "
                f"(waiting {cfg.vnc_login_timeout}s).")
 
         resolved = await self._wait_for_vnc_login(_security_code_done, custom_msg=msg)
@@ -767,6 +789,7 @@ class PrimeGamingClaimer(BaseClaimer):
 
         if cfg.dryrun:
             logger.info("DRYRUN – skipped '%s'.", title)
+            self.notify_games.append({"title": title, "url": url, "status": "available (dry run)"})
             return
             
         # Ensure session hasn't expired mid-loop before processing the card
@@ -830,6 +853,7 @@ class PrimeGamingClaimer(BaseClaimer):
 
         if cfg.dryrun:
             logger.info("DRYRUN – skipped external '%s'.", title)
+            self.notify_games.append({"title": title, "url": url, "status": f"available (dry run, {platform or 'external'})"})
             return
 
         # Ensure session hasn't expired mid-loop before processing the card

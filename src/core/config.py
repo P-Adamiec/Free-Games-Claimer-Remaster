@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 # Load .env files (project root first, then data/config.env as fallback)
 # Docker passes env vars directly, so override=False means real env vars win.
-_root = Path(__file__).resolve().parent.parent
+_root = Path(__file__).resolve().parent.parent.parent
 _env_root = _root / ".env"
 _env_data = _root / "data" / "config.env"
 
@@ -55,8 +55,9 @@ class Config:
     timeout: int = _int("TIMEOUT", 60) * 1000          # ms
     login_timeout: int = _int("LOGIN_TIMEOUT", 180) * 1000  # ms
     vnc_login_timeout: int = _int("VNC_LOGIN_TIMEOUT", 180) # seconds
-    novnc_port: str | None = os.getenv("NOVNC_PORT")
+    novnc_port: str = os.getenv("NOVNC_PORT", "7080")
     vnc_ip: str = os.getenv("VNC_IP", "localhost")
+
     scheduler_hours: int = _int("SCHEDULER_HOURS", 12)
     scheduler_timezone: str = os.getenv("SCHEDULER_TIMEZONE", "UTC").strip() or "UTC"
     scheduler_fixed_times: str = os.getenv("SCHEDULER_FIXED_TIMES", "")
@@ -83,6 +84,7 @@ class Config:
     notify_errors: bool = _bool("NOTIFY_ERRORS", default=True)
     notify_claim_fails: bool = _bool("NOTIFY_CLAIM_FAILS", default=True)
     notify_login_request: bool = _bool("NOTIFY_LOGIN_REQUEST", default=True)
+    notify_test: bool = _bool("NOTIFY_TEST", default=False)
 
     # --- Epic Games ---
     eg_email: str | None = os.getenv("EG_EMAIL") or os.getenv("EMAIL")
@@ -130,6 +132,10 @@ class Config:
     indiegala_enable: bool = _bool("INDIEGALA_ENABLE", default=False)
     indiegala_email: str | None = os.getenv("INDIEGALA_EMAIL") or os.getenv("EMAIL")
     indiegala_password: str | None = os.getenv("INDIEGALA_PASSWORD") or os.getenv("PASSWORD")
+
+    # --- AliExpress ---
+    ae_email: str | None = os.getenv("AE_EMAIL") or os.getenv("EMAIL")
+    ae_password: str | None = os.getenv("AE_PASSWORD") or os.getenv("PASSWORD")
 
     # --- Unknown/Other Indirect Stores ---
     unknown_stores_enable: bool = _bool("UNKNOWN_STORES_ENABLE", default=False)

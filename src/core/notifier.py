@@ -2,10 +2,11 @@
 
 Supports two notification systems:
   - Discord webhooks (set DISCORD_WEBHOOK in your .env file)
-  - Apprise (supports Telegram, Slack, Email, and 80+ other services)
+  - Apprise (supports Telegram, Slack, Email, ntfy, and 80+ other services)
 
-Discord is tried first. If no Discord webhook is configured, it falls back to Apprise.
-If neither is set, notifications are silently skipped (the bot still works fine).
+If both DISCORD_WEBHOOK and NOTIFY are configured, notifications are sent to
+BOTH services in parallel. If neither is set, notifications are silently
+skipped (the bot still works fine).
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ async def send_discord(
 
 
 async def send_apprise(message: str, *, title: str | None = None) -> None:
-    """Send a notification via any Apprise-supported service (fallback)."""
+    """Send a notification via any Apprise-supported service."""
     notify_url = cfg.notify_url
     if not notify_url:
         logger.debug("NOTIFY not set – skipping Apprise notification.")
@@ -95,16 +96,22 @@ async def notify(
     screenshot_path: Path | None = None,
     title: str | None = None,
 ) -> None:
-    """Unified notification dispatcher – tries Discord first, then Apprise."""
-    try:
-        if cfg.discord_webhook:
-            await send_discord(message, screenshot_path=screenshot_path)
-        elif cfg.notify_url:
-            await send_apprise(message, title=title)
-        else:
-            logger.debug("No notification service configured.")
-    except Exception:
-        logger.exception("Failed to send notification")
+    """Unified notification dispatcher — sends to ALL configured services in parallel."""
+    tasks = []
+
+    if cfg.discord_webhook:
+        tasks.append(send_discord(message, screenshot_path=screenshot_path))
+    if cfg.notify_url:
+        tasks.append(send_apprise(message, title=title))
+
+    if not tasks:
+        logger.debug("No notification service configured.")
+        return
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            logger.exception("Failed to send notification", exc_info=result)
 
 
 def format_game_list(games: list[dict]) -> str:
@@ -116,3 +123,4 @@ def format_game_list(games: list[dict]) -> str:
         status = g.get("status", "?")
         lines.append(f"• **[{title}]({url})** — {status}")
     return "\n".join(lines)
+
