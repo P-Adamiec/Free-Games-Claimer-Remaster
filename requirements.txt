@@ -2,7 +2,7 @@
 nodriver>=0.50.3
 
 # Process cleanup (kill orphaned Chrome process trees)
-psutil>=6.0.0
+psutil>=7.2.2
 
 # Device fingerprints for AliExpress mobile check-in
 browserforge>=1.2.4
