@@ -22,3 +22,16 @@ Thumbs.db
 
 # Debug tools
 debug_*
+
+# AI assistants (local only, not committed)
+.claude/
+CLAUDE.md
+.gemini/
+GEMINI.md
+.cursor/
+.cursorrules
+.aider*
+
+# Reference dumps & temp files (TEMP_ prefix covers plan notes + reference dump)
+TEMP_*
+*.tmp

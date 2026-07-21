@@ -94,6 +94,15 @@ ALL_CLAIMERS: dict[str, tuple[str, object]] = {
     "aliexpress": ("AliExpress",   claim_aliexpress),
 }
 
+# Display name (e.g. "Prime Gaming") → canonical store key (e.g. "prime").
+_DISPLAY_TO_KEY: dict[str, str] = {disp: key for key, (disp, _) in ALL_CLAIMERS.items()}
+
+
+def _store_key(name: str) -> str:
+    """Map a display name or key to the canonical store key."""
+    return _DISPLAY_TO_KEY.get(name, (name or "").lower())
+
+
 # Accepted aliases → canonical name
 _ALIASES: dict[str, str] = {
     "steam":         "steam",
@@ -256,7 +265,8 @@ async def run_claimers() -> None:
                 aggregated_results.append(res)
         except Exception:
             logger.exception("✗ %s crashed", name)
-            await notify(f"{name} claimer crashed with an unhandled exception. Check logs.")
+            if cfg.store_notify_enabled(_store_key(name)):
+                await notify(f"{name} claimer crashed with an unhandled exception. Check logs.")
 
     # After standard claimers finish, check for pending GOG codes from Prime Gaming.
     # Only run if there are actually codes with status="claimed" waiting,
@@ -302,6 +312,9 @@ async def run_claimers() -> None:
         from src.core.notifier import format_game_list
         msg_parts = []
         for result in aggregated_results:
+            # Skip stores whose notifications are silenced (NOTIFY_SKIP_STORES).
+            if not cfg.store_notify_enabled(_store_key(result.get("store", ""))):
+                continue
             # Filter out games that were "existed" or "already redeemed", unless it's a dry run
             relevant_games = [
                 g for g in result["games"]

@@ -11,7 +11,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from src.core.claimer import BaseClaimer, now_str
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
-from src.core.notifier import notify, format_game_list
 from src.core.url_security import url_has_allowed_host
 
 logger = logging.getLogger("fgc.gog")
@@ -45,7 +44,7 @@ class GOGClaimer(BaseClaimer):
             logger.exception("Fatal error")
             # Send a notification about the crash if notifications are enabled
             if cfg.notify_errors:
-                await notify(f"gog failed: {exc}")
+                await self.notify(f"gog failed: {exc}")
         finally:
             # Always close the browser, even if there was an error
             await self.close_browser()
@@ -321,9 +320,13 @@ class GOGClaimer(BaseClaimer):
                     return False
                     
                 logged_in = await self._wait_for_vnc_login(
-                    _vnc_check_gog_2fa, 
+                    _vnc_check_gog_2fa,
                     timeout=180,
-                    custom_msg=f"GOG requires 2FA verification! Open http://{cfg.vnc_ip}:{cfg.novnc_port} to enter the code via VNC..."
+                    custom_msg=self._vnc_notice(
+                        "GOG — 2FA code needed",
+                        "GOG needs a 2FA verification code. Open the browser and enter it.",
+                        180,
+                    ),
                 )
                 if logged_in:
                     self.log_signed_in()

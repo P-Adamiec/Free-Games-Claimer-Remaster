@@ -15,7 +15,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from src.core.claimer import BaseClaimer, now_str
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
-from src.core.notifier import notify, format_game_list
 from src.core.url_security import url_has_allowed_host
 
 logger = logging.getLogger("fgc.epic")
@@ -86,7 +85,7 @@ class EpicGamesClaimer(BaseClaimer):
         except Exception as exc:
             logger.exception("Fatal error")
             if cfg.notify_errors:
-                await notify(f"epic-games failed: {exc}")
+                await self.notify(f"epic-games failed: {exc}")
         finally:
             # We DO NOT notify individually here anymore - we just return it to the orchestrator
             # (Exception: We still keep error notifications inside logic if needed, but summary is deferred)
@@ -121,6 +120,14 @@ class EpicGamesClaimer(BaseClaimer):
         # Navigate to Epic Store frontend to initialize cookies/session natively
         await self.page.get("https://store.epicgames.com/")
         await self.sleep(5)  # Give the SPA + web components time to hydrate
+
+        # Cloudflare can gate the store BEFORE login (looks like a failed "attempt 1/3" loop) — detect it and hand off to VNC.
+        if await self._human_challenge_present():
+            if not await self._wait_out_challenge("Epic Games"):
+                logger.warning("Epic security challenge not cleared in time – skipping.")
+                return
+            await self.page.get("https://store.epicgames.com/")
+            await self.sleep(4)
 
         async def _is_logged_in() -> bool:
             """Check login via multiple DOM signals (egs-navigation attribute can be unreliable)."""
@@ -208,18 +215,21 @@ class EpicGamesClaimer(BaseClaimer):
             return
 
         # Automated stealth login loop
+        challenge_blocked = False
+        mfa_manual = False
         for attempt in range(3):
             logger.warning("Not signed in – attempting automated login (attempt %d/3)…", attempt + 1)
-            
+
             if attempt > 0:
                 await self.page.get("https://store.epicgames.com/")
                 await self.sleep(3)
-                
+
             await self._navigate_organically_to_login()
             await self.sleep(3)
-            
+
             await self._do_stealth_login()
-            
+
+            otp_tried = False
             # Wait loop to detect auth completion or interstitial
             for wait_sec in range(120):
                 try:
@@ -230,7 +240,19 @@ class EpicGamesClaimer(BaseClaimer):
                 # We know auth is complete when Epic redirects us back to the store domain.
                 if url_has_allowed_host(curr_url, "store.epicgames.com"):
                     break
-                    
+
+                # 2FA code screen: auto-fill TOTP if EG_OTPKEY is set, else stop and let the user type it via VNC.
+                if await self._mfa_prompt_present():
+                    if cfg.eg_otpkey and not otp_tried:
+                        otp_tried = True
+                        await self._fill_totp()
+                        await self.sleep(2)
+                    elif not cfg.eg_otpkey:
+                        mfa_manual = True
+                        break
+                    await self.sleep(1)
+                    continue
+
                 if "login/review" in curr_url:
                     logger.info("Account review interstitial detected, auto-confirming...")
                     try:
@@ -247,7 +269,7 @@ class EpicGamesClaimer(BaseClaimer):
                             await self.sleep(3)
                     except Exception:
                         pass
-                    
+
                 # Check for "Maybe later" 2FA setup interstitial directly via DOM
                 try:
                     clicked_maybe = await self.page.evaluate('''
@@ -263,10 +285,18 @@ class EpicGamesClaimer(BaseClaimer):
                         await self.sleep(3)
                 except Exception:
                     pass
-                
-                if wait_sec == 3:
-                    logger.warning(f"Waiting for login to finish. If Captcha appeared, open http://{cfg.vnc_ip}:{cfg.novnc_port} and solve it via VNC! (2 min limit)")
+
+                # Captcha/challenge can't be auto-solved — stop retrying and hand off to VNC below.
+                if wait_sec >= 4 and await self._human_challenge_present():
+                    logger.warning("Captcha / security challenge detected during Epic login.")
+                    challenge_blocked = True
+                    break
+
                 await self.sleep(1)
+
+            # On a manual-code screen, don't navigate away — hand off to VNC below.
+            if mfa_manual:
+                break
 
             # verify success
             await self.page.get(URL_CLAIM)
@@ -275,8 +305,69 @@ class EpicGamesClaimer(BaseClaimer):
                 self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
                 self.log_signed_in()
                 return
-        
-        logger.warning("Automated login failed after 3 attempts.")
+
+            if challenge_blocked:
+                break  # retrying won't clear a captcha – go straight to VNC help
+
+        # Automated login failed (captcha/2FA/repeated) — notify and wait for the user to finish via VNC.
+        if mfa_manual:
+            reason = " (2FA code needed)"
+        elif challenge_blocked:
+            reason = " (captcha/challenge)"
+        else:
+            reason = " after 3 attempts"
+        logger.warning("Automated Epic login failed%s – requesting manual login via VNC.", reason)
+        if mfa_manual:
+            custom_msg = self._vnc_notice(
+                "Epic Games — 2FA code needed",
+                "Enter the 6-digit code Epic sent to your email or phone (or from your authenticator). "
+                "If a 'One more step' security check appears, complete it too.",
+            )
+        else:
+            custom_msg = self._vnc_notice(
+                "Epic Games — login needs you",
+                "A captcha or security challenge is blocking automated sign-in. Open the browser, solve it and finish logging in.",
+            )
+        if await self._wait_for_vnc_login(_is_logged_in, custom_msg=custom_msg):
+            self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
+            self.log_signed_in()
+            return
+
+        logger.warning("Epic login still not completed after VNC wait – skipping.")
+
+    async def _mfa_prompt_present(self) -> bool:
+        """True on Epic's 2FA code screen or method picker (email/SMS/authenticator)."""
+        try:
+            return bool(await self.page.evaluate("""
+                (() => {
+                    if (document.querySelector('input[name="code-input-0"]')) return true;
+                    return location.href.toLowerCase().includes('/id/login/mfa');
+                })()
+            """))
+        except Exception:
+            return False
+
+    async def _fill_totp(self) -> bool:
+        """Auto-enter the authenticator (TOTP) code from EG_OTPKEY, then submit."""
+        if not cfg.eg_otpkey:
+            return False
+        try:
+            otp_input = await self.page.find('input[name="code-input-0"]', timeout=5)
+            if not otp_input:
+                return False
+            otp_code = pyotp.TOTP(cfg.eg_otpkey).now()
+            logger.debug("Entering MFA (TOTP) code")
+            await otp_input.clear_input()
+            await self.sleep(0.5)
+            await otp_input.send_keys(otp_code)
+            await self.sleep(1)
+            submit = await self.page.find('button[type="submit"]', timeout=5)
+            if submit:
+                await submit.click()
+                await self.sleep(3)
+            return True
+        except Exception:
+            return False
 
     async def _navigate_organically_to_login(self) -> None:
         """Navigates to the login page mimicking a click from the store, preserving Referer headers."""
@@ -353,24 +444,10 @@ class EpicGamesClaimer(BaseClaimer):
             await sign_in_btn.click()
             await self.sleep(3)
 
+        # Authenticator (TOTP) auto-fill; email/SMS codes are handled in the loop.
         if cfg.eg_otpkey:
-            # Handle MFA natively
             await self.sleep(3)
-            try:
-                otp_input = await self.page.find('input[name="code-input-0"]', timeout=5)
-                if otp_input:
-                    otp_code = pyotp.TOTP(cfg.eg_otpkey).now()
-                    logger.debug("Entering MFA code")
-                    await otp_input.clear_input()
-                    await self.sleep(0.5)
-                    await otp_input.send_keys(otp_code)
-                    await self.sleep(1)
-                    submit = await self.page.find('button[type="submit"]', timeout=5)
-                    if submit:
-                        await submit.click()
-                        await self.sleep(3)
-            except Exception:
-                pass  # No MFA prompt
+            await self._fill_totp()
 
     # ------------------------------------------------------------------
     # Detect free games
@@ -699,7 +776,7 @@ class EpicGamesClaimer(BaseClaimer):
                 notify_game["status"] = "failed"
                 await self.take_screenshot(f"epic_failed_{game_id}")
                 if cfg.notify_claim_fails:
-                    await notify(f"epic-games: failed to claim {title}")
+                    await self.notify(f"epic-games: failed to claim {title}")
 
             await session.commit()
 

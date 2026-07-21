@@ -18,7 +18,11 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ── Install all system dependencies in a single RUN to reduce image layers ──
-RUN apt-get update \
+# Harden apt against download hangs first: force IPv4 (apt otherwise waits on
+# a slow IPv6 timeout inside Docker), and add retries + timeouts so a stuck
+# mirror aborts and retries instead of hanging the whole build indefinitely.
+RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/99fgc-net \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         # Core tools: curl for downloads, ca-certificates for HTTPS, gnupg for GPG keys
         curl ca-certificates gnupg \
@@ -55,6 +59,21 @@ RUN apt-get update \
        else \
            apt-get install --no-install-recommends -y chromium; \
        fi \
+    # Neutralise xdg-open (installed as a hard dependency of Chrome): make it a
+    # silent no-op so Chrome's external-protocol handler for app schemes
+    # (aliexpress://, intent://, alipay://, …) can never pop the blocking
+    # "Open xdg-open?" system dialog seen in VNC. Complements the in-page JS
+    # blocking in the AliExpress module.
+    && printf '#!/bin/sh\nexit 0\n' > /usr/bin/xdg-open \
+    && chmod +x /usr/bin/xdg-open \
+    # Suppress Chrome's "Open xdg-open?" confirmation dialog itself. Neutralising
+    # xdg-open only makes the launch a no-op AFTER the user clicks — the prompt is
+    # shown by Chrome BEFORE that. The AutoLaunchProtocolsFromOrigins managed
+    # policy tells Chrome to launch these AliExpress/Alibaba app schemes without
+    # prompting; combined with the no-op xdg-open above, the launch does nothing.
+    && mkdir -p /etc/opt/chrome/policies/managed /etc/chromium/policies/managed \
+    && printf '%s\n' '{"AutoLaunchProtocolsFromOrigins":[{"protocol":"aliexpress","allowed_origins":["*"]},{"protocol":"aliexpresshd","allowed_origins":["*"]},{"protocol":"aecmd","allowed_origins":["*"]},{"protocol":"alibaba","allowed_origins":["*"]},{"protocol":"alipay","allowed_origins":["*"]},{"protocol":"alipays","allowed_origins":["*"]},{"protocol":"tmall","allowed_origins":["*"]},{"protocol":"taobao","allowed_origins":["*"]},{"protocol":"market","allowed_origins":["*"]},{"protocol":"intent","allowed_origins":["*"]}]}' \
+       | tee /etc/opt/chrome/policies/managed/fgc-autolaunch.json /etc/chromium/policies/managed/fgc-autolaunch.json > /dev/null \
     # Clean up package manager cache to reduce image size
     && apt-get purge -y gnupg \
     && apt-get autoremove -y \

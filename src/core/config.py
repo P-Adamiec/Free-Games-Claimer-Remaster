@@ -39,6 +39,20 @@ def _int(key: str, default: int = 0) -> int:
         return default
 
 
+# Aliases so NOTIFY_SKIP_STORES accepts the same names as the CLI/STORES.
+_STORE_ALIASES = {"ae": "aliexpress", "amazon": "prime", "gp": "gamerpower"}
+
+
+def _skip_stores(key: str) -> set:
+    """Read a comma-separated store denylist into a set of canonical store keys."""
+    out = set()
+    for s in os.getenv(key, "").split(","):
+        s = s.strip().lower()
+        if s:
+            out.add(_STORE_ALIASES.get(s, s))
+    return out
+
+
 class Config:
     """All application settings in one place.
     
@@ -53,10 +67,14 @@ class Config:
     width: int = _int("WIDTH", 1280)
     height: int = _int("HEIGHT", 720)
     timeout: int = _int("TIMEOUT", 60) * 1000          # ms
-    login_timeout: int = _int("LOGIN_TIMEOUT", 180) * 1000  # ms
     vnc_login_timeout: int = _int("VNC_LOGIN_TIMEOUT", 180) # seconds
     novnc_port: str = os.getenv("NOVNC_PORT", "7080")
     vnc_ip: str = os.getenv("VNC_IP", "localhost")
+
+    @property
+    def vnc_url(self) -> str:
+        """One-click noVNC link for notifications (autoconnect opens the session)."""
+        return f"http://{self.vnc_ip}:{self.novnc_port}/?autoconnect=true"
 
     scheduler_hours: int = _int("SCHEDULER_HOURS", 12)
     scheduler_timezone: str = os.getenv("SCHEDULER_TIMEZONE", "UTC").strip() or "UTC"
@@ -85,6 +103,12 @@ class Config:
     notify_claim_fails: bool = _bool("NOTIFY_CLAIM_FAILS", default=True)
     notify_login_request: bool = _bool("NOTIFY_LOGIN_REQUEST", default=True)
     notify_test: bool = _bool("NOTIFY_TEST", default=False)
+    # Stores whose notifications are silenced (they still run and claim).
+    notify_skip_stores: set = _skip_stores("NOTIFY_SKIP_STORES")
+
+    def store_notify_enabled(self, store_name: str | None) -> bool:
+        """False when the store's notifications are silenced via NOTIFY_SKIP_STORES."""
+        return (store_name or "").lower() not in self.notify_skip_stores
 
     # --- Epic Games ---
     eg_email: str | None = os.getenv("EG_EMAIL") or os.getenv("EMAIL")
@@ -136,6 +160,10 @@ class Config:
     # --- AliExpress ---
     ae_email: str | None = os.getenv("AE_EMAIL") or os.getenv("EMAIL")
     ae_password: str | None = os.getenv("AE_PASSWORD") or os.getenv("PASSWORD")
+    # Bot-flag guard: skip collecting under AE_MIN_COINS, then wait AE_FLAG_WAIT (> ~7-min penalty) and retry AE_FLAG_RETRIES times.
+    ae_min_coins: int = _int("AE_MIN_COINS", 2)
+    ae_flag_retries: int = _int("AE_FLAG_RETRIES", 3)
+    ae_flag_wait: int = _int("AE_FLAG_WAIT", 480)  # seconds (> ~7-min penalty)
 
     # --- Unknown/Other Indirect Stores ---
     unknown_stores_enable: bool = _bool("UNKNOWN_STORES_ENABLE", default=False)

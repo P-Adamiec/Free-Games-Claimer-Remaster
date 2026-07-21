@@ -18,7 +18,6 @@ from src.core.config import cfg
 from src.core.database import async_session, ClaimedGame, get_or_create
 from src.core.url_security import url_has_allowed_host
 import logging
-from src.core.notifier import notify, format_game_list
 from src.core.claimer import filenamify
 
 logger = logging.getLogger("fgc.gamerpower")
@@ -105,7 +104,7 @@ class GamerPowerClaimer(BaseClaimer):
         except Exception as exc:
             logger.exception("Fatal error in GamerPower")
             if cfg.notify_errors:
-                await notify(f"gamerpower failed: {exc}")
+                await self.notify(f"gamerpower failed: {exc}")
         finally:
             # Summary notifications deferred to main.py
             await self.close_browser()

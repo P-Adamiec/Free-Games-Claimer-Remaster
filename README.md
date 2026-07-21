@@ -15,9 +15,9 @@ Automatically claims free games on:
 - <img alt="logo epic-games" src="https://github.com/user-attachments/assets/82e9e9bf-b6ac-4f20-91db-36d2c8429cb6" width="20" align="middle" /> **Epic Games Store** – weekly free games
 - <img alt="logo prime-gaming" src="https://github.com/user-attachments/assets/7627a108-20c6-4525-a1d8-5d221ee89d6e" width="20" align="middle" /> **Amazon Prime Gaming** – monthly Prime Gaming catalogue + GOG key redemption
 - <img alt="logo gog" src="https://github.com/user-attachments/assets/49040b50-ee14-4439-8e3c-e93cafd7c3a5" width="20" align="middle" /> **GOG** – periodic free giveaways
-- <img alt="logo aliexpress" src="https://www.aliexpress.com/favicon.ico" width="20" align="middle" /> **AliExpress** – automated daily check-in verification for check-in points
+- <img alt="logo aliexpress" src="https://www.aliexpress.com/favicon.ico" width="20" align="middle" /> **AliExpress** – automated daily check-in that collects coins, using a real-device mobile fingerprint to stay undetected and reading the balance from the coin API
 
-**Gamerpower API** routing to indirect stores:
+**Gamerpower API** routing to indirect stores (Still under development):
 - <img alt="logo fanatical" src="https://www.fanatical.com/favicon.ico" width="20" align="middle" /> **Fanatical** – auto-bypasses cookie banners and hooks Steam accounts to grab weekly PC drops.
 - <img alt="logo itchio" src="https://itch.io/favicon.ico" width="20" align="middle" /> **Itch.io** – DRM-free indie giveaways
 - <img alt="logo indiegala" src="https://www.indiegala.com/favicon.ico" width="20" align="middle" /> **IndieGala** – free Steam keys & DRM-free games
@@ -108,15 +108,19 @@ Options are set via environment variables in `.env`:
 | `WIDTH` | `1280` | Browser/VNC screen width. |
 | `HEIGHT` | `720` | Browser/VNC screen height. |
 | `NOVNC_PORT` | `7080` | noVNC web access port. |
-| `VNC_IP` | `localhost`| Custom IP/Hostname for VNC notification links. |
-| `SCHEDULER_HOURS`| `12` | Hours interval for the built-in scheduler runs. |
+| `VNC_IP` | `localhost`| Host for VNC notification links. Alerts include a one-click `http://<VNC_IP>:<NOVNC_PORT>/?autoconnect=true`. |
+| `VNC_PASSWORD` | | Optional password for VNC access (empty = no password). |
+| `SCHEDULER_HOURS`| `12` | Interval in hours between automatic claiming runs. Accepts any positive number (for example: `1`, `12`, `24`, `72`). Set `0` to disable interval runs. |
 | `SCHEDULER_TIMEZONE` | `UTC` | IANA timezone used for fixed daily scheduler times. |
-| `SCHEDULER_FIXED_TIMES` | | Optional comma-separated daily run times in 24-hour `HH:MM` format. Example: `17:00,21:30`. |
+| `SCHEDULER_FIXED_TIMES` | | Optional comma-separated daily run times in 24-hour `HH:MM` format (`17:00,21:30`). Set `SCHEDULER_HOURS=0` if you want *only* these fixed daily times without interval runs. |
 | `RUN_ON_STARTUP` | `true` | Run once immediately when the container/application starts. |
 | `VNC_LOGIN_TIMEOUT`| `180` | Seconds to wait for you to log in via VNC manually. |
+| `TIMEOUT` | `60` | Advanced: seconds to wait for a page element before giving up. |
+| `EMAIL` | | Default login email used by ALL stores unless a store-specific `*_EMAIL` overrides it. |
+| `PASSWORD` | | Default login password used by ALL stores unless a store-specific `*_PASSWORD` overrides it. |
 | `EG_EMAIL` | | Epic Games login email. |
 | `EG_PASSWORD` | | Epic Games login password. |
-| `EG_OTPKEY` | | Epic Games 2FA OTP key. |
+| `EG_OTPKEY` | | Epic Games authenticator (TOTP) key — auto-filled. Email/SMS codes are entered manually via VNC. |
 | `EG_PARENTALPIN` | | Epic Games Parental Controls PIN. |
 | `PG_EMAIL` | | Prime Gaming (Amazon) email. |
 | `PG_PASSWORD` | | Prime Gaming password. |
@@ -134,6 +138,9 @@ Options are set via environment variables in `.env`:
 | `STEAM_PASSWORD` | | Steam password. |
 | `AE_EMAIL` | | AliExpress login email. |
 | `AE_PASSWORD` | | AliExpress login password. |
+| `AE_MIN_COINS` | `2` | Skip the daily check-in when it offers fewer coins than this (protects against the 1-coin bot-flag state). |
+| `AE_FLAG_RETRIES` | `3` | How many times to wait and re-approach the coin page when the offer is capped. |
+| `AE_FLAG_WAIT` | `480` | Seconds to wait between retries (kept above AliExpress' ~7-min penalty so one wait clears it). |
 | `STORES` | *(all)* | Comma-separated list of stores to run. |
 | `RESET_DB_GAMES` | `false` | Retroactively erase any database claims recorded within the last 7 days upon execution. Assists in clearing false positives. |
 | `FANATICAL_ENABLE`| `false`| Enable Fanatical claiming via GamerPower. |
@@ -148,6 +155,7 @@ Options are set via environment variables in `.env`:
 | `INDIEGALA_PASSWORD`| | IndieGala account password. |
 | `UNKNOWN_STORES_ENABLE`| `false`| Open unsupported external stores for manual claiming via VNC. |
 | `BROWSER_DIR` | `data/browser` | Browser profile directory (persists cookies/sessions). |
+| `SCREENSHOTS_DIR` | `data/screenshots` | Directory where debug/failure screenshots are saved. |
 | `DEBUG` | `false` | Shows verbose actions the bot takes. |
 | `DRYRUN`| `false` | Simulate a run without claiming games. Detects available giveaways and sends a summary report. |
 | `DISCORD_WEBHOOK` | | Discord webhook URL for notifications. |
@@ -157,32 +165,40 @@ Options are set via environment variables in `.env`:
 | `NOTIFY_ERRORS` | `true` | Set to false to disable fatal error alerts. (Applies to all services) |
 | `NOTIFY_CLAIM_FAILS`| `true` | Set to false to disable alerts for unclaimable games. (Applies to all services) |
 | `NOTIFY_LOGIN_REQUEST`| `true` | Set to false to disable VNC login request pings. (Applies to all services) |
+| `NOTIFY_SKIP_STORES` | | Comma-separated store keys whose notifications are silenced (they still run/claim). Accepts aliases (`ae`, `amazon`, `gp`). Example: `aliexpress`. |
 
 ### Scheduler
 
-The application can run on an interval and optionally at fixed daily times.
+The application supports three scheduling modes: running on a recurring interval (`SCHEDULER_HOURS`), running at specific daily clock times (`SCHEDULER_FIXED_TIMES`), or combining both.
 
-```ini
-SCHEDULER_HOURS=12
-SCHEDULER_TIMEZONE=UTC
-SCHEDULER_FIXED_TIMES=17:00,21:30
-RUN_ON_STARTUP=true
-```
+### Scheduling Modes & Interaction
 
-`SCHEDULER_HOURS` runs the claim process every configured number of hours.
+1. **Interval-Only Mode (Default)**: Runs periodically every `n` hours.
+   ```ini
+   SCHEDULER_HOURS=12
+   SCHEDULER_FIXED_TIMES=
+   ```
+   - `SCHEDULER_HOURS` accepts any positive number (e.g. `1`, `12`, `24`, `48`, `72`).
+   - The timer counts exactly `SCHEDULER_HOURS` from when the container/application started.
 
-`SCHEDULER_FIXED_TIMES` adds optional daily runs at specific 24-hour `HH:MM` times. Multiple times can be separated by commas. This is useful for running shortly after known free-game release windows.
+2. **Fixed Daily Times Mode**: Runs *only* at specific wall-clock times every day (ideal for timing drop windows like 17:00 Epic Games releases). To use only fixed daily times without interval runs, set `SCHEDULER_HOURS=0`.
+   ```ini
+   SCHEDULER_HOURS=0
+   SCHEDULER_TIMEZONE=Europe/Berlin
+   SCHEDULER_FIXED_TIMES=17:00,21:30
+   ```
+   - `SCHEDULER_FIXED_TIMES` accepts comma-separated 24-hour `HH:MM` strings.
+   - `SCHEDULER_TIMEZONE` specifies the IANA timezone used for matching these times (`UTC`, `Europe/Berlin`, `America/New_York`), automatically accounting for Daylight Saving Time transitions.
 
-`SCHEDULER_TIMEZONE` controls the timezone used for fixed daily times. Use an IANA timezone name. Examples: `Europe/Berlin`, `America/New_York`, `Asia/Tokyo`. See the IANA Time Zone Database or Python `zoneinfo` documentation for valid names. Local wall-clock schedules follow the configured timezone, including DST transitions.
+3. **Combined Mode**: Runs *both* every `SCHEDULER_HOURS` **and** at each `SCHEDULER_FIXED_TIMES` independently.
+   ```ini
+   SCHEDULER_HOURS=24
+   SCHEDULER_TIMEZONE=Europe/Berlin
+   SCHEDULER_FIXED_TIMES=17:00
+   ```
 
-Example for Germany:
-
-```ini
-SCHEDULER_TIMEZONE=Europe/Berlin
-SCHEDULER_FIXED_TIMES=17:00
-```
-
-This runs once per day at 17:00 Berlin time. If `SCHEDULER_HOURS` is also configured, interval runs continue as well.
+> [!NOTE]
+> By default, `RUN_ON_STARTUP=true` is enabled, so the bot always performs **one initial check immediately on startup**, regardless of whether you configure `SCHEDULER_HOURS` or `SCHEDULER_FIXED_TIMES`. Set `RUN_ON_STARTUP=false` if you want it to wait until the first scheduled trigger.
 
 ### Selective module execution
 
@@ -224,15 +240,16 @@ free-games-claimer-remaster/
         ├── prime.py        # Amazon Prime Gaming
         ├── gog.py          # GOG (+ GOG code redemption from Prime)
         ├── steam.py        # Steam (SteamDB scraping)
+        ├── aliexpress.py   # AliExpress check-in & coin collecting
         └── gamerpower.py   # GamerPower API (Fanatical, Itch.io, IndieGala, Alienware)
 ```
 
 ### How it works
 
-1. **Scheduler** (`main.py`) runs every 12 hours
+1. **Scheduler** (`main.py`) supports recurring interval timers (`SCHEDULER_HOURS`), fixed daily drop windows (`SCHEDULER_FIXED_TIMES`), combined execution, and initial startup checks (`RUN_ON_STARTUP`).
 2. Each store module **starts its own browser** with an isolated profile, securely recalling session cookies (`--restore-last-session`).
 3. **Login detection** checks the page DOM (not just cookies/DB).
-4. **Stealth profiles** are injected via `nodriver` directly via Official Chrome binaries before any page loads.
+4. **Stealth profiles** are injected via Chrome DevTools Protocol (`CDP`) `addScriptToEvaluateOnNewDocument` right before document navigation, bypassing typical `page.evaluate` fingerprint detectors.
 5. **Game discovery** utilizes specialized scrapers (like reading SteamDB to circumvent typical lists).
 6. **Robust Database Storage** verifies historical success in `fgc.db` (SQLite) to block aggressive overlapping.
 7. **Clean Notifications** dispatch to you dynamically based on the toggles configured in the `.env` settings.

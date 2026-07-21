@@ -87,7 +87,8 @@ async def send_apprise(message: str, *, title: str | None = None) -> None:
         None,
         lambda: ap.notify(body=message, title=title or "Free Games Claimer"),
     )
-    logger.info("Apprise notification sent.")
+    # debug, not info: apprise already logs each target — avoids a duplicate-looking line.
+    logger.debug("Apprise notification sent.")
 
 
 async def notify(

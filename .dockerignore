@@ -5,3 +5,18 @@ data/
 .venv/
 .git/
 *.md
+
+# VCS & tooling (not needed in the image)
+.gitignore
+.dockerignore
+.github/
+.vscode/
+.idea/
+.claude/
+.gemini/
+.cursor/
+
+# Reference dumps, temp, logs (TEMP_ covers TEMP_ORIGINAL_PROJECT/, ~60 MB)
+TEMP_*
+debug_*
+*.log

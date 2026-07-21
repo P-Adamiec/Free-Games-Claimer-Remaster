@@ -1,6 +1,12 @@
 # Core browser automation
 nodriver>=0.50.3
 
+# Process cleanup (kill orphaned Chrome process trees)
+psutil>=6.0.0
+
+# Device fingerprints for AliExpress mobile check-in
+browserforge>=1.2.4
+
 # Database
 sqlalchemy[asyncio]>=2.0.51
 aiosqlite>=0.22.1
