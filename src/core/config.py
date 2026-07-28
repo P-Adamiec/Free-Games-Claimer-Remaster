@@ -61,7 +61,9 @@ class Config:
     """
 
     # --- General ---
-    debug: bool = _bool("DEBUG")
+    debug: bool = _bool("DEBUG", default=True)
+    # Internals of third-party libraries (CDP frames, HTTP handshakes, SQL). Separate from DEBUG.
+    debug_libs: bool = _bool("DEBUG_LIBS", default=False)
     dryrun: bool = _bool("DRYRUN")
     show: bool = _bool("SHOW", default=True)
     width: int = _int("WIDTH", 1280)
@@ -100,7 +102,9 @@ class Config:
     notify_url: str | None = os.getenv("NOTIFY")  # apprise URL fallback
     notify_summary: bool = _bool("NOTIFY_SUMMARY", default=True)
     notify_errors: bool = _bool("NOTIFY_ERRORS", default=True)
-    notify_claim_fails: bool = _bool("NOTIFY_CLAIM_FAILS", default=True)
+    notify_claim_fails: bool = _bool("NOTIFY_CLAIM_FAILS", default=False)
+    notify_already_claimed: bool = _bool("NOTIFY_ALREADY_CLAIMED", default=False)
+    notify_updates: bool = _bool("NOTIFY_UPDATES", default=True)
     notify_login_request: bool = _bool("NOTIFY_LOGIN_REQUEST", default=True)
     notify_test: bool = _bool("NOTIFY_TEST", default=False)
     # Stores whose notifications are silenced (they still run and claim).
@@ -115,6 +119,15 @@ class Config:
     eg_password: str | None = os.getenv("EG_PASSWORD") or os.getenv("PASSWORD")
     eg_otpkey: str | None = os.getenv("EG_OTPKEY")
     eg_parentalpin: str | None = os.getenv("EG_PARENTALPIN")
+    # Epic's weekly mobile giveaways (claimed on the same store pages as the PC games).
+    eg_mobile: bool = _bool("EG_MOBILE", default=True)
+    eg_mobile_platforms: str = os.getenv("EG_MOBILE_PLATFORMS", "android,ios")
+
+    @property
+    def eg_mobile_platform_list(self) -> list[str]:
+        """EG_MOBILE_PLATFORMS as a clean list, ignoring anything but android/ios."""
+        wanted = [p.strip().lower() for p in self.eg_mobile_platforms.split(",")]
+        return [p for p in wanted if p in ("android", "ios")]
 
     # --- Prime Gaming ---
     pg_email: str | None = os.getenv("PG_EMAIL") or os.getenv("EMAIL")

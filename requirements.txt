@@ -2,7 +2,7 @@
 nodriver>=0.50.3
 
 # Process cleanup (kill orphaned Chrome process trees)
-psutil>=6.0.0
+psutil>=7.2.2
 
 # Device fingerprints for AliExpress mobile check-in
 browserforge>=1.2.4
@@ -12,14 +12,14 @@ sqlalchemy[asyncio]>=2.0.51
 aiosqlite>=0.22.1
 
 # Notifications
-apprise>=1.11.0
+apprise>=1.12.0
 
 # Retry logic
 tenacity>=9.1.4
 
 # Scheduler
 APScheduler>=3.11.3
-tzdata>=2026.2
+tzdata>=2026.3
 
 # OTP / 2FA
 pyotp>=2.10.0
@@ -32,3 +32,6 @@ rich>=15.0.0
 
 # HTTP client
 httpx>=0.28.1
+
+# Tests (development only, not needed to run the bot)
+pytest>=8.4.0

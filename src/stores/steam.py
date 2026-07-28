@@ -27,10 +27,6 @@ URL_LOGIN = "https://store.steampowered.com/login/"
 class SteamClaimer(BaseClaimer):
     store_name = "steam"
 
-    def _normalize_title(self, title: str) -> str:
-        """Strip non-alphanumeric chars and lowercase for fuzzy matching."""
-        return re.sub(r'[^a-z0-9]', '', str(title).lower())
-
     async def run(self) -> None:
         """Main entry point: find free Steam games and claim them.
         
@@ -106,11 +102,11 @@ class SteamClaimer(BaseClaimer):
 
             html_raw = await self.page.evaluate("document.documentElement.outerHTML")
             html = html_raw if isinstance(html_raw, str) else ""
-            try:
-                with open("/fgc/data/steamdb_dump.html", "w", encoding="utf-8") as f:
-                    f.write(html)
-            except Exception as e:
-                logger.error("Failed to dump SteamDB HTML: %s", e)
+            if cfg.debug:
+                try:
+                    (cfg._data_dir / "steamdb_dump.html").write_text(html, encoding="utf-8")
+                except Exception as e:
+                    logger.debug("Failed to dump SteamDB HTML: %s", e)
             if not html:
                 logger.warning("SteamDB page returned empty content")
                 return []
@@ -129,6 +125,7 @@ class SteamClaimer(BaseClaimer):
         - "Free to Keep" (green) or "Play For Free" (orange) text
         """
         games = []
+        skipped: list[str] = []
 
         # Split HTML by the SteamDB card class to strictly isolate each game
         cards = html.split('class="span4 panel-sale')
@@ -146,10 +143,10 @@ class SteamClaimer(BaseClaimer):
             store_url = store_match.group(1)
             app_id = store_match.group(2)
 
-            # Check if this specific card has "Free to Keep" or "100%"
-            has_free_to_keep = bool(re.search(r'(?i)Free to Keep|100%', card_html))
-
-            if not has_free_to_keep:
+            # Match the real green badge class, not free "Free to Keep" text (which also
+            # appears in the page's FAQ and mislabels Play-For-Free cards like ICARUS).
+            if "cat-free-to-keep" not in card_html:
+                skipped.append(f"{app_id}:not-free-to-keep")
                 continue
 
             # Extract title from <b> or <h1>..<h6> tags
@@ -158,6 +155,7 @@ class SteamClaimer(BaseClaimer):
 
             # Fastly discard obvious incorrectly grabbed global links (e.g. Counter Strike 2 bug where title becomes steamdb.info)
             if "steamdb.info" in title:
+                skipped.append(f"{app_id}:bad-title")
                 continue
 
             games.append({
@@ -167,7 +165,8 @@ class SteamClaimer(BaseClaimer):
                 "source": "steamdb",
             })
 
-        logger.debug("SteamDB: %d 'Free to Keep' game(s)", len(games))
+        logger.debug("SteamDB: %d card(s) parsed, %d 'Free to Keep', skipped: %s",
+                     len(cards) - 1, len(games), skipped or "none")
         return games
 
     # ------------------------------------------------------------------
@@ -349,7 +348,7 @@ class SteamClaimer(BaseClaimer):
             current_url = await self.page.evaluate("window.location.href")
             
             # Login is complete when we reach the store domain
-            # (checking "/login" not in url was fragile — CAPTCHA/challenge redirects broke the loop)
+            # (checking "/login" not in url was fragile, CAPTCHA/challenge redirects broke the loop)
             if url_has_allowed_host(current_url, "store.steampowered.com") and "/login" not in current_url:
                 logger.debug("Login redirect detected, Steam Guard not needed or already passed")
                 return
@@ -376,7 +375,7 @@ class SteamClaimer(BaseClaimer):
                 logger.warning("⚠ Steam Guard detected! Open %s to enter the code via VNC or approve on your phone. (Waiting up to 2 min)", cfg.vnc_url)
                 if cfg.notify_login_request:
                     await self.notify(self._vnc_notice(
-                        "Steam — Steam Guard code needed",
+                        "Steam: Steam Guard code needed",
                         "Enter the Steam Guard code in the browser, or approve the login on your Steam mobile app.",
                         120,
                     ))
@@ -422,7 +421,7 @@ class SteamClaimer(BaseClaimer):
             if resolved_id:
                 app_id = resolved_id
         elif source == "gamerpower":
-            logger.info("⏭️ GamerPower redirect didn't land on Steam store: %s — skipping", current_url)
+            logger.info("⏭️ GamerPower redirect didn't land on Steam store: %s, skipping", current_url)
             async with async_session() as session:
                 await get_or_create(
                     session, store="steam", user=self.user or "unknown",
@@ -491,11 +490,11 @@ class SteamClaimer(BaseClaimer):
 
         # Check if this is a pure Free-to-Play game with nothing to claim.
         # IMPORTANT: DLC for F2P games (e.g. World of Warships DLC) can be
-        # temporarily free to keep — those WILL have an "Add to Account" button.
+        # temporarily free to keep, those WILL have an "Add to Account" button.
         # Only skip if there's NO claim button at all.
         is_unclaimed_f2p = await self.page.evaluate('''
             (() => {
-                // If there's any claim button or form, this IS claimable — don't skip
+                // If there's any claim button or form, this IS claimable, don't skip
                 const freeBtn = document.querySelector('#freeGameBtn');
                 if (freeBtn) return false;
                 const addBtn = document.querySelector('[data-action="add_to_account"]');
@@ -515,7 +514,7 @@ class SteamClaimer(BaseClaimer):
                     if (t.includes('free') || t.includes('install') || t.includes('add')) return false;
                 }
 
-                // No claim button found — check if it's just a F2P title
+                // No claim button found, check if it's just a F2P title
                 const purchaseArea = document.querySelector('.game_area_purchase_game');
                 if (purchaseArea) {
                     const text = purchaseArea.textContent || '';
@@ -597,7 +596,7 @@ class SteamClaimer(BaseClaimer):
 
         if not price_info.get("hasFreeBlock") and price_info.get("hasPaidBlock"):
             paid_price = price_info.get("paidPrice", "unknown")
-            logger.warning("⚠️ SKIPPING '%s' — item is NOT free (price: %s). "
+            logger.warning("⚠️ SKIPPING '%s': item is NOT free (price: %s). "
                            "Will not purchase paid content.", page_title, paid_price)
             notify_game["status"] = "skipped:paid"
             await self.take_screenshot(f"steam_paid_skip_{filenamify(page_title)}")
@@ -627,7 +626,7 @@ class SteamClaimer(BaseClaimer):
                            (text.includes('Free') && !text.includes('Free Weekend'));
                 }
 
-                // 1. Try data-action="add_to_account" — but only in a free context
+                // 1. Try data-action="add_to_account", but only in a free context
                 const addBtn = document.querySelector('[data-action="add_to_account"]');
                 if (addBtn) {
                     // Walk up to find the purchase block and verify it's free
@@ -637,7 +636,7 @@ class SteamClaimer(BaseClaimer):
                         addBtn.click();
                         return { method: 'add_to_account' };
                     }
-                    // Standalone add_to_account (common on free DLC pages) — safe to click
+                    // Standalone add_to_account (common on free DLC pages), safe to click
                     if (!parent) {
                         addBtn.click();
                         return { method: 'add_to_account_standalone' };
@@ -686,7 +685,7 @@ class SteamClaimer(BaseClaimer):
             notify_game["status"] = "failed"
             return
 
-        logger.info("Clicked claim button (%s) for '%s', verifying...", method, page_title)
+        logger.debug("Clicked claim button (%s) for '%s', verifying...", method, page_title)
         await self.sleep(5)
 
         # Check if Steam shows an error after the claim attempt
@@ -818,7 +817,7 @@ class SteamClaimer(BaseClaimer):
             await self.sleep(5)
             
             # Go back to the DLC page
-            logger.info("Returning to DLC page...")
+            logger.debug("Returning to DLC page...")
             await self.page.get(dlc_url)
             await self.sleep(4)
             return True

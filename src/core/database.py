@@ -8,6 +8,7 @@ The database stores: game title, which store it came from, who claimed it,
 any redemption codes, and timestamps.
 """
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import String, DateTime, Text, func
@@ -16,12 +17,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.core.config import cfg
 
+logger = logging.getLogger("fgc.database")
+
 
 # ---------------------------------------------------------------------------
 # Engine & session factory
 # ---------------------------------------------------------------------------
 
-engine = create_async_engine(cfg.database_url, echo=cfg.debug)
+engine = create_async_engine(cfg.database_url, echo=cfg.debug_libs)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -70,6 +73,7 @@ async def init_db() -> None:
     """Create all tables if they don't exist yet."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    logger.debug("Database ready: %s", cfg.database_url)
 
 
 async def get_or_create(
@@ -94,6 +98,7 @@ async def get_or_create(
     result = await session.execute(stmt)
     obj = result.scalar_one_or_none()
     if obj is not None:
+        logger.debug("DB hit: %s/%s/%s already stored as '%s' (%s)", store, user, game_id, obj.title, obj.status)
         return obj, False
 
     obj = ClaimedGame(
@@ -107,4 +112,5 @@ async def get_or_create(
     )
     session.add(obj)
     await session.flush()
+    logger.debug("DB new row: %s/%s/%s '%s' (%s)", store, user, game_id, title, status)
     return obj, True

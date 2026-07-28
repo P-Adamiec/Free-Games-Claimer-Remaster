@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -39,7 +40,6 @@ def now_str() -> str:
 
 def filenamify(s: str) -> str:
     """Sanitise a string for use as a filename."""
-    import re
     return re.sub(r'[^a-zA-Z0-9 _\-.]', '_', s.replace(":", "."))
 
 
@@ -285,6 +285,8 @@ class BaseClaimer:
                     user_data_dir=str(store_browser_dir),
                 )
                 launch_error = None
+                self.logger.debug("Chrome started (headless=%s, profile=%s, extra args=%s)",
+                                  headless, store_browser_dir, extra_args or [])
                 break
             except Exception as e:
                 launch_error = e
@@ -327,6 +329,10 @@ class BaseClaimer:
 
         self.log_browser_ready()
         return self.browser
+
+    def _normalize_title(self, title: str) -> str:
+        """Strip non-alphanumeric chars and lowercase for fuzzy matching."""
+        return re.sub(r'[^a-z0-9]', '', str(title).lower())
 
     def log_browser_ready(self) -> None:
         """Standardised log for browser ready state."""
@@ -467,7 +473,7 @@ class BaseClaimer:
     async def notify(self, message: str, **kwargs) -> None:
         """Send a notification unless this store is silenced (NOTIFY_SKIP_STORES)."""
         if not self.notify_enabled:
-            self.logger.debug("Notifications silenced for '%s' — skipping.", self.store_name)
+            self.logger.debug("Notifications silenced for '%s', skipping.", self.store_name)
             return
         from src.core.notifier import notify as _notify
         await _notify(message, **kwargs)
@@ -484,7 +490,7 @@ class BaseClaimer:
             msg = custom_msg
         else:
             msg = self._vnc_notice(
-                f"{self.store_name} — manual login needed",
+                f"{self.store_name}: manual login needed",
                 "Finish signing in in the browser.",
                 timeout,
             )
@@ -555,7 +561,7 @@ class BaseClaimer:
 
         self.logger.warning("%s is behind a Cloudflare / captcha human-check – requesting manual solve via VNC.", label)
         custom_msg = self._vnc_notice(
-            f"{label} — security check",
+            f"{label}: security check",
             "A Cloudflare / captcha human-check is blocking the bot. Open the browser and complete it to continue.",
         )
 

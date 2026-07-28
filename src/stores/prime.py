@@ -202,23 +202,13 @@ class PrimeGamingClaimer(BaseClaimer):
             return False
 
     async def _is_signed_in(self) -> bool:
-        """Return True on a positive Luna signed-in signal (account header)."""
+        """Signed in only if the account first name is present (the header dropdown exists logged-out too)."""
         result = await self.page.evaluate(
             """
             JSON.stringify((() => {
-                const vis = (el) => !!el && el.offsetParent !== null;
                 const name = document.querySelector('[data-a-target="user-dropdown-first-name-text"]');
-                if (name) {
-                    const t = (name.textContent || '').trim();
-                    if (t.length > 0) return { loggedIn: true, user: t };
-                }
-                // Account dropdown exists only when signed in.
-                if (document.querySelector('[data-a-target="amazon-dropdown-header-interactable"], [data-a-target="amazon-dropdown-header-message"]')) {
-                    return { loggedIn: true, user: '' };
-                }
-                // A visible sign-in button means signed out.
-                if (vis(document.querySelector('[data-a-target="sign-in-button"]'))) return { loggedIn: false, user: '' };
-                return { loggedIn: false, user: '' };
+                const t = name ? (name.textContent || '').trim() : '';
+                return { loggedIn: t.length > 0, user: t };
             })())
             """
         )
@@ -227,12 +217,10 @@ class PrimeGamingClaimer(BaseClaimer):
         except (json.JSONDecodeError, TypeError):
             data = {}
         if data.get("loggedIn"):
-            user = data.get("user", "")
-            if user:
-                self.user = user
-            elif not self.user:
-                self.user = "unknown"
+            self.user = data.get("user") or self.user or "unknown"
+            logger.debug("Luna signed-in check: first name present (%s)", self.user)
             return True
+        logger.debug("Luna signed-in check: no account first name on the page")
         return False
 
     async def _ensure_logged_in(self, silent_if_logged_in: bool = False) -> None:
@@ -273,7 +261,7 @@ class PrimeGamingClaimer(BaseClaimer):
 
         for attempt in range(max_attempts):
             if not await _has_sign_in_button():
-                # No sign in button, but also not logged in — wait a moment and recheck
+                # No sign in button, but also not logged in, wait a moment and recheck
                 await self.sleep(3)
                 if await self._is_signed_in():
                     break
@@ -296,7 +284,7 @@ class PrimeGamingClaimer(BaseClaimer):
                 current_url = await self.page.evaluate("window.location.href")
                 if isinstance(current_url, str) and ("signin" in current_url or "ap/signin" in current_url):
                     await self._do_login()
-                    # A passkey dead-end won't clear by retrying — hand off to VNC.
+                    # A passkey dead-end won't clear by retrying, hand off to VNC.
                     if await self._passkey_error_present():
                         logger.warning("Amazon passkey error – automated login can't proceed.")
                         break
@@ -313,7 +301,7 @@ class PrimeGamingClaimer(BaseClaimer):
                         url = await self.page.evaluate("window.location.href")
                         if isinstance(url, str) and ("claims/home" in url or "gaming.amazon" in url):
                             if await _has_sign_in_button():
-                                logger.info("Auto-clicking 'Sign in' again during manual wait (redirect bug)...")
+                                logger.debug("Auto-clicking 'Sign in' again during manual wait (redirect bug)...")
                                 if await self._click_sign_in():
                                     await self.sleep(3)
                         return False
@@ -334,7 +322,7 @@ class PrimeGamingClaimer(BaseClaimer):
         # Automated login didn't complete – ask the user to finish it via VNC.
         logger.warning("Automated Prime login did not complete – requesting manual VNC login.")
         custom_msg = self._vnc_notice(
-            "Prime Gaming / Amazon Luna — login needs you",
+            "Prime Gaming / Amazon Luna: login needs you",
             "Automated sign-in couldn't finish (passkey or extra verification). Open the browser and finish signing in.",
         )
         if await self._wait_for_vnc_login(self._is_signed_in, custom_msg=custom_msg):
@@ -499,15 +487,15 @@ class PrimeGamingClaimer(BaseClaimer):
             )
 
         msg = self._vnc_notice(
-            "Prime Gaming / Amazon — security code needed",
+            "Prime Gaming / Amazon: security code needed",
             "Amazon needs a verification code (SMS / app / email). Open the browser and enter it.",
         )
 
         resolved = await self._wait_for_vnc_login(_security_code_done, custom_msg=msg)
         if resolved:
-            logger.info("✓ Security code accepted — continuing.")
+            logger.info("✓ Security code accepted, continuing.")
         else:
-            logger.warning("Security code timeout — login may have failed.")
+            logger.warning("Security code timeout, login may have failed.")
 
     # ------------------------------------------------------------------
     # Scroll until stable (port from original JS)
@@ -517,7 +505,7 @@ class PrimeGamingClaimer(BaseClaimer):
         """Scroll down repeatedly until the page height stabilizes (all games loaded).
 
         The original JS uses ``page.keyboard.press('PageDown')`` which sends a
-        physical key event to the **focused element** — the game list is inside
+        physical key event to the **focused element**, the game list is inside
         a nested scrollable container, NOT the window.  ``window.scrollBy()``
         would scroll the wrong element and never trigger lazy-loading.
 
@@ -579,19 +567,19 @@ class PrimeGamingClaimer(BaseClaimer):
             # Quick health check: try to read the current URL
             await self.page.evaluate("window.location.href")
         except Exception:
-            logger.warning("CDP session lost — attempting to recover...")
+            logger.warning("CDP session lost, attempting to recover...")
             try:
                 # Get all open tabs from the browser and pick the first valid one
                 tabs = self.browser.tabs
                 if tabs:
                     self.page = tabs[0]
-                    logger.info("Recovered CDP session on tab: %s", self.page.target.url)
+                    logger.debug("Recovered CDP session on tab: %s", self.page.target.url)
                 else:
-                    # No tabs at all — open a fresh one
+                    # No tabs at all, open a fresh one
                     self.page = await self.browser.get("about:blank")
-                    logger.info("Opened new tab after session loss.")
+                    logger.debug("Opened new tab after session loss.")
             except Exception:
-                logger.exception("Session recovery failed — opening fresh tab.")
+                logger.exception("Session recovery failed, opening fresh tab.")
                 self.page = await self.browser.get("about:blank")
 
     # ------------------------------------------------------------------
@@ -665,12 +653,11 @@ class PrimeGamingClaimer(BaseClaimer):
         )
         diag = json.loads(diag_raw) if isinstance(diag_raw, str) else {}
         
-        # DOM diagnostics: Useful for debugging when 'containerChildren' is 0 or games aren't detected properly.
-        # logger.info("DOM diagnostics: container=%s, children=%s, totalCards=%s, collectedPs=%s, url=%s",
-        #              diag.get("hasContainer"), diag.get("containerChildren"),
-        #              diag.get("totalItemCards"), diag.get("totalCollectedPs"),
-        #              diag.get("currentURL"))
-        # logger.debug("offer targets: %s", diag.get("allOfferTargets"))
+        # Useful when no games are detected: shows whether the offer container rendered at all.
+        logger.debug("DOM diagnostics: container=%s children=%s totalCards=%s collectedPs=%s url=%s",
+                     diag.get("hasContainer"), diag.get("containerChildren"),
+                     diag.get("totalItemCards"), diag.get("totalCollectedPs"), diag.get("currentURL"))
+        logger.debug("Offer targets: %s", diag.get("allOfferTargets"))
 
         if diag.get("containerChildren", 0) == 0:
             logger.warning("Container is empty or not found! It might be hidden or DOM structure changed.")
@@ -814,7 +801,7 @@ class PrimeGamingClaimer(BaseClaimer):
         collected = int(stats.get("collected", 0))
         all_games = stats.get("games", [])
         
-        # When FORCE_CHECK is on, do NOT filter by existing codes — recheck everything
+        # When FORCE_CHECK is on, do NOT filter by existing codes, recheck everything
         # Epic/Amazon will be caught and skipped Python-side after clicking
         filtered_games = []
         for g in all_games:
@@ -830,7 +817,7 @@ class PrimeGamingClaimer(BaseClaimer):
                     total, collected, unclaimed_new, to_recheck)
 
         if cfg.pg_force_check_collected:
-            logger.info("PG_FORCE_CHECK_COLLECTED is enabled: explicitly parsing already collected tiles lacking codes in DB.")
+            logger.debug("PG_FORCE_CHECK_COLLECTED is enabled: explicitly parsing already collected tiles lacking codes in DB.")
 
         if not filtered_games:
             logger.info("No unclaimed games or pending caches.")
@@ -941,7 +928,7 @@ class PrimeGamingClaimer(BaseClaimer):
 
                 # Session sometimes drops when navigating to a detail page.
                 if not await self._is_signed_in():
-                    logger.warning("Session lost on detail page for '%s' — attempting re-login…", title)
+                    logger.warning("Session lost on detail page for '%s', attempting re-login…", title)
                     # Navigate back to claims page and re-authenticate
                     await self.page.get(URL_CLAIM)
                     await self.sleep(3)

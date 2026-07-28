@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import random
+import re
 
 import nodriver as uc
 
@@ -35,7 +36,7 @@ _COIN_CAPTURE_JS = r"""
   try {
     window.__fgcCoin = window.__fgcCoin || [];
     const want = (u) => { u = String(u || '').toLowerCase(); return u.includes('mtop') && (u.includes('coin') || u.includes('checkin') || u.includes('sign')); };
-    const push = (url, text) => { try { if (window.__fgcCoin.length < 40) window.__fgcCoin.push({ url: String(url).slice(0, 220), body: String(text).slice(0, 12000) }); } catch (e) {} };
+    const push = (url, text) => { try { if (window.__fgcCoin.length < 40) window.__fgcCoin.push({ url: String(url).slice(0, 220), body: String(text).slice(0, 30000) }); } catch (e) {} };
     const of = window.fetch;
     if (of) {
       window.fetch = function (...args) {
@@ -59,6 +60,78 @@ _COIN_CAPTURE_JS = r"""
 # Filename (inside the AliExpress browser profile dir) where the generated
 # Android fingerprint is cached so the bot presents the SAME device every day.
 FINGERPRINT_CACHE = "fgc_fingerprint.json"
+
+# Field names the check-in APIs use for the day streak and tomorrow's reward.
+# Deliberately strict: showing the wrong number is worse than showing none, so a
+# key must say what it counts (days of a streak, coins for the next day).
+_STREAK_KEY_RE = re.compile(
+    r"(continuous|consecutive|streak|(sign|signin|checkin|check_in|serial)_?days?)", re.I)
+_TOMORROW_KEY_RE = re.compile(
+    r"(tomorrow|next_?day|next_?sign).{0,12}?(coin|reward|amount|point|num)"
+    r"|(coin|reward|amount|point|num).{0,12}?(tomorrow|next_?day)", re.I)
+
+
+def _flatten_payload(obj, prefix: str = "", depth: int = 0, out: dict | None = None) -> dict:
+    """Flatten a mtop JSON payload into {path: scalar}.
+
+    Handles both shapes AliExpress uses: the ``[{"name": …, "value": …}]`` lists of
+    ``coin.execute`` and the plain nested objects of ``coin.channel.sign.*``. Values
+    that are themselves JSON strings are parsed and walked into.
+    """
+    if out is None:
+        out = {}
+    if depth > 6 or len(out) > 400:
+        return out
+
+    if isinstance(obj, dict):
+        # A {"name": …, "value": …} entry becomes a single key, like the old parser produced.
+        if "name" in obj and "value" in obj and isinstance(obj.get("name"), str):
+            return _flatten_payload(obj["value"], f"{prefix}.{obj['name']}" if prefix else obj["name"], depth, out)
+        for key, val in obj.items():
+            _flatten_payload(val, f"{prefix}.{key}" if prefix else str(key), depth + 1, out)
+        return out
+
+    if isinstance(obj, list):
+        for i, item in enumerate(obj):
+            # {"name": …, "value": …} entries are named already, don't index them.
+            named = isinstance(item, dict) and isinstance(item.get("name"), str) and "value" in item
+            _flatten_payload(item, prefix if named else f"{prefix}[{i}]", depth + 1, out)
+        return out
+
+    if isinstance(obj, str):
+        text = obj.strip()
+        if text.startswith(("{", "[")) and len(text) < 20000:
+            try:
+                return _flatten_payload(json.loads(text), prefix, depth + 1, out)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    if prefix:
+        out[prefix] = obj
+    return out
+
+
+def _field_by_leaf(fields: dict, leaf: str):
+    """Look a field up by its last path segment (paths are nested, e.g. data.userCoinsNum)."""
+    for key, value in fields.items():
+        if key.rsplit(".", 1)[-1] == leaf:
+            return value
+    return None
+
+
+def _as_int(value) -> int | None:
+    """Read an int out of an API value ('5', 5, '5 days'), or None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        m = re.search(r"\d{1,4}", value)
+        if m:
+            return int(m.group(0))
+    return None
 
 # Neutralise aliexpress:// / intent:// links so Chrome's 'Open xdg-open?' dialog can't pop inside VNC.
 _APP_BLOCK_JS = r"""
@@ -144,6 +217,7 @@ class AliExpressClaimer(BaseClaimer):
         # Wallet balance from the coin mtop API (DOM shows only animated digits); set by the network handler.
         self._user_coins: int | None = None
         self._coin_reqs: dict = {}  # requestId -> url, for coin/check-in mtop responses
+        self._coin_payloads: list[dict] = []  # flattened coin/check-in responses (streak, tomorrow, balance)
 
     async def run(self) -> None:
         """Main entry point for the AliExpress daily check-in flow."""
@@ -153,14 +227,14 @@ class AliExpressClaimer(BaseClaimer):
             await self._setup_mobile_browser()
 
             # Step 2: warm up on the mobile home with organic activity before touching anything sensitive.
-            self.logger.info("Warming up session on mobile home page...")
+            self.logger.debug("Warming up session on mobile home page...")
             await self.page.get(URL_MHOME)
             await self._human_pause(3, 6)
             await self._dismiss_cookie_banner()
             await self._simulate_human_activity()
 
-            # Step 3: go to the coin page — the login form renders INLINE here, so it's the reliable place to detect login state.
-            self.logger.info("Navigating to mobile coins check-in page...")
+            # Step 3: go to the coin page: the login form renders INLINE here, so it's the reliable place to detect login state.
+            self.logger.debug("Navigating to mobile coins check-in page...")
             await self._goto_coins_organically()
             await self._human_pause(4, 7)
 
@@ -296,7 +370,7 @@ class AliExpressClaimer(BaseClaimer):
 
         The bundle (UA string, client-hint metadata, screen size and the
         browserforge injection JS) is cached on disk inside the AliExpress
-        browser profile, so the bot presents the SAME phone on every run — a
+        browser profile, so the bot presents the SAME phone on every run, a
         device whose identity changes between visits is itself a bot signal.
         Regenerates only when the cache is missing or unreadable.
         """
@@ -308,7 +382,7 @@ class AliExpressClaimer(BaseClaimer):
                     self.logger.debug("Loaded cached AliExpress fingerprint (%s).", data.get("ua"))
                     return data
         except Exception as e:
-            self.logger.debug("Fingerprint cache read failed (%s) — regenerating.", e)
+            self.logger.debug("Fingerprint cache read failed (%s), regenerating.", e)
 
         # Fresh Android mobile Chrome fingerprint; browserforge keeps UA/headers/screen/navigator/WebGL consistent.
         fp = FingerprintGenerator().generate(
@@ -338,7 +412,7 @@ class AliExpressClaimer(BaseClaimer):
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps(data), encoding="utf-8")
-            self.logger.info("Generated new AliExpress fingerprint: %s", data["ua"])
+            self.logger.debug("Generated new AliExpress fingerprint: %s", data["ua"])
         except Exception as e:
             self.logger.debug("Fingerprint cache write failed: %s", e)
         return data
@@ -353,7 +427,7 @@ class AliExpressClaimer(BaseClaimer):
         The coin page shows the balance only as rotating digit animations, so
         the DOM can't be read reliably. Instead we watch the network for the
         POST to ``mtop.aliexpress.coin.execute`` (which the page itself fires)
-        and parse ``userCoinsNum`` out of its JSON body — the same source the
+        and parse ``userCoinsNum`` out of its JSON body, the same source the
         original free-games-claimer reads.
         """
         try:
@@ -366,7 +440,7 @@ class AliExpressClaimer(BaseClaimer):
         """Record coin / check-in mtop responses so their body can be read on finish.
 
         Broad match (not just the US coin.execute prefix) because the real
-        endpoint differs by region/mobile — the diagnostic dump below reveals it.
+        endpoint differs by region/mobile, the diagnostic dump below reveals it.
         """
         try:
             url = getattr(getattr(event, "response", None), "url", "") or ""
@@ -379,9 +453,8 @@ class AliExpressClaimer(BaseClaimer):
             pass
 
     async def _on_coin_loading_finished(self, event) -> None:
-        """Read a coin/check-in mtop body: keep the latest userCoinsNum and dump
-        the response shape to data/ae_coin_api.json (diagnostic) so we can map the
-        streak / tomorrow fields to the real API."""
+        """Read a coin/check-in mtop body: keep the latest userCoinsNum and the
+        flattened response, same as the in-page capture path."""
         try:
             rid = event.request_id
             url = self._coin_reqs.pop(rid, None)
@@ -391,47 +464,25 @@ class AliExpressClaimer(BaseClaimer):
             if b64 and isinstance(body, str):
                 body = base64.b64decode(body).decode("utf-8", "ignore")
             payload = json.loads(body)
-            data = payload.get("data") if isinstance(payload, dict) else None
-            arr = (data or {}).get("data") if isinstance(data, dict) else None
-            names = {}
-            if isinstance(arr, list):
-                for entry in arr:
-                    if isinstance(entry, dict) and "name" in entry:
-                        names[entry.get("name")] = entry.get("value")
-            if "userCoinsNum" in names:
-                self._user_coins = int(str(names["userCoinsNum"]).strip())
-                self.logger.info("🪙 Wallet balance (userCoinsNum): %s", self._user_coins)
-
-            # --- Diagnostic: record the real coin API shape (temporary) ---
-            self.logger.info("🔬 Coin API captured: url=%s fields=%s", url, list(names.keys()) or list((data or {}).keys()))
-            try:
-                dump = {
-                    "url": url,
-                    "field_names": list(names.keys()),
-                    "fields": names,
-                    "data_keys": list(data.keys()) if isinstance(data, dict) else None,
-                    "api": payload.get("api") if isinstance(payload, dict) else None,
-                }
-                path = cfg._data_dir / "ae_coin_api.json"
-                prev = []
-                if path.exists():
-                    try:
-                        prev = json.loads(path.read_text(encoding="utf-8"))
-                    except Exception:
-                        prev = []
-                prev.append(dump)
-                path.write_text(json.dumps(prev, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception as e:
-                self.logger.debug("Coin API dump write failed: %s", e)
+            api = payload.get("api") if isinstance(payload, dict) else None
+            fields = _flatten_payload(payload.get("data") if isinstance(payload, dict) else payload)
+            if fields:
+                self._coin_payloads.append({"api": api or url, "url": url, "fields": fields, "body": body})
+            coins = _as_int(_field_by_leaf(fields, "userCoinsNum"))
+            if coins is not None:
+                self._user_coins = coins
+                self.logger.debug("🪙 Wallet balance (userCoinsNum): %s", self._user_coins)
+            self.logger.debug("🔬 Coin API captured: api=%s fields=%s", api, sorted(fields.keys())[:40])
         except Exception as e:
             self.logger.debug("Coin API body parse failed: %s", e)
 
     async def _read_coin_api(self) -> None:
         """Read coin/check-in mtop responses captured in-page by _COIN_CAPTURE_JS.
 
-        Sets the wallet balance (userCoinsNum) and logs the response field names
-        so we can map the streak / tomorrow fields to the real API. Must be called
-        while still on the coin page (window.__fgcCoin resets on navigation).
+        Sets the wallet balance (userCoinsNum) and keeps every payload flattened in
+        ``self._coin_payloads`` so the streak / tomorrow fields can be read from the
+        API instead of the animated DOM. Must be called while still on the coin page
+        (window.__fgcCoin resets on navigation).
         """
         try:
             raw = await self.page.evaluate("JSON.stringify(window.__fgcCoin || [])")
@@ -440,7 +491,7 @@ class AliExpressClaimer(BaseClaimer):
             self.logger.debug("Coin capture read failed: %s", e)
             return
         if not items:
-            self.logger.info("🔬 Coin API: nothing captured by in-page interceptor.")
+            self.logger.debug("🔬 Coin API: nothing captured by in-page interceptor.")
             return
         for it in items:
             url = it.get("url", "")
@@ -448,27 +499,130 @@ class AliExpressClaimer(BaseClaimer):
             try:
                 payload = json.loads(body)
             except Exception:
-                self.logger.info("🔬 Coin API (non-JSON): url=%s body=%s", url, body[:200])
+                self.logger.debug("🔬 Coin API (non-JSON): url=%s body=%s", url, body[:200])
                 continue
-            data = payload.get("data") if isinstance(payload, dict) else None
-            arr = (data or {}).get("data") if isinstance(data, dict) else None
-            names = {}
-            if isinstance(arr, list):
-                for entry in arr:
-                    if isinstance(entry, dict) and "name" in entry:
-                        names[entry.get("name")] = entry.get("value")
-            self.logger.info(
-                "🔬 Coin API: api=%s data_keys=%s fields=%s",
-                (payload.get("api") if isinstance(payload, dict) else None),
-                (list(data.keys()) if isinstance(data, dict) else None),
-                json.dumps(names, ensure_ascii=False)[:1500],
+            api = payload.get("api") if isinstance(payload, dict) else None
+            fields = _flatten_payload(payload.get("data") if isinstance(payload, dict) else payload)
+            # __fgcCoin keeps every response, so the same one is re-read on the next call.
+            if fields and not any(p["api"] == (api or url) and p["body"] == body for p in self._coin_payloads):
+                self._coin_payloads.append({"api": api or url, "url": url, "fields": fields, "body": body})
+            self.logger.debug(
+                "🔬 Coin API: api=%s fields=%s",
+                api,
+                json.dumps(fields, ensure_ascii=False, default=str)[:1500],
             )
-            if "userCoinsNum" in names and self._user_coins is None:
-                try:
-                    self._user_coins = int(str(names["userCoinsNum"]).strip())
-                    self.logger.info("🪙 Wallet balance (userCoinsNum): %s", self._user_coins)
-                except Exception:
-                    pass
+            coins = _as_int(_field_by_leaf(fields, "userCoinsNum"))
+            if coins is not None and self._user_coins is None:
+                self._user_coins = coins
+                self.logger.debug("🪙 Wallet balance (userCoinsNum): %s", self._user_coins)
+        self._dump_coin_payloads()
+
+    def _dump_coin_payloads(self) -> None:
+        """Write the captured check-in/coin responses to data/ae_coin_api.json (last run only)."""
+        if not self._coin_payloads:
+            return
+        try:
+            dump = [
+                {"api": p["api"], "url": p["url"], "field_names": sorted(p["fields"].keys()), "body": p["body"]}
+                for p in self._coin_payloads
+            ]
+            path = cfg._data_dir / "ae_coin_api.json"
+            path.write_text(json.dumps(dump, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        except Exception as e:
+            self.logger.debug("Coin API dump write failed: %s", e)
+
+    def _extract_checkin_calendar(self) -> dict:
+        """Read the streak and tomorrow's coins from the check-in calendar.
+
+        ``coin.channel.sign.list`` returns ``dailySignNodeList``: one entry per day,
+        ``calendarDayDistance`` 0 for today and 1 for tomorrow, each carrying its own
+        prize and a ``sequenceNumber`` that counts the day of the running streak.
+        """
+        info: dict = {"streak": None, "tomorrow": None}
+        for payload in self._coin_payloads:
+            if "sign.list" not in str(payload.get("api") or ""):
+                continue
+            try:
+                data = (json.loads(payload["body"]).get("data") or {}).get("data") or {}
+                nodes = [n for seq in (data.get("signQuerySequenceNodeList") or [])
+                         for n in (seq.get("dailySignNodeList") or [])]
+            except Exception as e:
+                self.logger.debug("Check-in calendar unreadable: %s", e)
+                continue
+
+            past_all_signed = True
+            for node in nodes:
+                distance = node.get("calendarDayDistance")
+                result = (node.get("signResultList") or [{}])[0]
+                coins = next((_as_int(p.get("prizeAmount")) for p in (result.get("prizeInfoList") or [])
+                              if p.get("prizeType") == "coins"), None)
+                if distance == 0:
+                    info["streak"] = _as_int(result.get("sequenceNumber"))
+                elif distance == 1 and coins is not None:
+                    info["tomorrow"] = coins
+                elif isinstance(distance, int) and distance < 0 and not result.get("signSuccess"):
+                    past_all_signed = False
+
+            # A missed day in the visible window means sequenceNumber is not the streak.
+            if info["streak"] is not None and not past_all_signed:
+                self.logger.debug("Check-in calendar shows a missed day, streak counter not trusted")
+                info["streak"] = None
+            if info["streak"] is not None or info["tomorrow"] is not None:
+                self.logger.debug("🔬 Check-in calendar: streak=%s tomorrow=%s (%d day node(s))",
+                                  info["streak"], info["tomorrow"], len(nodes))
+                return info
+        return info
+
+    def _extract_checkin_info_from_api(self) -> dict:
+        """Find the day streak and tomorrow's reward in the captured check-in payloads."""
+        info = self._extract_checkin_calendar()
+        if info["streak"] is not None and info["tomorrow"] is not None:
+            return info
+        if not self._coin_payloads:
+            return info
+
+        # sign.execute answers the collect itself, so it carries the freshest streak.
+        def rank(p: dict) -> int:
+            api = str(p.get("api") or "")
+            if "sign.execute" in api:
+                return 0
+            return 1 if "sign" in api else 2
+
+        streak_key = "calendar" if info["streak"] is not None else None
+        tomorrow_key = "calendar" if info["tomorrow"] is not None else None
+        for payload in sorted(self._coin_payloads, key=rank):
+            for key, value in payload["fields"].items():
+                leaf = key.rsplit(".", 1)[-1]
+                num = _as_int(value)
+                if num is None:
+                    continue
+                if info["streak"] is None and _STREAK_KEY_RE.search(leaf) and 0 <= num <= 999:
+                    info["streak"], streak_key = num, f"{payload['api']}:{key}"
+                if info["tomorrow"] is None and _TOMORROW_KEY_RE.search(leaf) and 0 < num <= 9999:
+                    info["tomorrow"], tomorrow_key = num, f"{payload['api']}:{key}"
+            if info["streak"] is not None and info["tomorrow"] is not None:
+                break
+
+        # One counter matching both slots means the pattern hit a single field twice.
+        if streak_key and streak_key != "calendar" and streak_key == tomorrow_key:
+            info["tomorrow"], tomorrow_key = None, None
+
+        self.logger.debug(
+            "🔬 Check-in info from API: streak=%s (%s) tomorrow=%s (%s)",
+            info["streak"], streak_key or "not found", info["tomorrow"], tomorrow_key or "not found",
+        )
+        if info["streak"] is None or info["tomorrow"] is None:
+            self._log_rejected_candidates()
+        return info
+
+    def _log_rejected_candidates(self) -> None:
+        """List numeric fields that look related but did not pass the strict match."""
+        hint = re.compile(r"(day|sign|streak|tomorrow|next|coin|reward)", re.I)
+        for payload in self._coin_payloads:
+            near = {k: v for k, v in payload["fields"].items()
+                    if hint.search(k.rsplit(".", 1)[-1]) and _as_int(v) is not None}
+            if near:
+                self.logger.debug("🔬 Check-in candidates not used (%s): %s", payload["api"], near)
 
     async def _human_pause(self, lo: float, hi: float) -> None:
         """Sleep a random, human-like amount of time (fixed robotic delays are a bot signal)."""
@@ -511,6 +665,7 @@ class AliExpressClaimer(BaseClaimer):
                 if btn:
                     await self._human_pause(0.4, 1.0)
                     await btn.click()
+                    self.logger.debug("Accepted cookie banner via '%s'", label)
                     await self._human_pause(0.6, 1.2)
                     return
             except Exception:
@@ -547,6 +702,7 @@ class AliExpressClaimer(BaseClaimer):
         except Exception:
             url = ""
         if "/p/coin-index/" not in url:
+            self.logger.debug("Organic tap did not reach the coin page (url=%s), loading it directly", url or "?")
             await self.page.get(URL_COINS)
 
     async def _diagnose_page(self) -> None:
@@ -563,7 +719,7 @@ class AliExpressClaimer(BaseClaimer):
                     const cookies = document.cookie || '';
                     const names = cookies.split(';').map(c => c.trim().split('=')[0]).filter(Boolean);
                     const cdcKeys = Object.keys(window).filter(k => /cdc_|\$cdc|selenium|driver|webdriver|__nightmare|domAutomation/i.test(k));
-                    // Real challenge = x5sec cookie / punish URL / baxia container — NOT the words "slider"/"captcha" (benign promos).
+                    // Real challenge = x5sec cookie / punish URL / baxia container, NOT the words "slider"/"captcha" (benign promos).
                     const punishUrl = /punish|x5referer|_____tmd_____|\/_____|sec\.aliexpress/i.test(location.href);
                     const challengeEl = document.querySelector(
                         '#baxia-dialog, .baxia-dialog, [id^="nc_"], .nc-container, .nc_wrapper, #nocaptcha, .nocaptcha, .J_MIDDLEWARE_FRAME_WIDGET'
@@ -585,7 +741,7 @@ class AliExpressClaimer(BaseClaimer):
                 })()
             """)
             data = json.loads(raw) if isinstance(raw, str) else {}
-            self.logger.info(
+            self.logger.debug(
                 "🔎 Anti-bot diagnostics: webdriver=%s cdcLeaks=%s x5sec=%s challenge=%s "
                 "cookies=%d (m_h5_tk=%s cna=%s xman_t=%s) touchPoints=%s plugins=%s",
                 data.get("webdriver"), data.get("cdcLeaks"), data.get("hasX5sec"),
@@ -595,7 +751,7 @@ class AliExpressClaimer(BaseClaimer):
             )
             blocked = data.get("blockedAppUrls") or []
             if blocked:
-                self.logger.info(
+                self.logger.debug(
                     "🚧 Blocked %d in-page app-launch attempt(s) (schemes AliExpress tried to open): %s",
                     len(blocked), blocked)
             if data.get("hasX5sec") or data.get("challenge"):
@@ -619,7 +775,7 @@ class AliExpressClaimer(BaseClaimer):
         literally `/login`, so it false-positived on that inline form (and on
         the logged-out home page) and skipped login entirely. This version
         detects the login form explicitly and, when uncertain, returns False so
-        login is attempted — a false negative self-corrects because login.html
+        login is attempted, a false negative self-corrects because login.html
         just redirects away when we're already signed in.
         """
         try:
@@ -671,7 +827,7 @@ class AliExpressClaimer(BaseClaimer):
         an aliexpress.com store page with no login form still present.
 
         A successful sign-in lands on e.g. ``pl.aliexpress.com/?gatewayAdapt=glo2pol``,
-        which carries none of the coin-page's logged-in markers — so
+        which carries none of the coin-page's logged-in markers, so
         ``_is_logged_in()`` alone reported a false "verification required" and
         fired a needless VNC alert. This mirrors the upstream project's
         ``waitForURL(startsWith('https://www.aliexpress.com/'))`` success check.
@@ -707,7 +863,7 @@ class AliExpressClaimer(BaseClaimer):
 
         The field is a plain `type=text` input with a LOCALIZED placeholder
         (e.g. Polish "Adres e-mail lub numer telefonu"), so English /
-        `type=email` selectors miss it entirely — which is why automated login
+        `type=email` selectors miss it entirely, which is why automated login
         silently failed and fell back to a bogus "6-digit code" prompt. We try
         locale-agnostic selectors, then a JS fallback that marks the first
         visible non-password input and selects it back.
@@ -744,7 +900,7 @@ class AliExpressClaimer(BaseClaimer):
     async def _click_button_by_text(self, texts: list[str]) -> bool:
         """Trusted-click the visible button/link whose exact text matches one of
         `texts`. Marks the real element (closest button/[role=button]/a) in JS,
-        then clicks it via nodriver — so the click lands on the button element
+        then clicks it via nodriver, so the click lands on the button element
         (not a child text node, which AliExpress' 'Kontynuuj' handler ignores)
         and is a trusted event.
         """
@@ -794,7 +950,7 @@ class AliExpressClaimer(BaseClaimer):
                 })()
             """)
             info = json.loads(raw) if isinstance(raw, str) else {}
-            self.logger.warning("🧪 Login-stall DOM — url=%s", info.get("url"))
+            self.logger.warning("🧪 Login-stall DOM: url=%s", info.get("url"))
             self.logger.warning("🧪 Login-stall inputs=%s", info.get("inputs"))
             self.logger.warning("🧪 Login-stall buttons=%s", info.get("buttons"))
         except Exception as e:
@@ -815,7 +971,7 @@ class AliExpressClaimer(BaseClaimer):
         """Verify login status via direct login link, attempt automated login, or fall back to VNC for OTP code."""
         await self.sleep(2)
 
-        self.logger.info("Opening direct login link to check/perform authentication...")
+        self.logger.debug("Opening direct login link to check/perform authentication...")
         await self.page.get(URL_LOGIN)
         await self.sleep(4)
 
@@ -825,7 +981,7 @@ class AliExpressClaimer(BaseClaimer):
             self.log_signed_in(cfg.ae_email or "AliExpress User")
             return True
 
-        self.logger.info("On login page. Proceeding with authentication...")
+        self.logger.debug("On login page. Proceeding with authentication...")
 
         # Dismiss cookies if prompt exists (using native click)
         try:
@@ -865,14 +1021,14 @@ class AliExpressClaimer(BaseClaimer):
                     email_el = await self._find_first_login_input()
 
                     if email_el:
-                        self.logger.info("Email input found. Entering email...")
+                        self.logger.debug("Email input found. Entering email...")
                         await email_el.click()
                         await self.sleep(0.5)
                         await email_el.send_keys(cfg.ae_email)
                         await self.sleep(0.8)
 
                         # Submit email via Enter + a trusted click on the real button (plain text click didn't advance the form).
-                        self.logger.info("Submitting email (Enter + Continue button)...")
+                        self.logger.debug("Submitting email (Enter + Continue button)...")
                         try:
                             await email_el.send_keys("\r")
                         except Exception:
@@ -895,17 +1051,17 @@ class AliExpressClaimer(BaseClaimer):
                         except Exception:
                             pass
                 else:
-                    self.logger.info("ℹ️ AliExpress remembered account! (Password input available directly without entering email)")
+                    self.logger.debug("ℹ️ AliExpress remembered account! (Password input available directly without entering email)")
 
                 if pass_el:
-                    self.logger.info("Entering password...")
+                    self.logger.debug("Entering password...")
                     await pass_el.click()
                     await self.sleep(0.5)
                     await pass_el.send_keys(cfg.ae_password)
                     await self.sleep(0.8)
 
                     # Submit password via Enter + a trusted click on the real button (same fix as the email step).
-                    self.logger.info("Submitting password (Enter + Sign-in button)...")
+                    self.logger.debug("Submitting password (Enter + Sign-in button)...")
                     try:
                         await pass_el.send_keys("\r")
                     except Exception:
@@ -936,7 +1092,7 @@ class AliExpressClaimer(BaseClaimer):
         self.logger.warning("⚠️ Verification required (e.g., 6-digit email verification code or CAPTCHA)!")
         
         custom_msg = self._vnc_notice(
-            "AliExpress — verification required",
+            "AliExpress: verification required",
             "Enter the 6-digit verification code from your email, or complete manual login in the browser.",
         )
         if await self._wait_for_vnc_login(self._login_ok, custom_msg=custom_msg):
@@ -955,7 +1111,7 @@ class AliExpressClaimer(BaseClaimer):
         try:
             hide_btn = await self.page.select('.hideDoubleButton', timeout=1.5)
             if hide_btn:
-                self.logger.info("🧹 Dismissing double-coin / promotional overlay button...")
+                self.logger.debug("🧹 Dismissing double-coin / promotional overlay button...")
                 await hide_btn.click()
                 await self.sleep(1)
         except Exception:
@@ -1047,7 +1203,9 @@ class AliExpressClaimer(BaseClaimer):
         while elapsed < timeout:
             last = await self._read_checkin_state()
             if last.get("btnText") or last.get("claimed"):
+                self.logger.debug("Check-in widget rendered after %ds: %s", elapsed, last)
                 return last
+            self.logger.debug("Check-in widget not rendered yet (%ds/%ds): %s", elapsed, timeout, last)
             await self.sleep(interval)
             elapsed += interval
         return last
@@ -1057,7 +1215,7 @@ class AliExpressClaimer(BaseClaimer):
 
         Uses the real button text from the DOM (e.g. 'Collect 70'), so it works
         for labels that carry the coin amount. The previous JS fallback matched
-        only the exact string 'collect' and silently skipped 'Collect 70' — the
+        only the exact string 'collect' and silently skipped 'Collect 70', the
         bug that let a check-in report success while collecting nothing. Native
         (trusted) click first; a JS click on the same exact label as last resort.
         """
@@ -1066,6 +1224,7 @@ class AliExpressClaimer(BaseClaimer):
             if el:
                 await self._human_pause(0.7, 1.6)
                 await el.click()
+                self.logger.debug("Collect clicked natively ('%s')", btn_text)
                 return True
         except Exception as e:
             self.logger.debug("Native collect click failed: %s", e)
@@ -1100,22 +1259,37 @@ class AliExpressClaimer(BaseClaimer):
             self.logger.debug("Button dump failed: %s", e)
 
     async def _read_checkin_info(self) -> dict:
-        """Read the day-streak count and tomorrow's bonus from the coin page.
+        """Read the day-streak count and tomorrow's bonus.
 
         Returns ``{"streak": int|None, "tomorrow": int|None}``.
 
+        The check-in APIs are the reliable source: on the page both numbers are
+        rotating digit animations and localized text, so the DOM is only used to
+        fill in whatever the API didn't provide.
+        """
+        info = self._extract_checkin_info_from_api()
+        if info.get("streak") is not None and info.get("tomorrow") is not None:
+            return info
+
+        dom = await self._read_checkin_info_dom()
+        return {
+            "streak": info.get("streak") if info.get("streak") is not None else dom.get("streak"),
+            "tomorrow": info.get("tomorrow") if info.get("tomorrow") is not None else dom.get("tomorrow"),
+        }
+
+    async def _read_checkin_info_dom(self) -> dict:
+        """DOM fallback for the streak / tomorrow numbers.
+
         The streak number and its "day streak"/"seria" label live in SEPARATE
         DOM elements (the number is often a `<div><span>N</span></div>` next to
-        an `<h3>day streak</h3>`), so the old body-text regex frequently missed
-        it and reported "active". We first locate the label element and pull the
-        nearest standalone integer from its container (mirroring the upstream
-        `h3:text-is("day streak") → xpath=.. → div span` approach), then fall
-        back to a whole-page regex.
+        an `<h3>day streak</h3>`), so a plain body-text regex misses it. We first
+        locate the label element and pull the nearest standalone integer from its
+        container, then fall back to a whole-page regex.
         """
         raw = await self.page.evaluate(r"""
             (() => {
                 const isVisible = (el) => !!el && el.offsetParent !== null;
-                const labelRe = /^(day streak|seria|dni serii|streak)$/i;
+                const labelRe = /^(day streak|days? in a row|seria|seria dni|dni serii|dni z rz[eę]du|streak)$/i;
 
                 let streak = null;
                 // Strategy 1: find the "day streak"/"seria" label, then read the
@@ -1140,7 +1314,8 @@ class AliExpressClaimer(BaseClaimer):
                 // Strategy 2: whole-page regex fallback.
                 if (streak === null) {
                     const text = document.body ? (document.body.textContent || '') : '';
-                    const m = text.match(/(\d{1,3})\s*day streak/i) || text.match(/seria\s*(\d{1,3})/i);
+                    const m = text.match(/(\d{1,3})\s*(?:day streak|days? in a row|dni z rz[eę]du)/i)
+                        || text.match(/(?:seria|streak)[^\d]{0,12}(\d{1,3})/i);
                     if (m) streak = parseInt(m[1], 10);
                 }
 
@@ -1148,9 +1323,13 @@ class AliExpressClaimer(BaseClaimer):
                 if (streak !== null && (streak < 0 || streak > 999)) streak = null;
 
                 const text = document.body ? (document.body.textContent || '') : '';
+                // Only phrasings that tie the number to coins: a bare number near the
+                // word "tomorrow" is usually the day counter, not the reward.
                 const tomMatch = text.match(/Get\s*(\d{1,4})\s*check-in coins tomorrow/i)
                     || text.match(/(\d{1,4})\s*(?:check-in )?coins tomorrow/i)
-                    || text.match(/jutro\s*(\d{1,4})\s*monet/i);
+                    || text.match(/tomorrow[^\d]{0,20}(\d{1,4})\s*(?:coins?|monet)/i)
+                    || text.match(/jutro[^\d]{0,20}(\d{1,4})\s*monet/i)
+                    || text.match(/(\d{1,4})\s*monet\w*\s*jutro/i);
                 const tomorrow = tomMatch ? parseInt(tomMatch[1], 10) : null;
 
                 return JSON.stringify({ streak: streak, tomorrow: tomorrow });
@@ -1167,20 +1346,19 @@ class AliExpressClaimer(BaseClaimer):
     def _format_checkin_status(self, claimed_coins, info: dict, total) -> str:
         """Build the notification status string for a successful check-in.
 
-        Example: ``claimed 70 🪙 (streak: 5 days · +72 tomorrow · 1,234 total)``.
-        Any unknown part is simply omitted (no fake "active").
+        Example: ``claimed 70 🪙, streak 5 days, tomorrow 72 🪙, balance 1,234 🪙``.
+        Every number is labelled and anything unknown is left out (no fake "active").
         """
-        head = f"claimed {claimed_coins} 🪙" if claimed_coins else "claimed today 🪙"
-        parts: list[str] = []
+        parts: list[str] = [f"claimed {claimed_coins} 🪙" if claimed_coins else "claimed today 🪙"]
         streak = (info or {}).get("streak")
         tomorrow = (info or {}).get("tomorrow")
         if streak is not None:
-            parts.append(f"streak: {streak} day{'s' if streak != 1 else ''}")
+            parts.append(f"streak {streak} day{'s' if streak != 1 else ''}")
         if tomorrow is not None:
-            parts.append(f"+{tomorrow} tomorrow")
+            parts.append(f"tomorrow {tomorrow} 🪙")
         if total is not None:
-            parts.append(f"{total:,} total")
-        return f"{head} ({' · '.join(parts)})" if parts else head
+            parts.append(f"balance {total:,} 🪙")
+        return ", ".join(parts)
 
     def _report(self, status: str) -> None:
         """Append the AliExpress check-in result to the notification list."""
@@ -1250,13 +1428,13 @@ class AliExpressClaimer(BaseClaimer):
         """Verify the coin page, guard the bot-flag state, collect coins, and report honestly.
 
         Reports a real failure (and offers manual VNC collection) when no
-        check-in button can be found or the click can't be confirmed — instead
+        check-in button can be found or the click can't be confirmed, instead
         of silently logging success, which previously masked missed check-ins
         and cost the user their streak.
         """
         current_url = await self.page.evaluate("window.location.href")
         if "/p/coin-index/" not in str(current_url):
-            self.logger.info("Navigating to coins page to trigger daily check-in...")
+            self.logger.debug("Navigating to coins page to trigger daily check-in...")
             await self.page.get(URL_COINS)
             await self._human_pause(4, 7)
 
@@ -1288,28 +1466,28 @@ class AliExpressClaimer(BaseClaimer):
 
             if state.get("btnText") and (coins is None or coins >= min_coins):
                 self.logger.info(
-                    "🪙 Today's check-in offers %s coins (>= AE_MIN_COINS=%d) — collecting.",
+                    "🪙 Today's check-in offers %s coins (>= AE_MIN_COINS=%d), collecting.",
                     coins if coins is not None else "?", min_coins)
                 collect_ready = True
                 break
 
-            # Not collectable yet — either a 1-coin bot-flag state or an
+            # Not collectable yet: either a 1-coin bot-flag state or an
             # unrendered/empty widget. Both get the same retry treatment.
             reason = (f"only {coins} coin(s) offered (min {min_coins})"
                       if state.get("btnText") else "check-in widget did not render (empty page)")
             if attempt < attempts:
                 wait_s = int(cfg.ae_flag_wait * random.uniform(0.9, 1.3))
                 self.logger.warning(
-                    "🚫 Not collecting — %s. Waiting %ds and re-approaching organically, "
+                    "🚫 Not collecting: %s. Waiting %ds and re-approaching organically, "
                     "then retrying (%d/%d)...", reason, wait_s, attempt, attempts - 1)
                 await self.sleep(wait_s)
                 await self._rewarm_to_coins()
             else:
-                self.logger.error("🚫 Gave up after %d retries — %s.", attempts - 1, reason)
+                self.logger.error("🚫 Gave up after %d retries: %s.", attempts - 1, reason)
 
         # --- Collect -------------------------------------------------------
         if collect_ready:
-            # Capture how many coins today's check-in offers BEFORE clicking —
+            # Capture how many coins today's check-in offers BEFORE clicking,
             # the "Collect 70" button disappears once collected. Snapshot the
             # wallet balance too, so we can report the post-collect total.
             claimed_coins = state.get("todayCoins")
@@ -1342,7 +1520,7 @@ class AliExpressClaimer(BaseClaimer):
                     self._report(status)
                     await self.sleep(3)
                     return
-                self.logger.warning("Clicked collect but a collect button is still present — treating as not collected.")
+                self.logger.warning("Clicked collect but a collect button is still present, treating as not collected.")
 
         # --- Not collected: two distinct terminal states -------------------
         await self._dump_failure_state()
@@ -1353,12 +1531,12 @@ class AliExpressClaimer(BaseClaimer):
             coins = state.get("todayCoins")
             self.logger.error(
                 "🚫 Session flagged as low-trust: only %s coin(s) offered instead of the "
-                "full amount — NOT collecting (policy). Collect on your phone to keep the streak.", coins)
-            self._report(f"⚠️ flagged — only {coins} coin(s) offered, not collected 🚫")
+                "full amount, NOT collecting (policy). Collect on your phone to keep the streak.", coins)
+            self._report(f"⚠️ flagged, only {coins} coin(s) offered, not collected 🚫")
             if cfg.notify_claim_fails:
                 await self.notify(
                     f"⚠️ **AliExpress check-in flagged**\n\n"
-                    f"The bot's session is being risk-scored — only **{coins} coin(s)** were "
+                    f"The bot's session is being risk-scored: only **{coins} coin(s)** were "
                     f"offered instead of the full amount, so it did NOT collect.\n"
                     f"👉 **Collect on your phone / the AliExpress app today** to keep your streak. "
                     f"The bot will try again on the next scheduled run.")
@@ -1367,14 +1545,14 @@ class AliExpressClaimer(BaseClaimer):
         # The widget never rendered → let the user collect manually via VNC in
         # case the real (collectable) page is there but the bot read it empty.
         await self._dump_visible_buttons()
-        self.logger.error("⚠️ AliExpress check-in widget did not render — offering manual VNC collection.")
+        self.logger.error("⚠️ AliExpress check-in widget did not render, offering manual VNC collection.")
 
         async def _collected_manually() -> bool:
             st = await self._read_checkin_state()
             return bool(st.get("claimed"))
 
         custom_msg = self._vnc_notice(
-            "AliExpress — collect coins manually",
+            "AliExpress: collect coins manually",
             "The coin page rendered empty for the bot. Open the browser and tap Collect if the button is there.",
         )
         if await self._wait_for_vnc_login(_collected_manually, custom_msg=custom_msg):
@@ -1383,8 +1561,8 @@ class AliExpressClaimer(BaseClaimer):
             self.logger.info("✅ Collected manually via VNC. (%s)", status)
             self._report(status.replace("claimed", "claimed manually via VNC", 1))
         else:
-            self.logger.error("⚠️ Still not collected after VNC wait — streak may break.")
-            self._report("⚠️ NOT collected — widget did not render")
+            self.logger.error("⚠️ Still not collected after VNC wait, streak may break.")
+            self._report("⚠️ NOT collected, widget did not render")
 
 
 async def claim_aliexpress() -> dict:

@@ -30,10 +30,6 @@ class GamerPowerClaimer(BaseClaimer):
         self.user = "GamerPower"
         self._fanatical_games = []
 
-    def _normalize_title(self, title: str) -> str:
-        """Strip non-alphanumeric chars for loose title comparison."""
-        return re.sub(r'[^a-z0-9]', '', str(title).lower())
-
     async def _get_claimed_titles_from_db(self) -> set[str]:
         """Fetch all previously claimed/existed game titles from the DB."""
         titles = set()
@@ -77,6 +73,7 @@ class GamerPowerClaimer(BaseClaimer):
                 })
 
             # 2. Global deduplication against DB (already claimed in Steam, Epic, GOG, etc)
+            logger.debug("GamerPower API returned %d giveaway(s)", len(games))
             db_titles = await self._get_claimed_titles_from_db()
             unique_gp = []
             for gp in games:
@@ -114,7 +111,7 @@ class GamerPowerClaimer(BaseClaimer):
         giveaway_url = game.get("giveaway_url", "")
         instructions = (game.get("instructions", "") or "").lower()
 
-        logger.info("🔗 [GamerPower] Processing '%s'", title)
+        logger.debug("🔗 [GamerPower] Processing '%s'", title)
 
         # 1. Resolve redirect to get final destination URL without opening browser
         final_url = giveaway_url.lower()
@@ -145,6 +142,8 @@ class GamerPowerClaimer(BaseClaimer):
             elif "alienware" in instructions: target_store = "alienware"
             elif "fanatical" in instructions: target_store = "fanatical"
 
+        logger.debug("[GamerPower] '%s' resolved to %s -> target_store=%s", title, final_url, target_store)
+
         # 3. Routing
         game["url"] = giveaway_url  # Set explicit url for claimers to use
         domain = urlparse(final_url).netloc.replace("www.", "")
@@ -156,7 +155,7 @@ class GamerPowerClaimer(BaseClaimer):
                     await self._claim_fanatical_game(game)
                 else:
                     logger.info("⏭️ [GamerPower] '%s' → Fanatical giveaway "
-                                "(skipped — disabled in config)", title)
+                                "(skipped, disabled in config)", title)
                                 
             elif target_store == "alienware":
                 if cfg.alienware_enable:
@@ -164,7 +163,7 @@ class GamerPowerClaimer(BaseClaimer):
                     await self._claim_alienware_game(game)
                 else:
                     logger.info("⏭️ [GamerPower] '%s' → Alienware Arena "
-                                "(skipped — disabled in config)", title)
+                                "(skipped, disabled in config)", title)
                                 
             elif target_store == "itchio":
                 if cfg.itchio_enable:
@@ -172,7 +171,7 @@ class GamerPowerClaimer(BaseClaimer):
                     await self._claim_itchio_game(game)
                 else:
                     logger.info("⏭️ [GamerPower] '%s' → Itch.io giveaway "
-                                "(skipped — disabled in config)", title)
+                                "(skipped, disabled in config)", title)
                                 
             elif target_store == "indiegala":
                 if cfg.indiegala_enable:
@@ -180,7 +179,7 @@ class GamerPowerClaimer(BaseClaimer):
                     await self._claim_indiegala_game(game)
                 else:
                     logger.info("⏭️ [GamerPower] '%s' → IndieGala giveaway "
-                                "(skipped — disabled in config)", title)
+                                "(skipped, disabled in config)", title)
                                 
             elif target_store == "major_store":
                 logger.info("🎮 [GamerPower] '%s' → Points to major store (%s). Attempting direct claim.", title, domain)
@@ -192,7 +191,7 @@ class GamerPowerClaimer(BaseClaimer):
                     await self.page.get(giveaway_url)
                     await self.sleep(10)
                 else:
-                    logger.info("⏭️ [GamerPower] '%s' → Unknown site (%s) — skipping", title, domain)
+                    logger.info("⏭️ [GamerPower] '%s' → Unknown site (%s), skipping", title, domain)
 
         except Exception:
             logger.exception("[GamerPower] Error processing '%s'", title)
@@ -204,7 +203,7 @@ class GamerPowerClaimer(BaseClaimer):
         if "steampowered" in domain:
             # Validate: must be a Steam app/sub page, not a generic landing page
             if "/app/" not in final_url and "/sub/" not in final_url:
-                logger.info("⏭️ [GamerPower] '%s' → Steam URL is not a game page (%s) — skipping", title, final_url)
+                logger.info("⏭️ [GamerPower] '%s' → Steam URL is not a game page (%s), skipping", title, final_url)
                 return
 
             from src.stores.steam import SteamClaimer
@@ -223,13 +222,12 @@ class GamerPowerClaimer(BaseClaimer):
             except Exception:
                 logger.exception("[GamerPower] Steam delegation failed for '%s'", title)
             finally:
-                if claimer.browser:
-                    claimer.browser.stop()
-            
+                await claimer.close_browser()
+
         elif "epicgames" in domain:
             # Validate: must be a product page (/p/ or /bundles/), not /mobile, /browse, etc.
             if "/p/" not in final_url and "/bundles/" not in final_url:
-                logger.info("⏭️ [GamerPower] '%s' → Epic URL is not a game page (%s) — skipping", title, final_url)
+                logger.info("⏭️ [GamerPower] '%s' → Epic URL is not a game page (%s), skipping", title, final_url)
                 return
 
             from src.stores.epic import EpicGamesClaimer
@@ -240,16 +238,17 @@ class GamerPowerClaimer(BaseClaimer):
             try:
                 # Launch a dedicated browser using the Epic profile to preserve cookies/auth
                 await claimer.start_browser(force_headful=True)
-                await claimer._ensure_logged_in()
+                if not await claimer._ensure_logged_in():
+                    logger.warning("[GamerPower] Epic login failed, skipping '%s'", title)
+                    return
                 await claimer._claim_game(final_url)
             except Exception:
                 logger.exception("[GamerPower] Epic delegation failed for '%s'", title)
             finally:
-                if claimer.browser:
-                    claimer.browser.stop()
-            
+                await claimer.close_browser()
+
         else:
-            logger.info("⏭️ [GamerPower] Target major store '%s' is not supported for direct delegation — skipping", domain)
+            logger.info("⏭️ [GamerPower] Target major store '%s' is not supported for direct delegation, skipping", domain)
 
     async def _claim_fanatical_game(self, game: dict) -> None:
         title = game.get("title", "Unknown")
@@ -401,6 +400,11 @@ class GamerPowerClaimer(BaseClaimer):
                 await self.page.get(url)
                 await self.sleep(4)
 
+            if cfg.dryrun:
+                logger.info("DRYRUN – skipped '%s'.", title)
+                notify_game["status"] = "available (dry run)"
+                return
+
             claimed = False
             for _ in range(5):
                 clicked = await self.page.evaluate("""
@@ -456,6 +460,11 @@ class GamerPowerClaimer(BaseClaimer):
         self.notify_games.append(notify_game)
 
         try:
+            if cfg.dryrun:
+                logger.info("DRYRUN – skipped '%s'.", title)
+                notify_game["status"] = "available (dry run)"
+                return
+
             # Check if we already notified about this game to prevent spam
             async with async_session() as session:
                 # We use status="notified" to distinctly mark these
@@ -465,12 +474,12 @@ class GamerPowerClaimer(BaseClaimer):
                 )
                 
                 if not created:
-                    logger.info("⏭️ [Alienware] '%s' — already notified before.", title)
+                    logger.info("⏭️ [Alienware] '%s', already notified before.", title)
                     notify_game["status"] = "existed"
                     return
 
                 # If it's new, we just notify
-                logger.info("🔔 [Alienware] '%s' — Please claim manually (requires ARP points): %s", title, url)
+                logger.info("🔔 [Alienware] '%s': Please claim manually (requires ARP points): %s", title, url)
                 existing.status = "notified"
                 await session.commit()
 
@@ -565,6 +574,11 @@ class GamerPowerClaimer(BaseClaimer):
                         return
 
             # Try to claim: click "Download or Claim" or "Claim" button
+            if cfg.dryrun:
+                logger.info("DRYRUN – skipped '%s'.", title)
+                notify_game["status"] = "available (dry run)"
+                return
+
             claimed = False
             for _ in range(5):
                 clicked = await self.page.evaluate("""
@@ -696,6 +710,11 @@ class GamerPowerClaimer(BaseClaimer):
                         return
 
             # Try to click claim / add-to-library button
+            if cfg.dryrun:
+                logger.info("DRYRUN – skipped '%s'.", title)
+                notify_game["status"] = "available (dry run)"
+                return
+
             claimed = False
             for _ in range(5):
                 clicked = await self.page.evaluate("""

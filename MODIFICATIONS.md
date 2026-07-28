@@ -2,7 +2,7 @@
 
 This document serves as a 100% transparent, file-by-file technical breakdown of the `fgc-remaster` (Python) project compared to the original `free-games-claimer` (Node.js). 
 
-If you are inspecting this codebase for security reasons, migrating your deployment, or simply wanting to understand how the internal logic was rewritten to defeat modern bot protections—this document covers every addition, modification, and omission without any marketing fluff.
+If you are inspecting this codebase for security reasons, migrating your deployment, or simply wanting to understand how the internal logic was rewritten to defeat modern bot protections, this document covers every addition, modification, and omission without any marketing fluff.
 
 ---
 
@@ -53,6 +53,6 @@ Instead of duplicating browser launch logic in every single store file (as the J
 
 ## 4. Verification Check
 If you wish to verify the integrity of the project:
-1. Examine `requirements.txt` — you will find standard, highly-vetted open-source libraries (`nodriver`, `sqlalchemy`, `aiosqlite`, `httpx`, `apprise`, `tenacity`).
-2. Search the codebase for execution tools (`os.system`, `subprocess`, `eval`, `exec`) — you will find them strictly bounded to safe operations or entirely absent inside core logic.
-3. Review outbound requests (e.g., search for `httpx.AsyncClient`) — you will see it only contacts target gaming stores, the SteamDB/GamerPower APIs, and exactly the webhook domain you provide in your `.env`.
+1. Examine `requirements.txt`, you will find standard, highly-vetted open-source libraries (`nodriver`, `sqlalchemy`, `aiosqlite`, `httpx`, `apprise`, `tenacity`).
+2. Search the codebase for execution tools (`os.system`, `subprocess`, `eval`, `exec`), you will find them strictly bounded to safe operations or entirely absent inside core logic.
+3. Review outbound requests (e.g., search for `httpx.AsyncClient`), you will see it only contacts target gaming stores, the SteamDB/GamerPower APIs, and exactly the webhook domain you provide in your `.env`.

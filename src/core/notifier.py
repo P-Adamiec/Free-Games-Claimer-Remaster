@@ -68,7 +68,7 @@ async def send_discord(
             if resp.status_code not in (200, 204):
                 logger.warning("Discord webhook returned %s: %s", resp.status_code, resp.text)
             else:
-                logger.info("Discord notification sent (%d/%d).", i + 1, len(chunks))
+                logger.debug("Discord notification sent (%d/%d).", i + 1, len(chunks))
 
 
 async def send_apprise(message: str, *, title: str | None = None) -> None:
@@ -87,7 +87,7 @@ async def send_apprise(message: str, *, title: str | None = None) -> None:
         None,
         lambda: ap.notify(body=message, title=title or "Free Games Claimer"),
     )
-    # debug, not info: apprise already logs each target — avoids a duplicate-looking line.
+    # debug, not info: apprise already logs each target, avoids a duplicate-looking line.
     logger.debug("Apprise notification sent.")
 
 
@@ -97,7 +97,7 @@ async def notify(
     screenshot_path: Path | None = None,
     title: str | None = None,
 ) -> None:
-    """Unified notification dispatcher — sends to ALL configured services in parallel."""
+    """Unified notification dispatcher, sends to ALL configured services in parallel."""
     tasks = []
 
     if cfg.discord_webhook:
@@ -109,6 +109,7 @@ async def notify(
         logger.debug("No notification service configured.")
         return
 
+    logger.debug("Dispatching notification to %d service(s): %s", len(tasks), message[:200])
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for result in results:
         if isinstance(result, Exception):
@@ -122,6 +123,6 @@ def format_game_list(games: list[dict]) -> str:
         url = g.get("url", "")
         title = g.get("title", "Unknown")
         status = g.get("status", "?")
-        lines.append(f"• **[{title}]({url})** — {status}")
+        lines.append(f"• **[{title}]({url})**: {status}")
     return "\n".join(lines)
 

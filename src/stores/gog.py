@@ -156,7 +156,7 @@ class GOGClaimer(BaseClaimer):
             self.log_signed_in()
             return True
 
-        # Not logged in — try to find the "Sign in" button on the page
+        # Not logged in, try to find the "Sign in" button on the page
         sign_in = await self.page.find("Sign in", timeout=5)
         if not sign_in:
             logger.error("Could not find Sign in button or username.")
@@ -169,7 +169,7 @@ class GOGClaimer(BaseClaimer):
         # Check if the user provided GOG credentials in the .env file
         email, password = cfg.gog_email, cfg.gog_password
         if not email or not password:
-            # No credentials available — ask the user to log in manually via VNC
+            # No credentials available, ask the user to log in manually via VNC
             logger.warning("GOG_EMAIL / GOG_PASSWORD not set.")
             logged_in = await self._wait_for_vnc_login(_is_logged_in)
             if not logged_in:
@@ -228,7 +228,7 @@ class GOGClaimer(BaseClaimer):
         # Wait for redirect back to gog.com and check login status
         for idx in range(15):
             current_url = await self.page.evaluate("window.location.href")
-            logger.info("GOG Wait Loop %s: current_url is %s", idx, current_url)
+            logger.debug("GOG Wait Loop %s: current_url is %s", idx, current_url)
             
             await self.page.evaluate('if(document.documentElement) document.documentElement.setAttribute("translate", "no");')
             
@@ -323,7 +323,7 @@ class GOGClaimer(BaseClaimer):
                     _vnc_check_gog_2fa,
                     timeout=180,
                     custom_msg=self._vnc_notice(
-                        "GOG — 2FA code needed",
+                        "GOG: 2FA code needed",
                         "GOG needs a 2FA verification code. Open the browser and enter it.",
                         180,
                     ),

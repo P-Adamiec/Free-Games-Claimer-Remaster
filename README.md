@@ -120,8 +120,10 @@ Options are set via environment variables in `.env`:
 | `PASSWORD` | | Default login password used by ALL stores unless a store-specific `*_PASSWORD` overrides it. |
 | `EG_EMAIL` | | Epic Games login email. |
 | `EG_PASSWORD` | | Epic Games login password. |
-| `EG_OTPKEY` | | Epic Games authenticator (TOTP) key — auto-filled. Email/SMS codes are entered manually via VNC. |
+| `EG_OTPKEY` | | Epic Games authenticator (TOTP) key, auto-filled. Email/SMS codes are entered manually via VNC. |
 | `EG_PARENTALPIN` | | Epic Games Parental Controls PIN. |
+| `EG_MOBILE` | `true` | Also claim Epic's weekly free mobile game (claimed on the same store page as the PC games). |
+| `EG_MOBILE_PLATFORMS` | `android,ios` | Which mobile versions to claim, Android and iOS are separate items of the same game. |
 | `PG_EMAIL` | | Prime Gaming (Amazon) email. |
 | `PG_PASSWORD` | | Prime Gaming password. |
 | `PG_OTPKEY` | | Prime Gaming 2FA OTP key. |
@@ -156,14 +158,17 @@ Options are set via environment variables in `.env`:
 | `UNKNOWN_STORES_ENABLE`| `false`| Open unsupported external stores for manual claiming via VNC. |
 | `BROWSER_DIR` | `data/browser` | Browser profile directory (persists cookies/sessions). |
 | `SCREENSHOTS_DIR` | `data/screenshots` | Directory where debug/failure screenshots are saved. |
-| `DEBUG` | `false` | Shows verbose actions the bot takes. |
+| `DEBUG` | `true` | Shows verbose actions the bot takes. |
+| `DEBUG_LIBS` | `false` | Adds the internals of the libraries the bot uses (every CDP frame sent to Chrome, HTTP handshakes, SQL queries). Only turn this on if a bug report asks for it. |
 | `DRYRUN`| `false` | Simulate a run without claiming games. Detects available giveaways and sends a summary report. |
 | `DISCORD_WEBHOOK` | | Discord webhook URL for notifications. |
 | `NOTIFY` | | Apprise URL(s) for Telegram, Slack, ntfy, etc. Multiple services can be separated by commas. |
 | `NOTIFY_TEST` | `false` | Send a test notification on startup to verify your setup works. |
 | `NOTIFY_SUMMARY` | `true` | Set to false to disable game claim summaries. (Applies to all services) |
 | `NOTIFY_ERRORS` | `true` | Set to false to disable fatal error alerts. (Applies to all services) |
-| `NOTIFY_CLAIM_FAILS`| `true` | Set to false to disable alerts for unclaimable games. (Applies to all services) |
+| `NOTIFY_CLAIM_FAILS`| `false` | Set to true to also report games that could not be claimed (e.g. a free DLC without the base game) in alerts and the run summary. (Applies to all services) |
+| `NOTIFY_ALREADY_CLAIMED`| `false` | Set to true to also list games you already own and check-ins already collected today. By default the summary shows only what actually changed in that run. |
+| `NOTIFY_UPDATES` | `true` | Check GitHub for a newer release (at startup, then at most once a day) and notify you once per version. Set to false to disable the check entirely, no request is made. |
 | `NOTIFY_LOGIN_REQUEST`| `true` | Set to false to disable VNC login request pings. (Applies to all services) |
 | `NOTIFY_SKIP_STORES` | | Comma-separated store keys whose notifications are silenced (they still run/claim). Accepts aliases (`ae`, `amazon`, `gp`). Example: `aliexpress`. |
 
@@ -241,7 +246,9 @@ free-games-claimer-remaster/
         ├── gog.py          # GOG (+ GOG code redemption from Prime)
         ├── steam.py        # Steam (SteamDB scraping)
         ├── aliexpress.py   # AliExpress check-in & coin collecting
+        ├── epic_mobile.py  # Epic's weekly free Android/iOS game (detection only)
         └── gamerpower.py   # GamerPower API (Fanatical, Itch.io, IndieGala, Alienware)
+└── tests/                  # Fast unit tests for pure logic (no browser, no accounts)
 ```
 
 ### How it works
@@ -258,7 +265,7 @@ free-games-claimer-remaster/
 
 ## Notifications
 
-Both Discord and Apprise can be configured simultaneously — notifications are sent to ALL configured services in parallel via async dispatch.
+Both Discord and Apprise can be configured simultaneously, notifications are sent to ALL configured services in parallel via async dispatch.
 
 - **Discord**: Set `DISCORD_WEBHOOK` in `.env`.
 - **Apprise (Telegram, Slack, Email, ntfy, etc.)**: Set `NOTIFY` in `.env`. You can provide multiple URLs separated by commas (e.g. `NOTIFY=ntfy://topic, tgram://token/id`).
@@ -277,6 +284,25 @@ Both Discord and Apprise can be configured simultaneously — notifications are 
 | Epic captcha | The stealth patches prevent 99% of captchas. EU 'Right of withdrawal' overlays are automatically accepted. If a rigorous manual prompt arrives, solve it once via VNC. |
 | False positive claims | Set `RESET_DB_GAMES=true` in your `.env`, reboot the container, and the bot will forget the last 7 days of claims, allowing the logic to try claiming them again. |
 | Container crashes on start | Check logs: `docker compose logs app --tail=50`. A clean restart purges `.X1-lock` bugs. |
+
+### Something is not working, what to send us
+
+The normal log shows only what you act on: which store is running, who is signed in, what was found and
+what was claimed, plus every warning and error. All the diagnostic detail is still there, one switch away:
+
+1. Set `DEBUG=true` in `.env` and restart (`docker compose up -d`), then reproduce the problem.
+2. Collect the log: `docker logs fgc-remaster --tail 500 > fgc.log` (remove your e-mail address if it appears).
+3. Look in the `data/` folder for what the bot saw:
+   - `data/screenshots/<store>/`, screenshots taken at every failure,
+   - `data/ae_coin_api.json`, raw AliExpress check-in responses (streak, coins),
+   - `data/steamdb_dump.html`, the SteamDB page as the bot parsed it (written only with `DEBUG=true`),
+   - `data/*_fail.html`, page snapshots from failed logins/check-ins.
+4. Watch it live if it is still running: open `http://localhost:7080` (noVNC) and take over the browser.
+
+A good bug report is: what you expected, what happened, the `DEBUG=true` log around the failure, and the
+matching screenshot. `DEBUG=true` covers what the bot itself did; only add `DEBUG_LIBS=true` if you are
+asked for the raw network or browser traffic, because that turns one run into tens of thousands of lines.
+Please switch both off again once the problem is solved.
 
 ---
 

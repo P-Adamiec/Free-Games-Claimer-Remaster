@@ -23,9 +23,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from src.core.config import cfg
 from src.core.database import init_db
+from src.core.updates import notify_if_update_available
 from src.stores.aliexpress import claim_aliexpress
 from src.stores.epic import claim_epic
 from src.stores.gamerpower import claim_gamerpower
@@ -72,11 +74,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fgc")
 
-# Silence verbose third-party loggers
-logging.getLogger("nodriver").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
-logging.getLogger("uc").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# Libraries that would otherwise bury our own diagnostics: every CDP frame, every
+# HTTP handshake, every SQLite call. DEBUG=true is about the bot, DEBUG_LIBS about these.
+NOISY_LIBRARIES = (
+    "nodriver", "uc", "websockets", "httpx", "httpcore",
+    "aiosqlite", "sqlalchemy", "apscheduler", "tzlocal", "asyncio", "apprise",
+)
+if not cfg.debug_libs:
+    for _name in NOISY_LIBRARIES:
+        logging.getLogger(_name).setLevel(logging.WARNING)
+
+
+# asyncio warns about Chrome PIDs we deliberately reaped ourselves in close_browser().
+class ReapedChildFilter(logging.Filter):
+    def filter(self, record):
+        return not str(record.msg).startswith("Unknown child process pid")
+
+logging.getLogger("asyncio").addFilter(ReapedChildFilter())
 
 # ---------------------------------------------------------------------------
 # Store registry – canonical name → (display name, coroutine function)
@@ -214,6 +228,7 @@ def _get_active_claimers() -> list[tuple[str, object]]:
     else:
         selected = ["steam", "epic", "prime", "gog", "aliexpress"]
 
+    logger.debug("Store selection: cli=%s STORES=%r -> %s", cli_stores, cfg.stores, selected)
     return [(ALL_CLAIMERS[k][0], ALL_CLAIMERS[k][1]) for k in selected if k in ALL_CLAIMERS]
 
 
@@ -256,11 +271,17 @@ async def run_claimers() -> None:
     store_names = [name for name, _ in claimers]
     logger.info("🎮 Starting claiming run… %s", ", ".join(store_names))
 
+    # Long-running containers never restart, so this is the only place they'd hear about a release.
+    await notify_if_update_available()
+
     aggregated_results = []
 
     for name, func in claimers:
         try:
+            logger.debug("▶ Running %s claimer…", name)
             res = await func()
+            if isinstance(res, dict):
+                logger.debug("%s returned %d game entr(ies): %s", name, len(res.get("games") or []), res.get("games"))
             if isinstance(res, dict) and res.get("games"):
                 aggregated_results.append(res)
         except Exception:
@@ -315,16 +336,21 @@ async def run_claimers() -> None:
             # Skip stores whose notifications are silenced (NOTIFY_SKIP_STORES).
             if not cfg.store_notify_enabled(_store_key(result.get("store", ""))):
                 continue
-            # Filter out games that were "existed" or "already redeemed", unless it's a dry run
+            # Only real changes are reported: already-owned and skipped entries need
+            # NOTIFY_ALREADY_CLAIMED, failed ones NOTIFY_CLAIM_FAILS (both off by default).
+            keep_owned = cfg.notify_already_claimed
             relevant_games = [
                 g for g in result["games"]
-                if "status" in g 
-                and "exist" not in g["status"].lower() 
-                and "already" not in g["status"].lower()
-                and ("skip" not in g["status"].lower() or "dry run" in g["status"].lower())
+                if "status" in g
+                and (keep_owned or "exist" not in g["status"].lower())
+                and (keep_owned or "already" not in g["status"].lower())
+                and (keep_owned or "skip" not in g["status"].lower() or "dry run" in g["status"].lower())
+                and (cfg.notify_claim_fails or "fail" not in g["status"].lower())
             ]
             
             if not relevant_games:
+                logger.debug("Summary: nothing to report for %s (all %d entr(ies) filtered out)",
+                             result.get("store"), len(result["games"]))
                 continue
                 
             header = f"**{result['store']}** ({result['user']}):" if result.get('user') else f"**{result['store']}**:"
@@ -333,7 +359,7 @@ async def run_claimers() -> None:
         if msg_parts:
             final_msg = "\n\n".join(msg_parts)
             if cfg.dryrun:
-                final_msg = "🛑 **DRY RUN SUMMARY — Games Remaining to be Claimed:**\n\n" + final_msg
+                final_msg = "🛑 **DRY RUN SUMMARY: games remaining to be claimed**\n\n" + final_msg
             await notify(final_msg)
 
     logger.info("✔ Claiming run complete.")
@@ -352,6 +378,17 @@ async def run_claimers_scheduled() -> None:
 async def main() -> None:
     """Initialise DB and either run once or start the scheduler."""
     _print_banner()
+    await notify_if_update_available(at_startup=True)
+    # Effective settings (no credentials), the first thing worth knowing in a bug report.
+    logger.debug(
+        "Settings: dryrun=%s debug_libs=%s show=%s %dx%d timeout=%ss stores=%r scheduler_hours=%s fixed=%r tz=%s "
+        "notify(summary=%s errors=%s fails=%s login=%s skip=%s) eg_mobile=%s(%s) data=%s",
+        cfg.dryrun, cfg.debug_libs, cfg.show, cfg.width, cfg.height, cfg.timeout // 1000, cfg.stores or "all",
+        cfg.scheduler_hours, cfg.scheduler_fixed_times, cfg.scheduler_timezone,
+        cfg.notify_summary, cfg.notify_errors, cfg.notify_claim_fails, cfg.notify_login_request,
+        sorted(cfg.notify_skip_stores) or "none", cfg.eg_mobile, ",".join(cfg.eg_mobile_platform_list) or "none",
+        cfg._data_dir,
+    )
     await init_db()
     logger.info("Database ready.")
 
@@ -376,13 +413,13 @@ async def main() -> None:
 
     # Send a test notification if NOTIFY_TEST=true (for verifying notification setup)
     if cfg.notify_test:
-        logger.info("🔔 NOTIFY_TEST=true — sending test notification...")
+        logger.info("🔔 NOTIFY_TEST=true, sending test notification...")
         services = ", ".join(filter(None, [
             "Discord" if cfg.discord_webhook else None,
             "Apprise" if cfg.notify_url else None,
         ])) or "⚠️ None configured"
         test_msg = (
-            "🔔 **Free Games Claimer — Test Notification**\n\n"
+            "🔔 **Free Games Claimer: Test Notification**\n\n"
             "✅ If you see this message, your notification setup is working correctly!\n\n"
             f"**Version:** v{__version__}\n"
             f"**Services:** {services}"
@@ -404,7 +441,8 @@ async def main() -> None:
     if cfg.scheduler_hours > 0:
         scheduler.add_job(
             run_claimers_scheduled,
-            trigger=CronTrigger(hour=f"*/{cfg.scheduler_hours}"),  # every X hours
+            # Interval, not cron: a cron step ("*/24") is invalid for 24h and longer.
+            trigger=IntervalTrigger(hours=cfg.scheduler_hours),
             id="claim_all",
             name="Claim free games",
             replace_existing=True,

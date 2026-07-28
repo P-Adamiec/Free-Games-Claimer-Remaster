@@ -67,7 +67,7 @@ RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\nAcquire::http::Ti
     && printf '#!/bin/sh\nexit 0\n' > /usr/bin/xdg-open \
     && chmod +x /usr/bin/xdg-open \
     # Suppress Chrome's "Open xdg-open?" confirmation dialog itself. Neutralising
-    # xdg-open only makes the launch a no-op AFTER the user clicks — the prompt is
+    # xdg-open only makes the launch a no-op AFTER the user clicks, the prompt is
     # shown by Chrome BEFORE that. The AutoLaunchProtocolsFromOrigins managed
     # policy tells Chrome to launch these AliExpress/Alibaba app schemes without
     # prompting; combined with the no-op xdg-open above, the launch does nothing.

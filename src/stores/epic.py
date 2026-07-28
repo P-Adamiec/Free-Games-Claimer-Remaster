@@ -16,13 +16,14 @@ from src.core.claimer import BaseClaimer, now_str
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
+from src.stores.epic_mobile import fetch_mobile_free_games
 
 logger = logging.getLogger("fgc.epic")
 
 # URL of Epic's free games page (where we look for available free games)
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
 
-# Login page URL — includes a redirect back to the free games page after login
+# Login page URL, includes a redirect back to the free games page after login
 URL_LOGIN = (
     "https://www.epicgames.com/id/login?lang=en-US"
     "&noHostRedirect=true&redirectUrl=" + URL_CLAIM
@@ -31,6 +32,11 @@ URL_LOGIN = (
 
 class EpicGamesClaimer(BaseClaimer):
     store_name = "epic"
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Mobile game URL -> "Android"/"iOS", so claims can be told apart (same title on every platform).
+        self._platform_labels: dict[str, str] = {}
 
     async def run(self) -> None:
         """Main entry point: detect free games and claim them."""
@@ -52,7 +58,11 @@ class EpicGamesClaimer(BaseClaimer):
             await self.sleep(3)
 
             # Step 1: Make sure we are logged in
-            await self._ensure_logged_in()
+            if not await self._ensure_logged_in():
+                logger.error("Aborting Epic Games flow due to login failure.")
+                if cfg.notify_errors:
+                    await self.notify("epic-games: could not sign in, no games were claimed.")
+                return
 
             # Step 2: Find which games are currently free
             free_games = await self._detect_free_games()
@@ -114,18 +124,22 @@ class EpicGamesClaimer(BaseClaimer):
     # Login
     # ------------------------------------------------------------------
 
-    async def _ensure_logged_in(self) -> None:
-        """Check if we're logged into Epic. If not, try automatic login or VNC fallback."""
+    async def _ensure_logged_in(self) -> bool:
+        """Check if we're logged into Epic. If not, try automatic login or VNC fallback.
+
+        Returns False only when signing in definitely failed, so the caller can stop
+        instead of clicking through pages logged out.
+        """
         
         # Navigate to Epic Store frontend to initialize cookies/session natively
         await self.page.get("https://store.epicgames.com/")
         await self.sleep(5)  # Give the SPA + web components time to hydrate
 
-        # Cloudflare can gate the store BEFORE login (looks like a failed "attempt 1/3" loop) — detect it and hand off to VNC.
+        # Cloudflare can gate the store BEFORE login (looks like a failed "attempt 1/3" loop), detect it and hand off to VNC.
         if await self._human_challenge_present():
             if not await self._wait_out_challenge("Epic Games"):
                 logger.warning("Epic security challenge not cleared in time – skipping.")
-                return
+                return False
             await self.page.get("https://store.epicgames.com/")
             await self.sleep(4)
 
@@ -158,7 +172,7 @@ class EpicGamesClaimer(BaseClaimer):
                         if (avatar) return true;
                     }
 
-                    // Signal 5: Modern Epic redesign check — if on store.epicgames.com and Wishlist/Cart/Gifts text is visible without any Sign In link
+                    // Signal 5: Modern Epic redesign check, if on store.epicgames.com and Wishlist/Cart/Gifts text is visible without any Sign In link
                     const allLinks = [...document.querySelectorAll('a')];
                     const hasSignIn = allLinks.some(a => {
                         const href = (a.getAttribute('href') || '').toLowerCase();
@@ -190,29 +204,29 @@ class EpicGamesClaimer(BaseClaimer):
                 """
             ) or ""
 
-        # Retry a few times — the web component loads asynchronously
+        # Retry a few times, the web component loads asynchronously
         for _ in range(3):
             if await _is_logged_in():
                 self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
                 self.log_signed_in()
-                return
+                return True
             await self.sleep(2)
 
         # Read credentials from the .env file
         email, password = cfg.eg_email, cfg.eg_password
         
-        # No credentials provided — let the user log in manually through VNC
+        # No credentials provided, let the user log in manually through VNC
         if not email or not password:
             logger.warning("EG_EMAIL missing. Proceeding to login page for manual VNC login...")
             await self._navigate_organically_to_login()
             logged_in = await self._wait_for_vnc_login(_is_logged_in)
             if not logged_in:
                 logger.warning("VNC login timed out – skipping.")
-                return
-            
+                return False
+
             self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
             self.log_signed_in()
-            return
+            return True
 
         # Automated stealth login loop
         challenge_blocked = False
@@ -265,7 +279,7 @@ class EpicGamesClaimer(BaseClaimer):
                             })()
                         ''')
                         if clicked_yes:
-                            logger.info("Auto-clicked 'Yes, continue'")
+                            logger.debug("Auto-clicked 'Yes, continue'")
                             await self.sleep(3)
                     except Exception:
                         pass
@@ -281,12 +295,12 @@ class EpicGamesClaimer(BaseClaimer):
                         })()
                     ''')
                     if clicked_maybe:
-                        logger.info("Auto-clicked 'Maybe later' on 2FA setup screen.")
+                        logger.debug("Auto-clicked 'Maybe later' on 2FA setup screen.")
                         await self.sleep(3)
                 except Exception:
                     pass
 
-                # Captcha/challenge can't be auto-solved — stop retrying and hand off to VNC below.
+                # Captcha/challenge can't be auto-solved, stop retrying and hand off to VNC below.
                 if wait_sec >= 4 and await self._human_challenge_present():
                     logger.warning("Captcha / security challenge detected during Epic login.")
                     challenge_blocked = True
@@ -294,7 +308,7 @@ class EpicGamesClaimer(BaseClaimer):
 
                 await self.sleep(1)
 
-            # On a manual-code screen, don't navigate away — hand off to VNC below.
+            # On a manual-code screen, don't navigate away, hand off to VNC below.
             if mfa_manual:
                 break
 
@@ -309,7 +323,7 @@ class EpicGamesClaimer(BaseClaimer):
             if challenge_blocked:
                 break  # retrying won't clear a captcha – go straight to VNC help
 
-        # Automated login failed (captcha/2FA/repeated) — notify and wait for the user to finish via VNC.
+        # Automated login failed (captcha/2FA/repeated), notify and wait for the user to finish via VNC.
         if mfa_manual:
             reason = " (2FA code needed)"
         elif challenge_blocked:
@@ -319,21 +333,22 @@ class EpicGamesClaimer(BaseClaimer):
         logger.warning("Automated Epic login failed%s – requesting manual login via VNC.", reason)
         if mfa_manual:
             custom_msg = self._vnc_notice(
-                "Epic Games — 2FA code needed",
+                "Epic Games: 2FA code needed",
                 "Enter the 6-digit code Epic sent to your email or phone (or from your authenticator). "
                 "If a 'One more step' security check appears, complete it too.",
             )
         else:
             custom_msg = self._vnc_notice(
-                "Epic Games — login needs you",
+                "Epic Games: login needs you",
                 "A captcha or security challenge is blocking automated sign-in. Open the browser, solve it and finish logging in.",
             )
         if await self._wait_for_vnc_login(_is_logged_in, custom_msg=custom_msg):
             self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
             self.log_signed_in()
-            return
+            return True
 
         logger.warning("Epic login still not completed after VNC wait – skipping.")
+        return False
 
     async def _mfa_prompt_present(self) -> bool:
         """True on Epic's 2FA code screen or method picker (email/SMS/authenticator)."""
@@ -459,12 +474,44 @@ class EpicGamesClaimer(BaseClaimer):
     )
 
     async def _detect_free_games(self) -> list[dict]:
-        """Find currently free games — tries the API first, falls back to page scraping."""
+        """Find currently free games, tries the API first, falls back to page scraping."""
         games = await self._detect_free_games_api()
-        if games:
-            return games
-        logger.warning("API detection returned 0 games, falling back to DOM scraping.")
-        return await self._detect_free_games_dom()
+        if not games:
+            logger.warning("API detection returned 0 games, falling back to DOM scraping.")
+            games = await self._detect_free_games_dom()
+        games.extend(await self._detect_mobile_free_games(games))
+        return games
+
+    async def _detect_mobile_free_games(self, known: list[dict]) -> list[dict]:
+        """Free mobile (Android/iOS) giveaways, same product pages, different listing API."""
+        if not cfg.eg_mobile:
+            return []
+        try:
+            # The mobile API only answers same-site requests from the store page.
+            current = await self.page.evaluate("location.href")
+            if not url_has_allowed_host(str(current), "store.epicgames.com"):
+                await self.page.get(URL_CLAIM)
+                await self.sleep(3)
+            mobile = await fetch_mobile_free_games(self._fetch_store_json, cfg.eg_mobile_platform_list)
+        except Exception:
+            logger.exception("Mobile free-game detection failed, continuing with PC games only")
+            return []
+        seen = {g["url"] for g in known}
+        new = [g for g in mobile if g["url"] not in seen]
+        for game in new:
+            if game.get("label"):
+                self._platform_labels[game["url"]] = game["label"]
+        if new:
+            logger.info("📱 Including %d free mobile game(s) (%s)", len(new), ", ".join(cfg.eg_mobile_platform_list))
+        return new
+
+    async def _fetch_store_json(self, url: str) -> dict:
+        """Read a store JSON API from inside the page (Cloudflare 403s plain HTTP clients)."""
+        raw = await self.page.evaluate(
+            f"fetch({json.dumps(url)}, {{credentials: 'omit'}}).then(r => r.text())",
+            await_promise=True,
+        )
+        return json.loads(raw) if isinstance(raw, str) else {}
 
     async def _detect_free_games_api(self) -> list[dict]:
         """Query Epic's public API to find which games are currently 100% off (free).
@@ -519,6 +566,8 @@ class EpicGamesClaimer(BaseClaimer):
                     title = el.get("title", "Unknown")
                     free_games.append({"url": url, "title": title})
 
+            logger.debug("Promo API: %d element(s), %d currently free: %s",
+                         len(elements), len(free_games), [g["url"] for g in free_games])
             return free_games
         except Exception:
             logger.exception("Failed to fetch free games from API")
@@ -620,9 +669,10 @@ class EpicGamesClaimer(BaseClaimer):
                 session, store="epic", user=self.user or "unknown",
                 game_id=game_id, title=game_id, url=url, status="unknown",
             )
-            if not created and obj.status == "claimed":
-                logger.debug("Already claimed, skip: %s", game_id)
-                return
+            # The page, not the database, decides: a row saying "claimed" can be stale
+            # or simply wrong, and skipping on it alone would hide the game forever.
+            if not created:
+                logger.debug("DB says '%s' is '%s', verifying on the store page anyway", game_id, obj.status)
 
             await self.page.get(url)
             await self.sleep(4)
@@ -679,6 +729,7 @@ class EpicGamesClaimer(BaseClaimer):
 
             btn_text = btn_info.get("text", "")
             flow_type = btn_info.get("flow", "unknown")
+            logger.debug("Page state for %s: button=%r flow=%s", game_id, btn_text, flow_type)
 
             # ── Read title ──
             title = await self.page.evaluate(
@@ -696,6 +747,10 @@ class EpicGamesClaimer(BaseClaimer):
                 })()
                 """
             )
+            # Mobile SKUs share the PC title, so tag them (e.g. "Foretales (Android)").
+            label = self._platform_labels.get(url)
+            if label:
+                title = f"{title} ({label})"
             obj.title = title
 
             notify_game = {"title": title, "url": url, "status": "failed"}
@@ -804,7 +859,7 @@ class EpicGamesClaimer(BaseClaimer):
                 logger.warning("Could not find '%s' button for '%s'.", initial_btn, title)
                 return False
 
-            logger.info("Clicked '%s' button for '%s'.", initial_btn, title)
+            logger.debug("Clicked '%s' button for '%s'.", initial_btn, title)
             if flow_type == "new_get":
                 post_get_state = ""
                 for _ in range(5):
@@ -840,9 +895,9 @@ class EpicGamesClaimer(BaseClaimer):
                     await self.take_screenshot(f"epic_get_still_visible_{title[:20]}")
                     return False
                 if post_get_state:
-                    logger.info("After Get: %s detected", post_get_state)
+                    logger.debug("After Get: %s detected", post_get_state)
                 else:
-                    logger.info("After Get: no immediate state change detected")
+                    logger.debug("After Get: no immediate state change detected")
 
             await self.sleep(3)
 
@@ -850,7 +905,7 @@ class EpicGamesClaimer(BaseClaimer):
             # "Device not supported" → Continue
             cont_clicked = await self._cdp_click_element_by_text("continue", timeout=5)
             if cont_clicked:
-                logger.info("Clicked 'Continue' dialog. Waiting for checkout overlay...")
+                logger.debug("Clicked 'Continue' dialog. Waiting for checkout overlay...")
                 # The checkout overlay takes several seconds to load after Continue
                 await self.sleep(5)
             else:
@@ -973,7 +1028,7 @@ class EpicGamesClaimer(BaseClaimer):
                         """
                     )
                     if already_done:
-                        logger.info("Already confirmed without needing more clicks.")
+                        logger.debug("Already confirmed without needing more clicks.")
                         return True
 
                     await self.sleep(2)
@@ -1037,7 +1092,7 @@ class EpicGamesClaimer(BaseClaimer):
     ) -> bool:
         """Click an element using CDP Input.dispatchMouseEvent (real mouse click).
 
-        This is the most reliable click method — it sends actual browser-level
+        This is the most reliable click method, it sends actual browser-level
         mouse input at the element's pixel coordinates, bypassing all
         JavaScript event handling (including React synthetic events).
 
@@ -1155,7 +1210,7 @@ class EpicGamesClaimer(BaseClaimer):
         return False
 
     # ------------------------------------------------------------------
-    # Purchase iframe handling (via CDP) — OLD flow
+    # Purchase iframe handling (via CDP), OLD flow
     # ------------------------------------------------------------------
 
     async def _handle_purchase_iframe(self, title: str) -> bool:
