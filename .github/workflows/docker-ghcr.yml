@@ -6,12 +6,22 @@ on:
       - main
       - dev
     tags:
-      - "v*.*"
+      - "v*.*"       # Release tags from main: v1.5 -> v1.5 + latest + main
+      - "v*.*d"      # Dev tags from dev: v1.5d -> v1.5d + dev
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
+
+# A tag push repeats the build of a commit the branch push already started, and it
+# publishes a superset of the tags, so let the newer run replace the older one.
+concurrency:
+  group: ghcr-${{ github.sha }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -32,6 +42,12 @@ jobs:
           echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
           echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -45,10 +61,18 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME_LC }}
           tags: |
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            # Branch pushes: dev -> :dev, main -> :main (inert on tag pushes).
             type=ref,event=branch
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=ref,event=tag
+            # Dev release tag (v1.5d): version tag plus the image testers pull.
+            type=raw,value=${{ github.ref_name }},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && endsWith(github.ref_name, 'd') }}
+            type=raw,value=dev,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && endsWith(github.ref_name, 'd') }}
+            # Stable release tag (v1.5): version tag plus what everyone else pulls.
+            type=raw,value=${{ github.ref_name }},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !endsWith(github.ref_name, 'd') }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !endsWith(github.ref_name, 'd') }}
+            type=raw,value=main,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !endsWith(github.ref_name, 'd') }}
+            # Fallback for a release published by hand in the web UI.
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
             type=raw,value=manual,enable=${{ github.event_name == 'workflow_dispatch' }}
             type=sha,prefix=sha-
 
@@ -58,5 +82,7 @@ jobs:
           context: .
           push: true
           no-cache: true
+          # Same platforms as Docker Hub, so Raspberry Pi users can pull from GHCR too.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

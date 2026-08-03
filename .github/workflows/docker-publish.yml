@@ -14,6 +14,11 @@ on:
 env:
   REGISTRY_DOCKER: docker.io
 
+# Re-pushing a tag onto the same commit supersedes the run already in flight.
+concurrency:
+  group: dockerhub-${{ github.sha }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest

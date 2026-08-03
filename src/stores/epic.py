@@ -318,7 +318,7 @@ class EpicGamesClaimer(BaseClaimer):
             if await _is_logged_in():
                 self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
                 self.log_signed_in()
-                return
+                return True
 
             if challenge_blocked:
                 break  # retrying won't clear a captcha – go straight to VNC help

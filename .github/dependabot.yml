@@ -16,9 +16,12 @@ updates:
       prefix: deps
       include: scope
     groups:
-      python-dependencies:
+      python-minor-and-patch:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
