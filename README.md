@@ -12,9 +12,11 @@
 Automatically claims free games on:
 
 - <img alt="logo steam" src="https://store.steampowered.com/favicon.ico" width="20" align="middle" /> **Steam** – via [SteamDB](https://steamdb.info/upcoming/free/) scraping (only *Free to Keep*, not *Play for Free*)
-- <img alt="logo epic-games" src="https://github.com/user-attachments/assets/82e9e9bf-b6ac-4f20-91db-36d2c8429cb6" width="20" align="middle" /> **Epic Games Store** – weekly free games
+- <img alt="logo epic-games" src="https://github.com/user-attachments/assets/82e9e9bf-b6ac-4f20-91db-36d2c8429cb6" width="20" align="middle" /> **Epic Games Store** – weekly free games, including the weekly free Android/iOS mobile game (`EG_MOBILE`)
+- <img alt="logo fab" src="https://www.google.com/s2/favicons?domain=fab.com&sz=64" width="20" align="middle" /> **Fab** – Epic's asset marketplace
 - <img alt="logo prime-gaming" src="https://github.com/user-attachments/assets/7627a108-20c6-4525-a1d8-5d221ee89d6e" width="20" align="middle" /> **Amazon Prime Gaming** – monthly Prime Gaming catalogue + GOG key redemption
 - <img alt="logo gog" src="https://github.com/user-attachments/assets/49040b50-ee14-4439-8e3c-e93cafd7c3a5" width="20" align="middle" /> **GOG** – periodic free giveaways
+- <img alt="logo ubisoft" src="https://www.ubisoft.com/favicon.ico" width="20" align="middle" /> **Ubisoft** – free game giveaways from [ubisoft.com/games/free](https://www.ubisoft.com/en-us/games/free) (giveaways only, never trials, demos or free weekends)
 - <img alt="logo aliexpress" src="https://www.aliexpress.com/favicon.ico" width="20" align="middle" /> **AliExpress** – automated daily check-in that collects coins, using a real-device mobile fingerprint to stay undetected and reading the balance from the coin API
 
 **Gamerpower API** routing to indirect stores (Still under development):
@@ -62,6 +64,10 @@ GOG_PASSWORD=your_password
 STEAM_USERNAME=your_username
 STEAM_PASSWORD=your_password
 
+# Ubisoft
+UBI_EMAIL=your@email.com
+UBI_PASSWORD=your_password
+
 # AliExpress
 AE_EMAIL=your@email.com
 AE_PASSWORD=your_password
@@ -70,7 +76,7 @@ AE_PASSWORD=your_password
 DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 
 # Run only specific stores (comma-separated)
-# Leave commented to run ALL
+# Leave commented to run the defaults (everything except gamerpower)
 # STORES=steam,prime,gog
 ```
 
@@ -109,6 +115,7 @@ Options are set via environment variables in `.env`:
 | `HEIGHT` | `720` | Browser/VNC screen height. |
 | `NOVNC_PORT` | `7080` | noVNC web access port. |
 | `VNC_IP` | `localhost`| Host for VNC notification links. Alerts include a one-click `http://<VNC_IP>:<NOVNC_PORT>/?autoconnect=true`. |
+| `VNC_URL` | | Full public noVNC address for notification links, e.g. `https://fgc.example.tld`. Use it behind a reverse proxy: it keeps your scheme and drops the port, replacing `VNC_IP` and `NOVNC_PORT` in the link (`NOVNC_PORT` still publishes the container port). |
 | `VNC_PASSWORD` | | Optional password for VNC access (empty = no password). |
 | `SCHEDULER_HOURS`| `12` | Interval in hours between automatic claiming runs. Accepts any positive number (for example: `1`, `12`, `24`, `72`). Set `0` to disable interval runs. |
 | `SCHEDULER_TIMEZONE` | `UTC` | IANA timezone used for fixed daily scheduler times. |
@@ -138,12 +145,16 @@ Options are set via environment variables in `.env`:
 | `GOG_OTP_CODES` | | Comma-separated list of GOG backup codes. |
 | `STEAM_USERNAME` | | Steam username. |
 | `STEAM_PASSWORD` | | Steam password. |
+| `FAB_ACCEPT_EULA` | `true` | Let the bot accept Fab's licence agreement and the EU right-of-withdrawal waiver, both required to claim. Set to `false` to stop before them. Fab reuses `EG_EMAIL` / `EG_PASSWORD` / `EG_OTPKEY`. |
+| `UBI_EMAIL` | | Ubisoft Connect login email. |
+| `UBI_PASSWORD` | | Ubisoft Connect password. |
+| `UBI_OTPKEY` | | Ubisoft authenticator (TOTP) secret, for accounts with two-step verification. |
 | `AE_EMAIL` | | AliExpress login email. |
 | `AE_PASSWORD` | | AliExpress login password. |
 | `AE_MIN_COINS` | `2` | Skip the daily check-in when it offers fewer coins than this (protects against the 1-coin bot-flag state). |
 | `AE_FLAG_RETRIES` | `3` | How many times to wait and re-approach the coin page when the offer is capped. |
 | `AE_FLAG_WAIT` | `480` | Seconds to wait between retries (kept above AliExpress' ~7-min penalty so one wait clears it). |
-| `STORES` | *(all)* | Comma-separated list of stores to run. |
+| `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `fab`, `prime`, `gog`, `ubisoft`, `aliexpress`; add `gamerpower` here to enable it too. |
 | `RESET_DB_GAMES` | `false` | Retroactively erase any database claims recorded within the last 7 days upon execution. Assists in clearing false positives. |
 | `FANATICAL_ENABLE`| `false`| Enable Fanatical claiming via GamerPower. |
 | `FANATICAL_EMAIL` | | Fanatical account email. |
@@ -207,7 +218,7 @@ The application supports three scheduling modes: running on a recurring interval
 
 ### Selective module execution
 
-Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`, `gog`, `amazon`):
+Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`, `gog`, `amazon`, `ubisoft`/`ubi`, `fab`, `aliexpress`/`ae`, `gamerpower`/`gp`):
 
 ```bash
 # Method 1: Via environment variable (recommended)
@@ -245,6 +256,8 @@ free-games-claimer-remaster/
         ├── prime.py        # Amazon Prime Gaming
         ├── gog.py          # GOG (+ GOG code redemption from Prime)
         ├── steam.py        # Steam (SteamDB scraping)
+        ├── epic_fab.py     # Fab limited-time free assets (shares Epic's session)
+        ├── ubisoft.py      # Ubisoft giveaways (ubisoft.com/games/free)
         ├── aliexpress.py   # AliExpress check-in & coin collecting
         ├── epic_mobile.py  # Epic's weekly free Android/iOS game (detection only)
         └── gamerpower.py   # GamerPower API (Fanatical, Itch.io, IndieGala, Alienware)

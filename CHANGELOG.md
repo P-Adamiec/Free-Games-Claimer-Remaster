@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6] - 2026-08-07
+
+### Added
+- **Ubisoft giveaways (`src/stores/ubisoft.py`)** – the bot could not see Ubisoft's occasional full-game giveaways. The new store reads the feed on [ubisoft.com/games/free](https://www.ubisoft.com/en-us/games/free) and claims on `register.ubisoft.com` using `UBI_EMAIL` / `UBI_PASSWORD` (`UBI_OTPKEY` for codes); aliases `ubisoft` and `ubi`. Giveaways share the `gametrial` type with ordinary trials, so the filter also demands a real promotion window and the claim page decides before any click.
+- **Fab limited-time free assets (`src/stores/epic_fab.py`)** – Fab, Epic's asset marketplace, gives paid assets away every week. The new store reads `fab.com/i/blades/free_content_blade` and claims them; aliases `fab` and `epic-fab`. Only the blade's `isLimitedFreeContent` flag authorises a claim: listings keep their original price, and the search API ignores unknown filters. Sign-in reuses Epic's profile, so no second login; `FAB_ACCEPT_EULA=false` stops before the licence prompts.
+- **Public noVNC address for notification links (`VNC_URL`, [#3](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/3))** – the one-click link in every "manual action needed" alert was fixed to `http://<VNC_IP>:<NOVNC_PORT>/`, which does not fit a reverse proxy. `VNC_URL=https://fgc.example.tld` now yields `https://fgc.example.tld/?autoconnect=true`, keeping your scheme and path. It replaces `VNC_IP` and `NOVNC_PORT` in the link only; unset, nothing changes.
+
+### Fixed
+- **Every store's browser advertised a language list no real Chrome produces** – `claimer.py` launched Chrome with `--accept-lang=en-US,en;q=0.9`, and Chrome copies that flag into `navigator.languages`, so pages read `["en-US", "en;q=0.9"]`. No real browser exposes an HTTP quality value there, which makes it a reliable automation signal: Ubisoft's DataDome answered sign-in with `403` until the flag became `--accept-lang=en-US,en`. Affects every store.
+
 ## [1.5] - 2026-08-03
 
 ### Added

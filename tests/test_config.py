@@ -24,7 +24,7 @@ def _reload(monkeypatch, **env):
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: False)
     for key in ("EG_MOBILE", "EG_MOBILE_PLATFORMS", "NOTIFY_SKIP_STORES",
                 "NOTIFY_CLAIM_FAILS", "NOTIFY_ALREADY_CLAIMED", "DRYRUN", "WIDTH",
-                "DEBUG", "DEBUG_LIBS"):
+                "DEBUG", "DEBUG_LIBS", "VNC_IP", "NOVNC_PORT", "VNC_URL"):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -113,3 +113,48 @@ class TestEpicMobilePlatforms:
 
     def test_can_be_disabled(self, monkeypatch):
         assert _reload(monkeypatch, EG_MOBILE="false").eg_mobile is False
+
+
+class TestVncUrl:
+    """The one-click link in every "manual action needed" notification.
+
+    VNC_URL is for reverse proxies (issue #3): it must win over VNC_IP and
+    NOVNC_PORT, while leaving those two working exactly as before for everyone else.
+    """
+
+    def test_default_is_unchanged(self, monkeypatch):
+        assert _reload(monkeypatch).vnc_url == "http://localhost:7080/?autoconnect=true"
+
+    def test_host_and_port_still_work_together(self, monkeypatch):
+        cfg = _reload(monkeypatch, VNC_IP="192.168.1.100", NOVNC_PORT="8080")
+        assert cfg.vnc_url == "http://192.168.1.100:8080/?autoconnect=true"
+
+    def test_full_url_drops_the_port(self, monkeypatch):
+        cfg = _reload(monkeypatch, VNC_URL="https://fgc.reverseproxy.tld")
+        assert cfg.vnc_url == "https://fgc.reverseproxy.tld/?autoconnect=true"
+
+    def test_full_url_overrides_host_and_port(self, monkeypatch):
+        cfg = _reload(monkeypatch, VNC_URL="https://fgc.reverseproxy.tld",
+                      VNC_IP="192.168.1.100", NOVNC_PORT="8080")
+        assert cfg.vnc_url == "https://fgc.reverseproxy.tld/?autoconnect=true"
+
+    def test_trailing_slash_does_not_double_up(self, monkeypatch):
+        cfg = _reload(monkeypatch, VNC_URL="https://fgc.reverseproxy.tld/")
+        assert cfg.vnc_url == "https://fgc.reverseproxy.tld/?autoconnect=true"
+
+    def test_a_path_is_kept(self, monkeypatch):
+        cfg = _reload(monkeypatch, VNC_URL="https://proxy.tld/fgc")
+        assert cfg.vnc_url == "https://proxy.tld/fgc/?autoconnect=true"
+
+    def test_missing_scheme_becomes_https(self, monkeypatch):
+        cfg = _reload(monkeypatch, VNC_URL="fgc.reverseproxy.tld")
+        assert cfg.vnc_url == "https://fgc.reverseproxy.tld/?autoconnect=true"
+
+    def test_plain_http_is_honoured(self, monkeypatch):
+        cfg = _reload(monkeypatch, VNC_URL="http://nas.local:9000")
+        assert cfg.vnc_url == "http://nas.local:9000/?autoconnect=true"
+
+    @pytest.mark.parametrize("value", ["", "   ", "/"])
+    def test_empty_value_falls_back_to_host_and_port(self, monkeypatch, value):
+        cfg = _reload(monkeypatch, VNC_URL=value, VNC_IP="192.168.1.100")
+        assert cfg.vnc_url == "http://192.168.1.100:7080/?autoconnect=true"

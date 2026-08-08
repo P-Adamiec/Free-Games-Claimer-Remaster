@@ -72,10 +72,18 @@ class Config:
     vnc_login_timeout: int = _int("VNC_LOGIN_TIMEOUT", 180) # seconds
     novnc_port: str = os.getenv("NOVNC_PORT", "7080")
     vnc_ip: str = os.getenv("VNC_IP", "localhost")
+    # Full public noVNC address for reverse proxies; replaces VNC_IP and NOVNC_PORT in links.
+    vnc_url_base: str | None = os.getenv("VNC_URL")
 
     @property
     def vnc_url(self) -> str:
         """One-click noVNC link for notifications (autoconnect opens the session)."""
+        base = (self.vnc_url_base or "").strip().rstrip("/")
+        if base:
+            # A bare host means a reverse proxy, which is practically always https.
+            if "://" not in base:
+                base = f"https://{base}"
+            return f"{base}/?autoconnect=true"
         return f"http://{self.vnc_ip}:{self.novnc_port}/?autoconnect=true"
 
     scheduler_hours: int = _int("SCHEDULER_HOURS", 12)
@@ -149,6 +157,15 @@ class Config:
     steam_username: str | None = os.getenv("STEAM_USERNAME")
     steam_password: str | None = os.getenv("STEAM_PASSWORD") or os.getenv("PASSWORD")
 
+    # --- Fab (Epic's asset marketplace, signs in with the Epic account) ---
+    # Claiming requires accepting Fab's licence and the EU right-of-withdrawal waiver.
+    fab_accept_eula: bool = _bool("FAB_ACCEPT_EULA", default=True)
+
+    # --- Ubisoft ---
+    ubi_email: str | None = os.getenv("UBI_EMAIL") or os.getenv("EMAIL")
+    ubi_password: str | None = os.getenv("UBI_PASSWORD") or os.getenv("PASSWORD")
+    ubi_otpkey: str | None = os.getenv("UBI_OTPKEY")
+
     # --- GamerPower & Fanatical ---
     # Some GamerPower giveaways redirect to Fanatical.com,
     # which requires a Fanatical account + Steam account connection.
@@ -183,7 +200,7 @@ class Config:
 
     # --- Module selection ---
     # Comma-separated list of stores to run (e.g. "steam,prime").
-    # Empty = all stores enabled (default).
+    # Empty = main.py's DEFAULT_STORES, which is every store except GamerPower.
     stores: str = os.getenv("STORES", "")
 
 

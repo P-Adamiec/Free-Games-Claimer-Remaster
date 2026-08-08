@@ -53,6 +53,9 @@ class BaseClaimer:
 
     store_name: str = "base"
 
+    # Profile to reuse when a store rides another's session (Fab on Epic); empty means own profile.
+    profile_name: str = ""
+
     # Off by default: the hand-rolled desktop _STEALTH_JS mismatches the real container and triggered captchas (see CHANGELOG 1.4).
     inject_base_stealth: bool = False
 
@@ -171,7 +174,7 @@ class BaseClaimer:
         import shutil
 
         # Ensure persistent browser profile directory exists (per store)
-        store_browser_dir = cfg.browser_dir / self.store_name
+        store_browser_dir = cfg.browser_dir / (self.profile_name or self.store_name)
         store_browser_dir.mkdir(parents=True, exist_ok=True)
 
         # Disable Chrome's "Save password?" popup by setting profile preferences
@@ -228,7 +231,7 @@ class BaseClaimer:
             "--hide-crash-restore-bubble",
             "--restore-last-session",
             "--lang=en-US",
-            "--accept-lang=en-US,en;q=0.9",
+            "--accept-lang=en-US,en",  # no q-values: Chrome copies this into navigator.languages
             "--disable-dev-shm-usage",     # Docker shared memory fix
             "--disable-smooth-scrolling",  # CPU optimization
             "--disable-extensions",        # CPU optimization

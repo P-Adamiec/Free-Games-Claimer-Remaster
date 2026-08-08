@@ -30,10 +30,12 @@ from src.core.database import init_db
 from src.core.updates import notify_if_update_available
 from src.stores.aliexpress import claim_aliexpress
 from src.stores.epic import claim_epic
+from src.stores.epic_fab import claim_fab
 from src.stores.gamerpower import claim_gamerpower
 from src.stores.gog import claim_gog
 from src.stores.prime import claim_prime
 from src.stores.steam import claim_steam
+from src.stores.ubisoft import claim_ubisoft
 from src.core.notifier import notify
 from src.version import __version__, __author__, __repo__, __contributors__
 
@@ -50,8 +52,8 @@ class StorePrefixFilter(logging.Filter):
     def filter(self, record):
         if record.name.startswith("fgc."):
             store = record.name.split(".")[-1]
-            if store in ("epic", "steam", "gog", "prime", "aliexpress"):
-                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "aliexpress": "AliExpress"}
+            if store in ("epic", "steam", "gog", "prime", "aliexpress", "ubisoft", "fab"):
+                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "aliexpress": "AliExpress", "ubisoft": "Ubisoft", "fab": "Fab"}
                 prefix = escape(f"[{store_map[store]}]")
                 # Prepend to the message template
                 record.msg = f"{prefix} {record.msg}"
@@ -102,11 +104,17 @@ logging.getLogger("asyncio").addFilter(ReapedChildFilter())
 ALL_CLAIMERS: dict[str, tuple[str, object]] = {
     "steam":      ("Steam",        claim_steam),
     "epic":       ("Epic Games",   claim_epic),
+    "fab":        ("Fab",          claim_fab),
     "prime":      ("Prime Gaming", claim_prime),
     "gog":        ("GOG",          claim_gog),
+    "ubisoft":    ("Ubisoft",      claim_ubisoft),
     "gamerpower": ("GamerPower",   claim_gamerpower),
     "aliexpress": ("AliExpress",   claim_aliexpress),
 }
+
+# What runs when neither the CLI nor STORES names anything. GamerPower stays opt-in:
+# its sub-stores each need their own *_ENABLE flag anyway.
+DEFAULT_STORES: list[str] = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress"]
 
 # Display name (e.g. "Prime Gaming") → canonical store key (e.g. "prime").
 _DISPLAY_TO_KEY: dict[str, str] = {disp: key for key, (disp, _) in ALL_CLAIMERS.items()}
@@ -124,11 +132,15 @@ _ALIASES: dict[str, str] = {
     "epic":          "epic",
     "epic-games":    "epic",
     "epicgames":     "epic",
+    "fab":           "fab",
+    "epic-fab":      "fab",
     "prime":         "prime",
     "prime-gaming":  "prime",
     "primegaming":   "prime",
     "amazon":        "prime",
     "gog":           "gog",
+    "ubisoft":       "ubisoft",
+    "ubi":           "ubisoft",
     "gamerpower":    "gamerpower",
     "gp":            "gamerpower",
     "aliexpress":    "aliexpress",
@@ -216,7 +228,7 @@ def _get_active_claimers() -> list[tuple[str, object]]:
     Priority:
       1. CLI positional args  (e.g.  ``python main.py steam prime``)
       2. ``STORES`` env var   (e.g.  ``STORES=steam,prime``)
-      3. All stores           (default)
+      3. ``DEFAULT_STORES``   (default)
     """
     # Collect positional args (skip flags like --once)
     cli_stores = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -226,7 +238,7 @@ def _get_active_claimers() -> list[tuple[str, object]]:
     elif cfg.stores:
         selected = _resolve_stores([s for s in cfg.stores.split(",") if s.strip()])
     else:
-        selected = ["steam", "epic", "prime", "gog", "aliexpress"]
+        selected = list(DEFAULT_STORES)
 
     logger.debug("Store selection: cli=%s STORES=%r -> %s", cli_stores, cfg.stores, selected)
     return [(ALL_CLAIMERS[k][0], ALL_CLAIMERS[k][1]) for k in selected if k in ALL_CLAIMERS]
