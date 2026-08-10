@@ -34,4 +34,4 @@ rich>=15.0.0
 httpx>=0.28.1
 
 # Tests (development only, not needed to run the bot)
-pytest>=8.4.0
+pytest>=9.1.1
