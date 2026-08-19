@@ -27,6 +27,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from src.core.config import cfg
 from src.core.database import init_db
+from src.core.selection import apply_run_selection
 from src.core.updates import notify_if_update_available
 from src.stores.aliexpress import claim_aliexpress
 from src.stores.epic import claim_epic
@@ -35,6 +36,7 @@ from src.stores.gamerpower import claim_gamerpower
 from src.stores.gog import claim_gog
 from src.stores.prime import claim_prime
 from src.stores.steam import claim_steam
+from src.stores.unity import claim_unity
 from src.stores.ubisoft import claim_ubisoft
 from src.core.notifier import notify
 from src.version import __version__, __author__, __repo__, __contributors__
@@ -52,8 +54,8 @@ class StorePrefixFilter(logging.Filter):
     def filter(self, record):
         if record.name.startswith("fgc."):
             store = record.name.split(".")[-1]
-            if store in ("epic", "steam", "gog", "prime", "aliexpress", "ubisoft", "fab"):
-                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "aliexpress": "AliExpress", "ubisoft": "Ubisoft", "fab": "Fab"}
+            if store in ("epic", "steam", "gog", "prime", "aliexpress", "ubisoft", "fab", "unity"):
+                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "aliexpress": "AliExpress", "ubisoft": "Ubisoft", "fab": "Fab", "unity": "Unity"}
                 prefix = escape(f"[{store_map[store]}]")
                 # Prepend to the message template
                 record.msg = f"{prefix} {record.msg}"
@@ -108,13 +110,15 @@ ALL_CLAIMERS: dict[str, tuple[str, object]] = {
     "prime":      ("Prime Gaming", claim_prime),
     "gog":        ("GOG",          claim_gog),
     "ubisoft":    ("Ubisoft",      claim_ubisoft),
+    "unity":      ("Unity",        claim_unity),
     "gamerpower": ("GamerPower",   claim_gamerpower),
     "aliexpress": ("AliExpress",   claim_aliexpress),
 }
 
-# What runs when neither the CLI nor STORES names anything. GamerPower stays opt-in:
-# its sub-stores each need their own *_ENABLE flag anyway.
-DEFAULT_STORES: list[str] = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress"]
+# What runs when neither the CLI nor STORES names anything. GamerPower goes last so the
+# stores with their own module claim first and its database dedup can do its job.
+DEFAULT_STORES: list[str] = ["steam", "epic", "fab", "prime", "gog", "ubisoft",
+                             "aliexpress", "gamerpower"]
 
 # Display name (e.g. "Prime Gaming") → canonical store key (e.g. "prime").
 _DISPLAY_TO_KEY: dict[str, str] = {disp: key for key, (disp, _) in ALL_CLAIMERS.items()}
@@ -141,6 +145,8 @@ _ALIASES: dict[str, str] = {
     "gog":           "gog",
     "ubisoft":       "ubisoft",
     "ubi":           "ubisoft",
+    "unity":         "unity",
+    "unity-assets":  "unity",
     "gamerpower":    "gamerpower",
     "gp":            "gamerpower",
     "aliexpress":    "aliexpress",
@@ -240,6 +246,8 @@ def _get_active_claimers() -> list[tuple[str, object]]:
     else:
         selected = list(DEFAULT_STORES)
 
+    # Published so GamerPower only delegates to stores this run actually starts.
+    apply_run_selection(selected)
     logger.debug("Store selection: cli=%s STORES=%r -> %s", cli_stores, cfg.stores, selected)
     return [(ALL_CLAIMERS[k][0], ALL_CLAIMERS[k][1]) for k in selected if k in ALL_CLAIMERS]
 

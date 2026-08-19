@@ -157,6 +157,12 @@ class Config:
     steam_username: str | None = os.getenv("STEAM_USERNAME")
     steam_password: str | None = os.getenv("STEAM_PASSWORD") or os.getenv("PASSWORD")
 
+    # --- Unity Asset Store ---
+    unity_email: str | None = os.getenv("UNITY_EMAIL") or os.getenv("EMAIL")
+    unity_password: str | None = os.getenv("UNITY_PASSWORD") or os.getenv("PASSWORD")
+    # Claiming needs Unity's Terms of Service accepted once at checkout.
+    unity_accept_tos: bool = _bool("UNITY_ACCEPT_TOS", default=True)
+
     # --- Fab (Epic's asset marketplace, signs in with the Epic account) ---
     # Claiming requires accepting Fab's licence and the EU right-of-withdrawal waiver.
     fab_accept_eula: bool = _bool("FAB_ACCEPT_EULA", default=True)
@@ -165,6 +171,10 @@ class Config:
     ubi_email: str | None = os.getenv("UBI_EMAIL") or os.getenv("EMAIL")
     ubi_password: str | None = os.getenv("UBI_PASSWORD") or os.getenv("PASSWORD")
     ubi_otpkey: str | None = os.getenv("UBI_OTPKEY")
+
+    # --- GamerPower ---
+    # Most giveaways are in-game DLC needing a per-game account, so they are skipped by default.
+    gp_claim_dlc: bool = _bool("GP_CLAIM_DLC", default=False)
 
     # --- GamerPower & Fanatical ---
     # Some GamerPower giveaways redirect to Fanatical.com,
@@ -181,6 +191,11 @@ class Config:
     itchio_enable: bool = _bool("ITCHIO_ENABLE", default=False)
     itchio_email: str | None = os.getenv("ITCHIO_EMAIL") or os.getenv("EMAIL")
     itchio_password: str | None = os.getenv("ITCHIO_PASSWORD") or os.getenv("PASSWORD")
+    # Recovery codes are static, so the bot can spend them; a TOTP secret would only move
+    # your second factor onto this machine, so two-factor sign-in goes through VNC instead.
+    # Spent one at a time and remembered in data/used_itchio_codes.txt.
+    itchio_otp_enable: bool = _bool("ITCHIO_OTP_ENABLE")
+    itchio_otp_codes: list[str] = [c.strip() for c in os.getenv("ITCHIO_OTP_CODES", "").split(",") if c.strip()]
 
     # --- IndieGala ---
     indiegala_enable: bool = _bool("INDIEGALA_ENABLE", default=False)
@@ -194,13 +209,16 @@ class Config:
     ae_min_coins: int = _int("AE_MIN_COINS", 2)
     ae_flag_retries: int = _int("AE_FLAG_RETRIES", 3)
     ae_flag_wait: int = _int("AE_FLAG_WAIT", 480)  # seconds (> ~7-min penalty)
+    # AliExpress serves the coin page empty most of the time (measured: 1 usable page in 8 looks
+    # over four minutes), so each extra approach is a real chance. 0 gives up on the first look.
+    ae_page_retries: int = _int("AE_PAGE_RETRIES", 4)
 
     # --- Unknown/Other Indirect Stores ---
     unknown_stores_enable: bool = _bool("UNKNOWN_STORES_ENABLE", default=False)
 
     # --- Module selection ---
     # Comma-separated list of stores to run (e.g. "steam,prime").
-    # Empty = main.py's DEFAULT_STORES, which is every store except GamerPower.
+    # Empty = main.py's DEFAULT_STORES, which is every store except Unity.
     stores: str = os.getenv("STORES", "")
 
 

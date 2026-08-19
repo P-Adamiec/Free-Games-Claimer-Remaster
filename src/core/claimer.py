@@ -539,8 +539,13 @@ class BaseClaimer:
                     const frames = [...document.querySelectorAll('iframe')];
                     if (frames.some(f => rx.test((f.getAttribute('src') || '') + ' ' + (f.getAttribute('title') || '')))) return true;
                     if (document.querySelector('#h_captcha, #talon_frame_login_prod, #FunCaptcha, [id*="arkose" i]')) return true;
+                    // Google reCAPTCHA: only the visible checkbox counts. Sites keep an invisible
+                    // scoring frame on ordinary pages, and that must never read as a challenge.
+                    const visible = el => { const r = el.getBoundingClientRect(); return r.width > 60 && r.height > 40; };
+                    if (frames.some(f => /recaptcha\/(api2|enterprise)\/anchor/i.test(f.getAttribute('src') || '') && visible(f))) return true;
                     const b = (document.body ? (document.body.innerText || '') : '').toLowerCase();
                     if (b.includes('verify you are human') || b.includes('checking your browser') || b.includes('complete a security check') || b.includes('needs to review the security of your connection')) return true;
+                    if (b.includes("check that you're a real person") || b.includes('check that you are a real person')) return true;
                     return false;
                 })()
             """))

@@ -158,3 +158,45 @@ class TestVncUrl:
     def test_empty_value_falls_back_to_host_and_port(self, monkeypatch, value):
         cfg = _reload(monkeypatch, VNC_URL=value, VNC_IP="192.168.1.100")
         assert cfg.vnc_url == "http://192.168.1.100:7080/?autoconnect=true"
+
+
+class TestAliExpressPageRetries:
+    """The second chance for a coin page that loads but paints nothing."""
+
+    def test_defaults_to_several_extra_approaches(self, monkeypatch):
+        # One usable page in eight looks was measured, so a single retry is not enough.
+        assert _reload(monkeypatch).ae_page_retries == 4
+
+    def test_zero_gives_up_on_the_first_look(self, monkeypatch):
+        assert _reload(monkeypatch, AE_PAGE_RETRIES="0").ae_page_retries == 0
+
+    def test_junk_falls_back_to_the_default(self, monkeypatch):
+        assert _reload(monkeypatch, AE_PAGE_RETRIES="soon").ae_page_retries == 4
+
+    def test_a_negative_value_cannot_ask_for_negative_attempts(self, monkeypatch):
+        # The loop clamps with max(0, ...), so this must never run a single approach.
+        assert max(0, _reload(monkeypatch, AE_PAGE_RETRIES="-3").ae_page_retries) == 0
+
+
+
+class TestItchioRecoveryCodes:
+    """Recovery codes follow the GOG shape: a switch plus a comma-separated list."""
+
+    def test_off_and_empty_by_default(self, monkeypatch):
+        cfg = _reload(monkeypatch)
+        assert cfg.itchio_otp_enable is False and cfg.itchio_otp_codes == []
+
+    def test_codes_are_split_and_trimmed(self, monkeypatch):
+        cfg = _reload(monkeypatch, ITCHIO_OTP_ENABLE="true", ITCHIO_OTP_CODES=" 12345678 , 23456789,34567890 ")
+        assert cfg.itchio_otp_enable is True
+        assert cfg.itchio_otp_codes == ["12345678", "23456789", "34567890"]
+
+    def test_blank_entries_are_dropped(self, monkeypatch):
+        assert _reload(monkeypatch, ITCHIO_OTP_CODES="12345678,,  ,23456789").itchio_otp_codes == \
+            ["12345678", "23456789"]
+
+    def test_the_switch_is_independent_of_the_codes(self, monkeypatch):
+        # Codes without the switch stay unused, exactly like GOG_OTP_CODES.
+        cfg = _reload(monkeypatch, ITCHIO_OTP_CODES="12345678")
+        assert cfg.itchio_otp_codes and cfg.itchio_otp_enable is False
+

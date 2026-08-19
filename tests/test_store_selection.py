@@ -14,7 +14,7 @@ import pytest
 MAIN_PY = Path(__file__).resolve().parent.parent / "main.py"
 SOURCE = MAIN_PY.read_text(encoding="utf-8")
 
-EXPECTED_DEFAULT = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress"]
+EXPECTED_DEFAULT = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress", "gamerpower"]
 
 
 def _default_stores() -> list[str]:
@@ -30,7 +30,7 @@ def _registry_keys() -> list[str]:
 
 
 class TestDefaultSelection:
-    def test_runs_every_store_except_gamerpower(self):
+    def test_default_list_is_exactly_this(self):
         assert _default_stores() == EXPECTED_DEFAULT
 
     def test_every_default_is_a_real_store(self):
@@ -39,7 +39,8 @@ class TestDefaultSelection:
 
     def test_new_stores_are_not_silently_left_out(self):
         # Anything in the registry is either a default or a deliberate opt-in.
-        opt_in = {"gamerpower"}
+        # Unity is opt-in until its checkout works, it can find an asset but not buy it.
+        opt_in = {"unity"}
         missing = sorted(set(_registry_keys()) - set(_default_stores()) - opt_in)
         assert not missing, (
             f"{missing} exist in ALL_CLAIMERS but run neither by default nor as a known opt-in. "
@@ -54,6 +55,10 @@ class TestDefaultSelection:
         # Fab reuses Epic's session, so Epic signing in first saves it a login.
         order = _default_stores()
         assert order.index("epic") < order.index("fab")
+
+    def test_gamerpower_runs_last(self):
+        # Its dedup reads the database, so the stores with their own module claim first.
+        assert _default_stores()[-1] == "gamerpower"
 
     def test_the_hardcoded_list_is_gone(self):
         # The old literal lived inside _get_active_claimers and drifted from the registry.
