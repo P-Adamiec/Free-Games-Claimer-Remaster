@@ -30,6 +30,47 @@ URL_LOGIN = (
 )
 
 
+# Reads the product page's main action button. The order matters: an "In Library" chip in a
+# recommendation row must never win over this product's own Get button.
+PAGE_STATE_JS = """
+JSON.stringify((() => {
+    // NEW flow: "Add to library" button (checkout overlay)
+    const allBtns = [...document.querySelectorAll('button')];
+    for (const btn of allBtns) {
+        const t = (btn.textContent || '').trim().toLowerCase();
+        if (t.includes('add to library')) return { text: t, flow: 'new_add' };
+    }
+
+    // Check for "Get" button FIRST (new flow, even if it has purchase-cta-button testid)
+    for (const btn of allBtns) {
+        const t = (btn.textContent || '').trim().toLowerCase();
+        if (t === 'get') return { text: t, flow: 'new_get' };
+    }
+
+    // OLD flow: purchase-cta-button (only if text is NOT "get")
+    const oldBtn = document.querySelector('button[data-testid="purchase-cta-button"]');
+    if (oldBtn) {
+        const t = oldBtn.textContent.trim().toLowerCase();
+        if (t && t !== 'loading' && t !== 'get') return { text: t, flow: 'old_cta' };
+    }
+
+    // Check for "In Library" / "Owned" status
+    for (const btn of allBtns) {
+        const t = (btn.textContent || '').trim().toLowerCase();
+        if (t.includes('in library') || t.includes('owned')) return { text: t, flow: 'owned' };
+    }
+
+    return { text: '', flow: 'unknown' };
+})())
+"""
+
+
+def is_owned(state: dict) -> bool:
+    """True when the page offers no way to claim any more, only a link into the library."""
+    state = state or {}
+    return state.get("flow") == "owned" or "in library" in (state.get("text") or "").lower()
+
+
 class EpicGamesClaimer(BaseClaimer):
     store_name = "epic"
 
@@ -657,6 +698,40 @@ class EpicGamesClaimer(BaseClaimer):
     # Claim a single game
     # ------------------------------------------------------------------
 
+    async def _page_state(self, tries: int = 15) -> dict:
+        """Read the product page's main action button: {"text", "flow"}."""
+        state = {"text": "", "flow": "unknown"}
+        for _ in range(tries):
+            raw = await self.page.evaluate(PAGE_STATE_JS)
+            try:
+                state = json.loads(raw) if isinstance(raw, str) else state
+            except (json.JSONDecodeError, TypeError):
+                state = {"text": "", "flow": "unknown"}
+            if state.get("text"):
+                break
+            await self.sleep(1)
+        return state
+
+    async def _confirm_in_library(self, url: str, tries: int = 3) -> bool:
+        """Re-read the product page after checkout, only an owned page proves the claim landed."""
+        for attempt in range(tries):
+            if attempt:
+                # Epic's library can take a few seconds to catch up with the order.
+                await self.sleep(6)
+            try:
+                await self.page.get(url)
+                await self.sleep(4)
+                await self._click_page_button_by_text("Continue", timeout=2, log="mature content gate")
+                state = await self._page_state(tries=8)
+            except Exception as exc:
+                logger.debug("Ownership check %d/%d failed: %s", attempt + 1, tries, exc)
+                continue
+            logger.debug("Ownership check %d/%d: button=%r flow=%s",
+                         attempt + 1, tries, state.get("text"), state.get("flow"))
+            if is_owned(state):
+                return True
+        return False
+
     # Retry up to 2 times with exponential backoff if claiming fails
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=3, max=15), reraise=True)
     async def _claim_game(self, url: str) -> None:
@@ -684,51 +759,9 @@ class EpicGamesClaimer(BaseClaimer):
             # Epic has two checkout flows:
             #   NEW (2025+): Direct "Add to library" / "Get" button on checkout overlay
             #   OLD: "purchase-cta-button" data-testid + payment iframe
-            btn_info = {"text": "", "flow": "unknown"}
-            for _ in range(15):
-                btn_raw = await self.page.evaluate(
-                    """
-                    JSON.stringify((() => {
-                        // NEW flow: "Add to library" button (checkout overlay)
-                        const allBtns = [...document.querySelectorAll('button')];
-                        for (const btn of allBtns) {
-                            const t = (btn.textContent || '').trim().toLowerCase();
-                            if (t.includes('add to library')) return { text: t, flow: 'new_add' };
-                        }
-
-                        // Check for "Get" button FIRST (new flow, even if it has purchase-cta-button testid)
-                        for (const btn of allBtns) {
-                            const t = (btn.textContent || '').trim().toLowerCase();
-                            if (t === 'get') return { text: t, flow: 'new_get' };
-                        }
-
-                        // OLD flow: purchase-cta-button (only if text is NOT "get")
-                        const oldBtn = document.querySelector('button[data-testid="purchase-cta-button"]');
-                        if (oldBtn) {
-                            const t = oldBtn.textContent.trim().toLowerCase();
-                            if (t && t !== 'loading' && t !== 'get') return { text: t, flow: 'old_cta' };
-                        }
-
-                        // Check for "In Library" / "Owned" status
-                        for (const btn of allBtns) {
-                            const t = (btn.textContent || '').trim().toLowerCase();
-                            if (t.includes('in library') || t.includes('owned')) return { text: t, flow: 'owned' };
-                        }
-
-                        return { text: '', flow: 'unknown' };
-                    })())
-                    """
-                )
-                try:
-                    btn_info = json.loads(btn_raw) if isinstance(btn_raw, str) else {"text": "", "flow": "unknown"}
-                except (json.JSONDecodeError, TypeError):
-                    btn_info = {"text": "", "flow": "unknown"}
-                if btn_info.get("text"):
-                    break
-                await self.sleep(1)
-
-            btn_text = btn_info.get("text", "")
-            flow_type = btn_info.get("flow", "unknown")
+            state = await self._page_state()
+            btn_text = state.get("text", "")
+            flow_type = state.get("flow", "unknown")
             logger.debug("Page state for %s: button=%r flow=%s", game_id, btn_text, flow_type)
 
             # ── Read title ──
@@ -756,7 +789,7 @@ class EpicGamesClaimer(BaseClaimer):
             notify_game = {"title": title, "url": url, "status": "failed"}
             self.notify_games.append(notify_game)
 
-            if "in library" in btn_text or flow_type == "owned":
+            if is_owned(state):
                 logger.info("'%s' already in library.", title)
                 obj.status = obj.status if obj.status == "claimed" else "existed"
                 notify_game["status"] = "existed"
@@ -787,7 +820,7 @@ class EpicGamesClaimer(BaseClaimer):
 
             # ── NEW FLOW: "Add to library" or "Get" button (direct click, no iframe) ──
             if flow_type in ("new_add", "new_get"):
-                claimed = await self._handle_new_checkout(title, flow_type)
+                checkout_ok = await self._handle_new_checkout(title, flow_type)
 
             # ── OLD FLOW: purchase-cta-button + payment iframe ──
             elif flow_type == "old_cta":
@@ -814,17 +847,22 @@ class EpicGamesClaimer(BaseClaimer):
                 )
 
                 await self.sleep(3)
-                claimed = await self._handle_purchase_iframe(title)
+                checkout_ok = await self._handle_purchase_iframe(title)
             else:
                 logger.warning("Unknown checkout flow '%s' for '%s'.", flow_type, title)
-                claimed = False
+                checkout_ok = False
 
-            if claimed:
-                import datetime
+            # The checkout page only says what it thinks happened, the library says what is true.
+            if await self._confirm_in_library(url):
                 logger.info("✓ Claimed '%s' successfully!", title)
                 obj.status = "claimed"
-                obj.updated_at = datetime.datetime.now(datetime.timezone.utc)
+                obj.updated_at = datetime.now(timezone.utc)
                 notify_game["status"] = "claimed"
+            elif checkout_ok:
+                logger.warning("Claim of '%s' was not confirmed by the page, check it manually.", title)
+                obj.status = "failed:unconfirmed"
+                notify_game["status"] = "failed:unconfirmed"
+                await self.take_screenshot(f"epic_unconfirmed_{game_id}")
             else:
                 logger.error("Failed to claim '%s'.", title)
                 obj.status = "failed"
@@ -1022,8 +1060,10 @@ class EpicGamesClaimer(BaseClaimer):
                         """
                         (() => {
                             const body = (document.body?.innerText || '').replace(/\\s+/g, ' ').toLowerCase();
-                            return body.includes('thank you') || body.includes('in library')
-                                || body.includes('in your library') || body.includes('successfully');
+                            // "Add it to your library" is the offer, not a confirmation.
+                            const inLib = (body.includes('in library') || body.includes('in your library'))
+                                && !body.includes('add it to your library');
+                            return body.includes('thank you') || body.includes('successfully') || inLib;
                         })()
                         """
                     )

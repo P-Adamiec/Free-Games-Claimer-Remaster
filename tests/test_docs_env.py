@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from src.core.config import env_setting_kinds
+
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG = (ROOT / "src" / "core" / "config.py").read_text(encoding="utf-8")
 ENV_EXAMPLE = (ROOT / ".env.example").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -19,8 +20,8 @@ DOCKER_ONLY = {"FGC_TAG", "VNC_PASSWORD"}
 
 
 def _config_vars() -> list[str]:
-    names = re.findall(r'(?:os\.getenv|_bool|_int|_skip_stores)\(\s*"([A-Z_0-9]+)"', CONFIG)
-    return sorted(set(names))
+    # config.py scans itself for this, so the runtime settings guard and these tests agree.
+    return sorted(env_setting_kinds())
 
 
 def _env_example_vars() -> set[str]:

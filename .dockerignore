@@ -5,6 +5,8 @@ data/
 .venv/
 .git/
 *.md
+# ...except the README: tests/test_docs_env.py checks the config table against it.
+!README.md
 
 # VCS & tooling (not needed in the image)
 .gitignore

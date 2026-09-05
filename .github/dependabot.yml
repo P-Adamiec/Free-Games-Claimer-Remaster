@@ -3,6 +3,8 @@ version: 2
 updates:
   - package-ecosystem: pip
     directory: /
+    # Updates land on dev first, main only moves at release time.
+    target-branch: dev
     schedule:
       interval: weekly
       day: monday
@@ -16,15 +18,15 @@ updates:
       prefix: deps
       include: scope
     groups:
-      python-minor-and-patch:
+      # No update-types filter: a >= requirement bump has no minor/patch classification,
+      # so filtering here left every one of them in a pull request of its own.
+      python-dependencies:
         patterns:
           - "*"
-        update-types:
-          - minor
-          - patch
 
   - package-ecosystem: github-actions
     directory: /
+    target-branch: dev
     schedule:
       interval: weekly
       day: monday
@@ -44,6 +46,7 @@ updates:
 
   - package-ecosystem: docker
     directory: /
+    target-branch: dev
     schedule:
       interval: weekly
       day: monday

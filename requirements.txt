@@ -8,11 +8,12 @@ psutil>=7.2.2
 browserforge>=1.2.4
 
 # Database
-sqlalchemy[asyncio]>=2.0.51
+sqlalchemy[asyncio]>=2.0.52
 aiosqlite>=0.22.1
 
 # Notifications
-apprise>=1.12.0
+# Capped below 2.0: the author calls 1.13 the last 1.x and says 2.x will break the API,
+apprise>=1.13.0,<2.0.0
 
 # Retry logic
 tenacity>=9.1.4
@@ -25,7 +26,7 @@ tzdata>=2026.3
 pyotp>=2.10.0
 
 # Configuration
-python-dotenv>=1.2.2
+python-dotenv>=1.2.3
 
 # Logging / Console output
 rich>=15.0.0
@@ -34,4 +35,4 @@ rich>=15.0.0
 httpx>=0.28.1
 
 # Tests (development only, not needed to run the bot)
-pytest>=8.4.0
+pytest>=9.1.1

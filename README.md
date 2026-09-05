@@ -268,6 +268,14 @@ STORES=epic,gog docker compose up -d
 docker compose run --rm app python main.py steam gog --once
 ```
 
+To skip a store, list the ones you want and leave that one out. There is no `STEAM_ENABLE` style switch
+for the stores above, and a setting the bot does not read is now named at startup instead of being
+ignored in silence. For example `STORES=epic,fab,prime,gog,ubisoft,aliexpress,gamerpower` runs everything
+except Steam, and GamerPower then leaves its Steam giveaways alone too, naming each one it skips in the
+log. Giveaways that hand out a Steam key (Fanatical, IndieGala) are a different thing: when you enable
+those sites the key lands in your notification and in the database, and the bot never signs in to Steam
+to redeem it.
+
 ---
 
 ## Architecture
@@ -347,6 +355,7 @@ Both Discord and Apprise can be configured simultaneously, notifications are sen
 | AliExpress coins not collected | The coin page sometimes loads as an empty shell. The bot tries once more (`AE_PAGE_RETRIES`), then reports it and moves on rather than retrying for half an hour. It has been seen working again on a later run; collect in the mobile app if it persists. |
 | Epic captcha | The stealth patches prevent 99% of captchas. EU 'Right of withdrawal' overlays are automatically accepted. If a rigorous manual prompt arrives, solve it once via VNC. |
 | False positive claims | Set `RESET_DB_GAMES=true` in your `.env`, reboot the container, and the bot will forget the last 7 days of claims, allowing the logic to try claiming them again. |
+| Setting seems to be ignored | The bot names every setting it does not read at startup, for example an invented `STEAM_ENABLE`, and every value that cannot mean what it says, for example `DRYRUN=maybe`, which counts as false. Passwords, e-mail addresses and webhook URLs are masked in that message. |
 | Container crashes on start | Check logs: `docker compose logs app --tail=50`. A clean restart purges `.X1-lock` bugs. |
 
 ### Something is not working, what to send us
@@ -355,7 +364,7 @@ The normal log shows only what you act on: which store is running, who is signed
 what was claimed, plus every warning and error. All the diagnostic detail is still there, one switch away:
 
 1. Set `DEBUG=true` in `.env` and restart (`docker compose up -d`), then reproduce the problem.
-2. Collect the log: `docker logs fgc-remaster --tail 500 > fgc.log` (remove your e-mail address if it appears).
+2. Collect the log: `docker logs fgc-remaster --tail 500 > fgc.log`. Account names are masked for you (`p***@gmail.com`), so it is safe to paste.
 3. Look in the `data/` folder for what the bot saw:
    - `data/screenshots/<store>/`, screenshots taken at every failure,
    - `data/ae_coin_api.json`, raw AliExpress check-in responses (streak, coins),

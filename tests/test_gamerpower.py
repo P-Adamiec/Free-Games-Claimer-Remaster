@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from src.stores.gamerpower import (COVERED_ELSEWHERE, GamerPowerClaimer, classify_target,
+from src.stores.gamerpower import (
+    download_only_status,COVERED_ELSEWHERE, GamerPowerClaimer, classify_target,
                                    fanatical_game_id, is_wanted, itch_game_id,
                                    login_help_message, needs_otp, wanted_types)
 
@@ -365,3 +366,29 @@ class TestNotificationVocabulary:
         # keeps as the database key for every side store.
         assert source.count("_log_side_signed_in(") >= 4, "each side store should log the account it uses"
         assert "Signed in as:" in source
+
+
+class TestDownloadOnlyGiveaways:
+    """Itch.io hands some giveaways out as a file: that is not a failed claim."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "gamerpower.py").read_text(encoding="utf-8")
+
+    def test_the_first_run_says_it_plainly(self):
+        status = download_only_status(True)
+        assert "download only" in status
+        # Must dodge every word the summary filter hides.
+        for hidden in ("skip", "fail", "exist", "already"):
+            assert hidden not in status.lower()
+
+    def test_later_runs_stay_quiet(self):
+        assert download_only_status(False) == "skipped:download-only"
+
+    def test_the_walk_reports_why_it_stopped(self):
+        block = self.SOURCE.split("async def _itch_run_claim", 1)[1].split("async def ", 1)[0]
+        assert '"download-only"' in block and '"blocked"' in block and '"clicked"' in block
+        assert "return False" not in block
+
+    def test_a_download_only_giveaway_is_not_a_failed_claim(self):
+        block = self.SOURCE.split("async def _claim_itchio_game", 1)[1].split("async def ", 1)[0]
+        assert 'elif walked == "download-only"' in block
+        assert "skipped:download-only" in block

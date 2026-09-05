@@ -10,7 +10,7 @@ import nodriver as uc
 import pyotp
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, now_str, filenamify
+from src.core.claimer import BaseClaimer, open_first_tab, now_str, filenamify
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 
@@ -575,12 +575,12 @@ class PrimeGamingClaimer(BaseClaimer):
                     self.page = tabs[0]
                     logger.debug("Recovered CDP session on tab: %s", self.page.target.url)
                 else:
-                    # No tabs at all, open a fresh one
-                    self.page = await self.browser.get("about:blank")
+                    # No tabs at all, open a fresh one (browser.get() alone would raise here, issue #38)
+                    self.page = await open_first_tab(self.browser)
                     logger.debug("Opened new tab after session loss.")
             except Exception:
                 logger.exception("Session recovery failed, opening fresh tab.")
-                self.page = await self.browser.get("about:blank")
+                self.page = await open_first_tab(self.browser)
 
     # ------------------------------------------------------------------
     # Claim games

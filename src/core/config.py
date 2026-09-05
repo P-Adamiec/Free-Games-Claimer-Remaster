@@ -9,6 +9,7 @@ Store-specific credentials (like EG_EMAIL) take priority over default ones (EMAI
 """
 
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -50,6 +51,87 @@ def _skip_stores(key: str) -> set:
         s = s.strip().lower()
         if s:
             out.add(_STORE_ALIASES.get(s, s))
+    return out
+
+
+# ----- Settings guard: a setting nobody reads, or a value that cannot mean what it says (issue #40) -----
+
+# The same scan tests/test_docs_env.py uses, with the helper captured so the expected type is known too.
+_SETTING_RE = re.compile(r'(os\.getenv|_bool|_int|_skip_stores)\(\s*"([A-Z_0-9]+)"')
+_ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", re.M)
+_KIND_BY_HELPER = {"_bool": "bool", "_int": "int", "_skip_stores": "str", "os.getenv": "str"}
+_TRUTHY = ("1", "true", "yes")
+_FALSY = ("", "0", "false", "no")
+# Anything that must never reach a log someone pastes into a bug report.
+_SECRET_HINTS = ("PASSWORD", "SECRET", "TOKEN", "OTPKEY", "OTP_CODES", "PIN",
+                 "COOKIE", "AUTH", "CREDENTIAL", "WEBHOOK", "EMAIL", "USERNAME")
+
+
+def env_setting_kinds() -> dict:
+    """Every setting this file reads, mapped to the kind of value it expects."""
+    try:
+        source = Path(__file__).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    return {name: _KIND_BY_HELPER[helper] for helper, name in _SETTING_RE.findall(source)}
+
+
+def known_env_names() -> set:
+    """Settings the bot reads, plus the Docker-only ones, which live in .env.example."""
+    names = set(env_setting_kinds())
+    try:
+        example = (_root / ".env.example").read_text(encoding="utf-8")
+    except OSError:
+        return names
+    return names | set(re.findall(r"^#?\s*([A-Z_0-9]+)=", example, re.M))
+
+
+def env_file_settings() -> dict:
+    """Names and values actually set in your .env files. Commented-out lines set nothing."""
+    found = {}
+    for path in (_env_root, _env_data):
+        try:
+            # utf-8-sig: an editor-added BOM would otherwise glue itself to the first name.
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        for name, value in _ENV_LINE_RE.findall(text):
+            found[name] = value.strip().strip('"').strip("'")
+    return found
+
+
+def mask_value(name: str, value: str) -> str:
+    """A value safe to print in a log someone will paste into a bug report."""
+    upper = (name or "").upper()
+    if upper == "NOTIFY" or any(hint in upper for hint in _SECRET_HINTS):
+        return "***"
+    # Catches a credential under a name we did not think of.
+    if "@" in value or "://" in value:
+        return "***"
+    return value[:40]
+
+
+def _looks_int(value: str) -> bool:
+    """True when _int() would accept this value instead of falling back."""
+    try:
+        int(value)
+    except ValueError:
+        return False
+    return True
+
+
+def settings_warnings() -> list:
+    """Settings that do nothing: unknown names, and values that cannot mean what they say."""
+    kinds = env_setting_kinds()
+    known = known_env_names()
+    out = []
+    for name, value in env_file_settings().items():
+        if name not in known:
+            out.append(f"{name} is not a setting this bot reads, so it does nothing.")
+        elif kinds.get(name) == "bool" and value.lower() not in _TRUTHY + _FALSY:
+            out.append(f"{name}={mask_value(name, value)} is not a yes/no value, so it reads as false.")
+        elif kinds.get(name) == "int" and value and not _looks_int(value):
+            out.append(f"{name}={mask_value(name, value)} is not a number, so the default is used.")
     return out
 
 

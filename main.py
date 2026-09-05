@@ -25,7 +25,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from src.core.config import cfg
+from src.core.config import cfg, settings_warnings
+from src.core.claimer import mask_account
 from src.core.database import init_db
 from src.core.selection import apply_run_selection
 from src.core.updates import notify_if_update_available
@@ -228,6 +229,21 @@ def _resolve_stores(raw: list[str]) -> list[str]:
     return resolved
 
 
+def _warn_about_settings() -> None:
+    """Name the settings that do nothing, instead of ignoring them in silence (issue #40)."""
+    for line in settings_warnings():
+        name = line.split(" ", 1)[0].split("=", 1)[0]
+        hint = ""
+        if name.endswith("_ENABLE") and _ALIASES.get(name[:-7].lower()) in ALL_CLAIMERS:
+            hint = " Stores are chosen with STORES=..., there is no switch of its own for this one."
+        logger.warning("%s%s", line, hint)
+
+    unknown = sorted(cfg.notify_skip_stores - set(ALL_CLAIMERS))
+    if unknown:
+        logger.warning("NOTIFY_SKIP_STORES names %s, which is not a store, so nothing is silenced there. "
+                       "Valid: %s", ", ".join(unknown), ", ".join(ALL_CLAIMERS))
+
+
 def _get_active_claimers() -> list[tuple[str, object]]:
     """Determine which claimers to run based on CLI args / STORES env var.
 
@@ -373,7 +389,8 @@ async def run_claimers() -> None:
                              result.get("store"), len(result["games"]))
                 continue
                 
-            header = f"**{result['store']}** ({result['user']}):" if result.get('user') else f"**{result['store']}**:"
+            account = mask_account(result.get('user'))
+            header = f"**{result['store']}** ({account}):" if account else f"**{result['store']}**:"
             msg_parts.append(f"{header}\n{format_game_list(relevant_games)}")
             
         if msg_parts:
@@ -409,6 +426,7 @@ async def main() -> None:
         sorted(cfg.notify_skip_stores) or "none", cfg.eg_mobile, ",".join(cfg.eg_mobile_platform_list) or "none",
         cfg._data_dir,
     )
+    _warn_about_settings()
     await init_db()
     logger.info("Database ready.")
 

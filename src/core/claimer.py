@@ -38,6 +38,39 @@ def now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def mask_account(name) -> str:
+    """Account label safe for a log someone pastes into a bug report: a.n.other@mail.com -> a***@mail.com."""
+    text = str(name or "")
+    local, at, domain = text.partition("@")
+    if not at:
+        return text          # a nickname is not personal data, leave it readable
+    return f"{local[:1]}***@{domain}"
+
+
+async def open_first_tab(browser, url: str = "about:blank", attempts: int = 10, delay: float = 1.0):
+    """Hand back a usable tab, even when Chrome has not registered one yet (issue #38).
+
+    nodriver reads the target list once at startup, so a slow first tab crashes its get().
+    """
+    for _ in range(attempts):
+        if browser.tabs:
+            try:
+                return await browser.get(url)
+            except RuntimeError as exc:
+                # StopIteration inside a coroutine: the tab list changed between the check and the call.
+                logger.debug("First tab went away before it could be used: %s", exc)
+        if delay:
+            await asyncio.sleep(delay)
+        await browser.update_targets()
+    logger.debug("Chrome still has no page target, asking for a fresh tab.")
+    try:
+        return await browser.get(url, new_tab=True)
+    except Exception as exc:
+        # "no browser is open": there is no window to put a tab in, so open one.
+        logger.debug("New tab refused (%s), opening a window instead.", exc)
+        return await browser.get(url, new_window=True)
+
+
 def filenamify(s: str) -> str:
     """Sanitise a string for use as a filename."""
     return re.sub(r'[^a-zA-Z0-9 _\-.]', '_', s.replace(":", "."))
@@ -177,7 +210,7 @@ class BaseClaimer:
         store_browser_dir = cfg.browser_dir / (self.profile_name or self.store_name)
         store_browser_dir.mkdir(parents=True, exist_ok=True)
 
-        # Disable Chrome's "Save password?" popup by setting profile preferences
+        # Seed the profile in one write: no password prompts, no Translate, no app-scheme dialogs.
         prefs_dir = store_browser_dir / "Default"
         prefs_dir.mkdir(parents=True, exist_ok=True)
         prefs_file = prefs_dir / "Preferences"
@@ -190,6 +223,12 @@ class BaseClaimer:
             prefs["credentials_enable_autosignin"] = False
             prefs.setdefault("profile", {})
             prefs["profile"]["password_manager_enabled"] = False
+            # Chrome is killed by its process tree, so it never writes these itself and the next
+            # start goes through session recovery, which is what delays the first tab (issue #38).
+            prefs["profile"]["exit_type"] = "Normal"
+            prefs["profile"]["exited_cleanly"] = True
+            prefs.setdefault("translate", {})
+            prefs["translate"]["enabled"] = False
             prefs.setdefault("protocol_handler", {})
             prefs["protocol_handler"]["excluded_schemes"] = {
                 "aliexpress": True,
@@ -205,8 +244,8 @@ class BaseClaimer:
                 "taobao": True,
             }
             prefs_file.write_text(_json.dumps(prefs), encoding="utf-8")
-        except Exception:
-            pass  # Non-critical
+        except Exception as e:
+            self.logger.debug("Failed to seed Chrome preferences: %s", e)
 
         # Remove stale singleton lock files that a crashed instance leaves behind (session data untouched).
         self._clear_profile_locks(store_browser_dir)
@@ -259,23 +298,6 @@ class BaseClaimer:
         if extra_args:
             args.extend(extra_args)
 
-        # Forcefully disable Google Translate at the Chromium profile level
-        try:
-            import json
-            store_browser_dir.mkdir(parents=True, exist_ok=True)
-            default_dir = store_browser_dir / "Default"
-            default_dir.mkdir(exist_ok=True)
-            prefs_file = default_dir / "Preferences"
-            prefs = {}
-            if prefs_file.exists():
-                prefs = json.loads(prefs_file.read_text("utf-8"))
-            if "translate" not in prefs:
-                prefs["translate"] = {}
-            prefs["translate"]["enabled"] = False
-            prefs_file.write_text(json.dumps(prefs), "utf-8")
-        except Exception as e:
-            self.logger.debug("Failed to seed Chrome preferences: %s", e)
-
         # Launch with retries; sweep orphaned Chrome + locks between attempts (issue #19).
         launch_error: Exception | None = None
         for attempt in range(1, 4):
@@ -287,13 +309,16 @@ class BaseClaimer:
                     browser_args=args,
                     user_data_dir=str(store_browser_dir),
                 )
-                launch_error = None
                 self.logger.debug("Chrome started (headless=%s, profile=%s, extra args=%s)",
                                   headless, store_browser_dir, extra_args or [])
+                # A missing first tab is a launch failure too, so it gets the same sweep and retry.
+                self.page = await open_first_tab(self.browser)
+                launch_error = None
                 break
             except Exception as e:
                 launch_error = e
                 self.logger.warning("Chrome launch attempt %d/3 failed: %s", attempt, e)
+                await self.close_browser()
                 self._sweep_orphan_chrome(store_browser_dir)
                 self._clear_profile_locks(store_browser_dir)
                 if attempt < 3:
@@ -302,9 +327,6 @@ class BaseClaimer:
             raise RuntimeError(
                 f"Chrome failed to start after 3 attempts (a container restart may help): {launch_error}"
             ) from launch_error
-
-        # Get the main tab
-        self.page = await self.browser.get("about:blank")
 
         # --- Inject stealth patches via CDP (runs BEFORE any page JS) ---
         # Unlike page.evaluate(), addScriptToEvaluateOnNewDocument ensures
@@ -342,10 +364,10 @@ class BaseClaimer:
         self.logger.info("🌐 [bold yellow]Browser ready[/bold yellow]")
 
     def log_signed_in(self, username: str | None = None) -> None:
-        """Standardised log for successful login."""
+        """Standardised log for successful login. The e-mail is masked, self.user keeps it whole."""
         user = username or self.user or "unknown"
         self.user = user
-        self.logger.info("🔓 [bold green]Signed in as:[/bold green] %s", user)
+        self.logger.info("🔓 [bold green]Signed in as:[/bold green] %s", mask_account(user))
 
     async def close_browser(self) -> None:
         """Close the browser and kill its whole process tree (issue #19)."""

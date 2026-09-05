@@ -19,6 +19,8 @@ GAMES = [
     {"title": "Missing base", "url": "", "status": "failed:missing_base"},
     {"title": "Broken", "url": "", "status": "failed"},
     {"title": "Dry", "url": "", "status": "available (dry run)"},
+    {"title": "Download once", "url": "", "status": "download only, nothing to claim 📥"},
+    {"title": "Download again", "url": "", "status": "skipped:download-only"},
 ]
 
 
@@ -50,7 +52,7 @@ def summary_filter():
 
 
 def test_defaults_show_only_real_changes(summary_filter):
-    assert summary_filter(_Cfg()) == ["Claimed", "Dry"]
+    assert summary_filter(_Cfg()) == ["Claimed", "Dry", "Download once"]
 
 
 def test_claim_fails_can_be_switched_on(summary_filter):
@@ -63,6 +65,15 @@ def test_already_claimed_can_be_switched_on(summary_filter):
     titles = summary_filter(_Cfg(owned=True))
     assert "Owned" in titles and "Checked in" in titles and "F2P" in titles
     assert "Broken" not in titles
+
+
+def test_a_download_only_giveaway_is_reported_once(summary_filter):
+    # Itch.io hands some giveaways out as a file with no way to claim them onto the
+    # account. Worth saying once, not on every run for the rest of time.
+    titles = summary_filter(_Cfg())
+    assert "Download once" in titles
+    assert "Download again" not in titles
+    assert "Download again" in summary_filter(_Cfg(owned=True))
 
 
 def test_both_switches_on_show_everything(summary_filter):

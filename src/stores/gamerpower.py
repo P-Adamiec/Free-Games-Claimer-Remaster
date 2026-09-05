@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import select
 
-from src.core.claimer import BaseClaimer
+from src.core.claimer import BaseClaimer, mask_account
 from src.core.config import cfg
 from src.core.database import async_session, ClaimedGame, get_or_create
 from src.core.selection import is_store_active
@@ -163,6 +163,12 @@ def fanatical_game_id(url: str) -> str:
 ITCH_OWNED_JS = """
     (() => !!document.querySelector('.purchase_banner, .ownership_reason'))()
 """
+
+
+def download_only_status(first_time: bool) -> str:
+    """What the summary says about a giveaway itch.io only hands out as a file."""
+    # Said plainly once, then parked under a "skipped" status the summary filter hides.
+    return "download only, nothing to claim 📥" if first_time else "skipped:download-only"
 
 
 def itch_game_id(url: str) -> str:
@@ -487,7 +493,8 @@ class GamerPowerClaimer(BaseClaimer):
     def _log_side_signed_in(self, label: str, account: str | None) -> None:
         """The line every store prints. `log_signed_in()` would also overwrite `self.user`,
         which this claimer keeps as the database key for all its side stores."""
-        self.logger.info("🔓 [bold green]Signed in as:[/bold green] %s (%s)", account or "unknown", label)
+        self.logger.info("🔓 [bold green]Signed in as:[/bold green] %s (%s)",
+                         mask_account(account) or "unknown", label)
 
     async def _confirm_side_login(self, label: str, check_fn, backup_codes: list | None = None,
                                  backup_file: str = "") -> bool:
@@ -626,8 +633,20 @@ class GamerPowerClaimer(BaseClaimer):
             logger.debug("[Itch.io] Ownership check failed: %s", e)
             return False
 
-    async def _itch_run_claim(self, title: str) -> bool:
-        """Walk itch.io's real claim chain: purchase page, downloads, then Claim game."""
+    async def _remember_itchio(self, game_id: str, title: str, url: str, status: str) -> bool:
+        """Store an itch.io outcome. True when this run is the first to see that status."""
+        async with async_session() as session:
+            obj, created = await get_or_create(
+                session, store="itchio", user=self.user,
+                game_id=game_id, title=title, url=url, status=status,
+            )
+            first_time = created or obj.status != status
+            obj.status = status
+            await session.commit()
+        return first_time
+
+    async def _itch_run_claim(self, title: str) -> str:
+        """Walk itch.io's claim chain. Returns "clicked", "download-only" or "blocked"."""
         purchase = await self.page.evaluate("""
             (() => {
                 const a = document.querySelector('a.buy_btn[href], a.button.buy_btn[href]');
@@ -636,12 +655,12 @@ class GamerPowerClaimer(BaseClaimer):
         """)
         if not purchase:
             logger.warning("[Itch.io] '%s' has no claim button on its page.", title)
-            return False
+            return "blocked"
 
         await self.page.get(str(purchase))
         await self.sleep(5)
         if not await self._clear_challenge("Itch.io"):
-            return False
+            return "blocked"
         # Only a free or pay-what-you-want game offers the direct download link. Anything
         # else wants real money, and the bot has no business there.
         went_free = await self.page.evaluate("""
@@ -654,7 +673,7 @@ class GamerPowerClaimer(BaseClaimer):
         """)
         if not went_free:
             logger.warning("[Itch.io] '%s' is not free right now, refusing to go further.", title)
-            return False
+            return "blocked"
         await self.sleep(6)
 
         # The download page carries the one control that puts the game in your library.
@@ -670,11 +689,10 @@ class GamerPowerClaimer(BaseClaimer):
             })()
         """)
         if not clicked:
-            logger.warning("[Itch.io] '%s' offered a download but no claim, so it would not stay "
-                           "on the account.", title)
-            return False
+            logger.debug("[Itch.io] '%s' offers a download but no claim control.", title)
+            return "download-only"
         await self.sleep(7)
-        return True
+        return "clicked"
 
     async def _claim_fanatical_game(self, game: dict) -> None:
         title = game.get("title", "Unknown")
@@ -737,7 +755,7 @@ class GamerPowerClaimer(BaseClaimer):
                 email = cfg.fanatical_email
                 password = cfg.fanatical_password
                 if email and password:
-                    logger.info("[Fanatical] Logging in as %s…", email)
+                    logger.info("[Fanatical] Logging in as %s…", mask_account(email))
                     await self._fanatical_login(email, password)
                     # Two-factor codes are typed by you over VNC: Fanatical hands out no
                     # recovery codes, so there is nothing worth keeping in .env.
@@ -907,7 +925,7 @@ class GamerPowerClaimer(BaseClaimer):
                 email = cfg.itchio_email
                 password = cfg.itchio_password
                 if email and password:
-                    logger.info("[Itch.io] Logging in as %s…", email)
+                    logger.info("[Itch.io] Logging in as %s…", mask_account(email))
                     await self.page.get("https://itch.io/login")
                     await self.sleep(3)
 
@@ -964,18 +982,22 @@ class GamerPowerClaimer(BaseClaimer):
 
             if owned:
                 logger.info("✓ [Itch.io] Claimed '%s'!", title)
-                async with async_session() as session:
-                    obj, _ = await get_or_create(
-                        session, store="itchio", user=self.user,
-                        game_id=game_id, title=title, url=url, status="claimed",
-                    )
-                    obj.status = "claimed"
-                    await session.commit()
+                await self._remember_itchio(game_id, title, url, "claimed")
                 notify_game["status"] = "claimed"
                 await self.take_screenshot(f"itchio_{filenamify(title)}")
+            elif walked == "download-only":
+                # Plenty of itch.io giveaways are a file and nothing else: no control puts
+                # them on the account, so this is not a failed claim, it is all there is.
+                first_time = await self._remember_itchio(game_id, title, url, "skipped:download-only")
+                if first_time:
+                    logger.info("[Itch.io] '%s' is handed out as a download only, there is nothing to "
+                                "claim onto the account. Saying so once, later runs stay quiet.", title)
+                else:
+                    logger.debug("[Itch.io] '%s' is still download only, already reported.", title)
+                notify_game["status"] = download_only_status(first_time)
             else:
-                logger.warning("[Itch.io] '%s' is not on the account after the claim walk (reached "
-                               "the claim step: %s).", title, walked)
+                logger.warning("[Itch.io] '%s' is not on the account after the claim walk "
+                               "(claim step: %s).", title, walked)
                 notify_game["status"] = "failed:unconfirmed"
                 await self.take_screenshot(f"itchio_fail_{filenamify(title)}")
 
@@ -1034,7 +1056,7 @@ class GamerPowerClaimer(BaseClaimer):
                 email = cfg.indiegala_email
                 password = cfg.indiegala_password
                 if email and password:
-                    logger.info("[IndieGala] Logging in as %s…", email)
+                    logger.info("[IndieGala] Logging in as %s…", mask_account(email))
                     await self.page.get("https://www.indiegala.com/login")
                     await self.sleep(4)
 
