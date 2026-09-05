@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="fgc-token" content="__FGC_TOKEN__">
+  <title>FGC Control Center</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>F</span></div>
+        <div>
+          <p class="eyebrow">FREE GAMES CLAIMER</p>
+          <h1>Control Center</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <a class="button ghost" id="vncLink" target="_blank" rel="noreferrer">Abrir navegador</a>
+        <button class="button ghost" id="settingsButton" type="button">Configurar</button>
+        <button class="button primary" id="runAllButton" type="button">Executar agora</button>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <p class="eyebrow">AUTOMAÇÃO LOCAL</p>
+        <h2>Suas lojas, uma visão clara.</h2>
+        <p class="hero-copy">Acompanhe as coletas, execute módulos individuais e ajuste o agendamento sem editar arquivos manualmente.</p>
+      </div>
+      <div class="run-pill" id="runPill"><span class="pulse"></span><span id="runLabel">Sistema pronto</span></div>
+    </section>
+
+    <section class="summary-grid" aria-label="Resumo">
+      <article class="summary-card">
+        <span>Próxima execução</span>
+        <strong id="nextRun">—</strong>
+      </article>
+      <article class="summary-card">
+        <span>Lojas habilitadas</span>
+        <strong id="enabledCount">—</strong>
+      </article>
+      <article class="summary-card">
+        <span>Última execução</span>
+        <strong id="lastRun">—</strong>
+      </article>
+    </section>
+
+    <section class="stores-section">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">MÓDULOS</p>
+          <h2>Status das lojas</h2>
+        </div>
+        <button class="icon-button" id="refreshButton" type="button" aria-label="Atualizar">↻</button>
+      </div>
+      <div class="store-grid" id="storeGrid" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <aside class="drawer" id="settingsDrawer" aria-hidden="true" aria-label="Configurações">
+    <header class="drawer-header">
+      <div>
+        <p class="eyebrow">PREFERÊNCIAS</p>
+        <h2>Configurar automação</h2>
+      </div>
+      <button class="icon-button" id="closeSettings" type="button" aria-label="Fechar">×</button>
+    </header>
+    <form id="settingsForm">
+      <div class="settings-content" id="settingsContent"></div>
+      <footer class="drawer-footer">
+        <p>Senhas existentes nunca são exibidas. Deixe o campo vazio para mantê-las.</p>
+        <button class="button primary" type="submit">Salvar configurações</button>
+      </footer>
+    </form>
+  </aside>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

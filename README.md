@@ -95,6 +95,9 @@ DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 docker compose up -d
 ```
 
+When running directly from a source checkout after changing or updating the
+code, rebuild the local image first with `docker compose up -d --build app`.
+
 > 💡 **Want to test experimental development features?** Add `FGC_TAG=dev` to your `.env` file before running Docker to automatically download our pre-release build!
 
 ### 3. Login (first run)
@@ -102,6 +105,17 @@ docker compose up -d
 Open **http://localhost:7080** in your browser to access the VNC session.
 
 Each store will wait for you to login manually on the first run if you don't supply credentials. After that, session cookies are natively restored using persistent browser profiles!
+
+### Local dashboard
+
+Open **http://localhost:8080** to see each store's status, start all stores or
+just one store, open the browser session, and edit the supported settings.
+
+Settings saved in the dashboard are stored in `data/gui.env` inside the
+persistent Docker volume. Existing secrets are never sent back to the browser;
+leave a secret field blank to keep its current value. The Compose configuration
+binds this port to `127.0.0.1` by default, so the dashboard is available only on
+the computer running Docker. Do not expose port 8080 directly to the internet.
 
 ### 4. Monitor
 

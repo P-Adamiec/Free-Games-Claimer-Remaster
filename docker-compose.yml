@@ -12,6 +12,7 @@ services:
     stdin_open: true
     ports:
       - "${NOVNC_PORT:-7080}:7080"
+      - "127.0.0.1:${GUI_PORT:-8080}:8080"
     volumes:
       - fgc_data:/fgc/data
     env_file:
