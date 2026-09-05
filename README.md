@@ -98,6 +98,10 @@ docker compose up -d
 When running directly from a source checkout after changing or updating the
 code, rebuild the local image first with `docker compose up -d --build app`.
 
+On Windows, you can instead double-click `Start-FGC-Control-Center.cmd`. The
+launcher starts Docker Desktop when necessary, starts the Compose service, and
+opens the local dashboard automatically.
+
 > 💡 **Want to test experimental development features?** Add `FGC_TAG=dev` to your `.env` file before running Docker to automatically download our pre-release build!
 
 ### 3. Login (first run)
