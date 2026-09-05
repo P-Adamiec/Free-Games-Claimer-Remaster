@@ -11,7 +11,7 @@ import pytest
 
 from src.gui import settings
 from src.gui.server import start_dashboard
-from src.gui.state import DashboardState
+from src.gui.state import DashboardState, summarize_store_result
 
 
 def test_secret_values_are_never_returned(monkeypatch):
@@ -72,11 +72,15 @@ def test_blank_secret_keeps_existing_value(tmp_path, monkeypatch):
     assert settings.cfg.ae_password == "existing-secret"
 
 
-def test_dashboard_state_does_not_include_accounts_or_results():
+def test_dashboard_state_only_exposes_safe_result_details():
     state = DashboardState()
     state.begin_run(["aliexpress"])
     state.begin_store("aliexpress")
-    state.finish_store("aliexpress", "Concluído · 1 resultado(s)")
+    state.finish_store(
+        "aliexpress",
+        "15 moedas coletadas",
+        details={"kind": "coins", "claimedCoins": 15, "balance": 120},
+    )
     state.finish_run()
 
     payload = state.snapshot(["aliexpress"], {"nextRun": None})
@@ -84,7 +88,61 @@ def test_dashboard_state_does_not_include_accounts_or_results():
     assert payload["running"] is False
     assert ali["state"] == "success"
     assert ali["enabled"] is True
-    assert set(ali) == {"name", "badge", "color", "key", "state", "message", "lastRun", "enabled"}
+    assert ali["details"] == {"kind": "coins", "claimedCoins": 15, "balance": 120}
+    assert set(ali) == {"name", "badge", "color", "key", "state", "message", "lastRun", "details", "enabled"}
+
+
+def test_game_result_summary_keeps_titles_but_removes_codes_accounts_and_urls():
+    message, details = summarize_store_result(
+        "prime",
+        {
+            "user": "private@example.invalid",
+            "games": [{
+                "title": "Example Game",
+                "url": "https://secret.invalid/redeem/ABC-123",
+                "status": "code: ABC-123 (GOG)",
+            }],
+        },
+    )
+
+    serialized = json.dumps(details)
+    assert message == "1 resgatado · 1 verificado"
+    assert details == {
+        "kind": "games",
+        "items": [{"title": "Example Game", "outcome": "claimed"}],
+    }
+    assert "private@example.invalid" not in serialized
+    assert "ABC-123" not in serialized
+    assert "secret.invalid" not in serialized
+
+
+def test_aliexpress_summary_exposes_coin_balance_and_streak():
+    message, details = summarize_store_result(
+        "aliexpress",
+        {
+            "user": "private@example.invalid",
+            "checkin": {
+                "outcome": "collected",
+                "claimedCoins": 15,
+                "offeredCoins": 15,
+                "balance": 480,
+                "streakDays": 7,
+                "tomorrowCoins": 18,
+            },
+        },
+    )
+
+    assert message == "15 moedas coletadas"
+    assert details == {
+        "kind": "coins",
+        "outcome": "collected",
+        "claimedCoins": 15,
+        "offeredCoins": 15,
+        "balance": 480,
+        "streakDays": 7,
+        "tomorrowCoins": 18,
+    }
+    assert "private@example.invalid" not in json.dumps(details)
 
 
 def test_dashboard_http_api_and_csrf():
@@ -121,6 +179,10 @@ def test_dashboard_http_api_and_csrf():
             assert response.headers.get_content_type() == "image/svg+xml"
             assert response.read().startswith(b"<svg")
 
+        with urlopen(f"{base}/assets/fonts/newsreader-latin.woff2", timeout=3) as response:
+            assert response.headers.get_content_type() == "font/woff2"
+            assert response.read(4) == b"wOF2"
+
         denied = Request(
             f"{base}/api/run",
             data=b"{}",
@@ -156,12 +218,18 @@ def test_frontend_is_local_and_contains_store_controls():
     assert "__FGC_TOKEN__" in html
     assert "Executar agora" in html
     assert "Configurações" in html
+    assert "Seus dados ficam neste computador" in html
+    assert "Nenhuma credencial é armazenada em servidores do FGC" in html
+    assert "Conexões externas: lojas, notificações configuradas e verificação de atualizações" in html
     assert "http://" not in html and "https://" not in html
     assert "/api/run" in script
     assert "/api/config" in script
     assert "'aliexpress'" in script
+    assert "Unity" in script
     assert "filter(store => store.enabled)" in script
     assert "Adicionar loja" in script
+    assert "Saldo:" in script
+    assert "result-outcome" in script
     assert "storeManagerForm" in html
     assert "/assets/icons/aliexpress.svg" in (
         static / "app.css"

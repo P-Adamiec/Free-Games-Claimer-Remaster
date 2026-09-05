@@ -57,7 +57,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self'; script-src 'self'; font-src 'self'",
+        )
         self.end_headers()
         self.wfile.write(body)
 
@@ -99,6 +102,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/assets/icons/gogdotcom.svg": ("icons/gogdotcom.svg", "image/svg+xml"),
             "/assets/icons/ubisoft.svg": ("icons/ubisoft.svg", "image/svg+xml"),
             "/assets/icons/aliexpress.svg": ("icons/aliexpress.svg", "image/svg+xml"),
+            "/assets/fonts/newsreader-latin.woff2": ("fonts/newsreader-latin.woff2", "font/woff2"),
+            "/assets/fonts/jetbrains-mono-latin.woff2": ("fonts/jetbrains-mono-latin.woff2", "font/woff2"),
         }
         item = files.get(path)
         if item is None:

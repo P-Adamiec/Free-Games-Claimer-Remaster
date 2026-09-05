@@ -12,7 +12,7 @@ from dotenv import set_key
 from src.core.config import cfg
 
 
-STORE_KEYS = ("steam", "epic", "fab", "prime", "gog", "ubisoft", "gamerpower", "aliexpress")
+STORE_KEYS = ("steam", "epic", "fab", "prime", "gog", "ubisoft", "unity", "gamerpower", "aliexpress")
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,9 @@ SPECS = (
     SettingSpec("UBI_EMAIL", "ubi_email", "E-mail Ubisoft", "Ubisoft", "password", True),
     SettingSpec("UBI_PASSWORD", "ubi_password", "Senha Ubisoft", "Ubisoft", "password", True),
     SettingSpec("UBI_OTPKEY", "ubi_otpkey", "Chave TOTP Ubisoft", "Ubisoft", "password", True),
+    SettingSpec("UNITY_EMAIL", "unity_email", "E-mail Unity", "Unity", "password", True),
+    SettingSpec("UNITY_PASSWORD", "unity_password", "Senha Unity", "Unity", "password", True),
+    SettingSpec("UNITY_ACCEPT_TOS", "unity_accept_tos", "Aceitar termos automaticamente", "Unity", "boolean"),
     SettingSpec("AE_EMAIL", "ae_email", "E-mail AliExpress", "AliExpress", "password", True),
     SettingSpec("AE_PASSWORD", "ae_password", "Senha AliExpress", "AliExpress", "password", True),
     SettingSpec("AE_MIN_COINS", "ae_min_coins", "Mínimo de moedas", "AliExpress", "integer", minimum=1, maximum=10000),

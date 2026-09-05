@@ -264,6 +264,7 @@ class AliExpressClaimer(BaseClaimer):
         self._user_coins: int | None = None
         self._coin_reqs: dict = {}  # requestId -> url, for coin/check-in mtop responses
         self._coin_payloads: list[dict] = []  # flattened coin/check-in responses (streak, tomorrow, balance)
+        self.checkin_summary: dict = {}
 
     async def run(self) -> None:
         """Main entry point for the AliExpress daily check-in flow."""
@@ -1451,6 +1452,26 @@ class AliExpressClaimer(BaseClaimer):
             "status": status,
         })
 
+    def _set_checkin_summary(
+        self,
+        outcome: str,
+        *,
+        claimed_coins=None,
+        offered_coins=None,
+        info: dict | None = None,
+        balance=None,
+    ) -> None:
+        """Keep structured, non-sensitive check-in data for the local dashboard."""
+        info = info or {}
+        self.checkin_summary = {
+            "outcome": outcome,
+            "claimedCoins": _as_int(claimed_coins),
+            "offeredCoins": _as_int(offered_coins),
+            "balance": _as_int(balance),
+            "streakDays": _as_int(info.get("streak")),
+            "tomorrowCoins": _as_int(info.get("tomorrow")),
+        }
+
     async def _rewarm_to_coins(self) -> None:
         """Re-approach the coin page organically (home → activity → coins).
 
@@ -1553,6 +1574,7 @@ class AliExpressClaimer(BaseClaimer):
 
         if cfg.dryrun:
             self.logger.info("DRYRUN – skipped AliExpress coin check-in.")
+            self._set_checkin_summary("available", balance=self._user_coins)
             self._report("available (dry run)")
             return
 
@@ -1572,6 +1594,10 @@ class AliExpressClaimer(BaseClaimer):
                 self.logger.info(
                     "✨ Daily check-in already claimed today (%s).",
                     state.get("earnText") or "confirmed by the check-in API")
+                info = await self._read_checkin_info()
+                self._set_checkin_summary(
+                    "already_collected", info=info, balance=self._user_coins,
+                )
                 self._report("already claimed today ✨")
                 return
 
@@ -1643,6 +1669,13 @@ class AliExpressClaimer(BaseClaimer):
                         total = bal_before + claimed_coins
                     status = self._format_checkin_status(claimed_coins, info, total)
                     self.logger.info("✅ AliExpress coins collected! (%s)", status)
+                    self._set_checkin_summary(
+                        "collected",
+                        claimed_coins=claimed_coins,
+                        offered_coins=claimed_coins,
+                        info=info,
+                        balance=total,
+                    )
                     self._report(status)
                     await self.sleep(3)
                     return
@@ -1658,6 +1691,9 @@ class AliExpressClaimer(BaseClaimer):
             self.logger.error(
                 "🚫 Session flagged as low-trust: only %s coin(s) offered instead of the "
                 "full amount, NOT collecting (policy). Collect on your phone to keep the streak.", coins)
+            self._set_checkin_summary(
+                "not_collected", offered_coins=coins, balance=self._user_coins,
+            )
             self._report(f"⚠️ flagged, only {coins} coin(s) offered, not collected 🚫")
             if cfg.notify_claim_fails:
                 await self.notify(
@@ -1686,9 +1722,21 @@ class AliExpressClaimer(BaseClaimer):
             info = await self._read_checkin_info()
             status = self._format_checkin_status(state.get("todayCoins"), info, self._user_coins)
             self.logger.info("✅ Collected manually via VNC. (%s)", status)
+            self._set_checkin_summary(
+                "collected_manual",
+                claimed_coins=state.get("todayCoins"),
+                offered_coins=state.get("todayCoins"),
+                info=info,
+                balance=self._user_coins,
+            )
             self._report(status.replace("claimed", "claimed manually via VNC", 1))
         else:
             self.logger.error("⚠️ Still not collected after VNC wait, streak may break.")
+            self._set_checkin_summary(
+                "not_collected",
+                offered_coins=state.get("todayCoins"),
+                balance=self._user_coins,
+            )
             self._report("⚠️ NOT collected, widget did not render")
 
 
@@ -1696,4 +1744,9 @@ async def claim_aliexpress() -> dict:
     """Convenience entry point for AliExpress daily check-in."""
     claimer = AliExpressClaimer()
     await claimer.run()
-    return {"store": "AliExpress", "user": claimer.user, "games": claimer.notify_games}
+    return {
+        "store": "AliExpress",
+        "user": claimer.user,
+        "games": claimer.notify_games,
+        "checkin": claimer.checkin_summary,
+    }

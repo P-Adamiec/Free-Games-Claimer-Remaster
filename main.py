@@ -41,7 +41,7 @@ from src.stores.unity import claim_unity
 from src.stores.ubisoft import claim_ubisoft
 from src.core.notifier import notify
 from src.gui.settings import SettingsError, get_settings, save_settings
-from src.gui.state import dashboard_state
+from src.gui.state import dashboard_state, summarize_store_result
 from src.version import __version__, __author__, __repo__, __contributors__
 
 # ---------------------------------------------------------------------------
@@ -328,9 +328,8 @@ async def run_claimers(requested_stores: list[str] | None = None) -> None:
                 logger.debug("%s returned %d game entr(ies): %s", name, len(res.get("games") or []), res.get("games"))
             if isinstance(res, dict) and res.get("games"):
                 aggregated_results.append(res)
-            game_count = len(res.get("games") or []) if isinstance(res, dict) else 0
-            message = "Concluído sem novidades" if game_count == 0 else f"Concluído · {game_count} resultado(s)"
-            dashboard_state.finish_store(store_key, message)
+            message, details = summarize_store_result(store_key, res)
+            dashboard_state.finish_store(store_key, message, details=details)
         except Exception:
             logger.exception("✗ %s crashed", name)
             dashboard_state.finish_store(store_key, "Falha na última execução", failed=True)

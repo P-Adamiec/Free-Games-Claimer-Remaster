@@ -49,6 +49,20 @@
       <button class="button primary run-all" id="runAllButton" type="button">Executar agora</button>
     </section>
 
+    <aside class="local-security" aria-label="Privacidade e execução local">
+      <span class="security-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" role="img">
+          <path d="M7.5 10V7.5a4.5 4.5 0 0 1 9 0V10m-10 0h11a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"/>
+          <path d="M12 14v3"/>
+        </svg>
+      </span>
+      <div class="security-copy">
+        <strong>Seus dados ficam neste computador</strong>
+        <p>O painel, as configurações e as sessões salvas rodam localmente. Nenhuma credencial é armazenada em servidores do FGC.</p>
+      </div>
+      <span class="security-scope">Conexões externas: lojas, notificações configuradas e verificação de atualizações</span>
+    </aside>
+
     <section class="stores-section" aria-labelledby="storesTitle">
       <div class="section-header">
         <div>
@@ -90,9 +104,15 @@
       <button class="close-button" id="closeSettings" type="button" aria-label="Fechar">×</button>
     </header>
     <form id="settingsForm">
-      <div class="settings-content" id="settingsContent"></div>
+      <div class="settings-body">
+        <nav class="settings-nav" id="settingsNav" aria-label="Categorias de configuração"></nav>
+        <div class="settings-content" id="settingsContent"></div>
+      </div>
       <footer class="drawer-footer">
-        <p>Campos de senha vazios mantêm o valor atual.</p>
+        <div class="drawer-notes">
+          <p><strong>Armazenamento local:</strong> suas contas e preferências permanecem nesta máquina.</p>
+          <p>Campos de senha vazios mantêm o valor atual.</p>
+        </div>
         <button class="button primary" type="submit">Salvar configurações</button>
       </footer>
     </form>

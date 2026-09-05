@@ -2,8 +2,24 @@ const token = document.querySelector('meta[name="fgc-token"]').content;
 const storeGrid = document.querySelector('#storeGrid');
 const toast = document.querySelector('#toast');
 const logoStores = new Set(['steam', 'epic', 'gog', 'ubisoft', 'aliexpress']);
+const settingsDescriptions = {
+  Lojas: 'Escolha quais módulos aparecem no painel e entram no agendamento.',
+  Agendamento: 'Defina quando as coletas automáticas devem acontecer.',
+  Navegador: 'Ajuste a sessão visual usada durante logins e coletas.',
+  Notificações: 'Controle resumos, alertas e integrações externas.',
+  'Epic Games': 'Credenciais e opções específicas da Epic Games.',
+  'Prime Gaming': 'Credenciais e resgate de códigos do Prime Gaming.',
+  GOG: 'Credenciais e preferências da conta GOG.',
+  Steam: 'Credenciais usadas pelo módulo Steam.',
+  Ubisoft: 'Credenciais e autenticação da Ubisoft.',
+  Unity: 'Credenciais e aceitação dos termos da Unity Asset Store.',
+  AliExpress: 'Credenciais e limites da coleta diária de moedas.',
+  Fab: 'Comportamento do resgate de recursos na Fab.',
+  GamerPower: 'Ative as fontes adicionais consultadas pelo GamerPower.',
+};
 let latestStatus = null;
 let latestConfig = null;
+let activeSettingsSection = 'Lojas';
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -52,6 +68,75 @@ function createStoreIcon(store) {
   return icon;
 }
 
+const outcomeLabels = {
+  claimed: 'Resgatado',
+  owned: 'Já estava na biblioteca',
+  available: 'Disponível',
+  failed: 'Falhou',
+  skipped: 'Ignorado',
+  action_required: 'Ação necessária',
+  processed: 'Verificado',
+};
+
+function createStoreDetails(details) {
+  if (!details || !details.kind) return null;
+
+  const panel = document.createElement('div');
+  panel.className = 'store-results';
+
+  if (details.kind === 'games') {
+    const list = document.createElement('ul');
+    list.className = 'result-list';
+    for (const item of details.items || []) {
+      const entry = document.createElement('li');
+      const title = document.createElement('span');
+      title.className = 'result-title';
+      title.textContent = item.title;
+      const outcome = document.createElement('span');
+      outcome.className = `result-outcome outcome-${item.outcome}`;
+      outcome.textContent = outcomeLabels[item.outcome] || outcomeLabels.processed;
+      entry.append(title, outcome);
+      list.append(entry);
+    }
+    panel.append(list);
+    return panel;
+  }
+
+  if (details.kind === 'coins') {
+    const outcome = document.createElement('strong');
+    outcome.className = `coin-outcome coin-${details.outcome}`;
+    const coinOutcomes = {
+      collected: 'Coleta automática realizada',
+      collected_manual: 'Coleta manual realizada',
+      already_collected: 'Já coletadas hoje',
+      not_collected: 'Não coletadas',
+      available: 'Disponíveis em simulação',
+    };
+    outcome.textContent = coinOutcomes[details.outcome] || coinOutcomes.not_collected;
+
+    const metrics = document.createElement('div');
+    metrics.className = 'coin-metrics';
+    const values = [];
+    if (details.claimedCoins !== null && ['collected', 'collected_manual'].includes(details.outcome)) {
+      values.push(`+${details.claimedCoins} moedas`);
+    } else if (details.offeredCoins !== null) {
+      values.push(`Oferta: ${details.offeredCoins} moedas`);
+    }
+    if (details.balance !== null) values.push(`Saldo: ${details.balance} moedas`);
+    if (details.streakDays !== null) values.push(`Sequência: ${details.streakDays} dia${details.streakDays === 1 ? '' : 's'}`);
+    if (details.tomorrowCoins !== null) values.push(`Amanhã: ${details.tomorrowCoins} moedas`);
+    for (const value of values) {
+      const metric = document.createElement('span');
+      metric.textContent = value;
+      metrics.append(metric);
+    }
+    panel.append(outcome, metrics);
+    return panel;
+  }
+
+  return null;
+}
+
 function createStoreRow(store, globalRunning) {
   const row = document.createElement('article');
   row.className = 'store-row';
@@ -95,6 +180,8 @@ function createStoreRow(store, globalRunning) {
   run.addEventListener('click', () => runStores([store.key]));
 
   row.append(identity, state, lastRun, run);
+  const details = createStoreDetails(store.details);
+  if (details) row.append(details);
   return row;
 }
 
@@ -246,31 +333,58 @@ function createInput(spec, current, configured) {
   return wrapper;
 }
 
+function createSettingsPanel(name, body) {
+  const panel = document.createElement('section');
+  panel.className = 'settings-panel';
+  panel.dataset.section = name;
+  const header = document.createElement('header');
+  header.className = 'settings-panel-header';
+  const title = document.createElement('h3');
+  title.textContent = name;
+  const description = document.createElement('p');
+  description.textContent = settingsDescriptions[name] || '';
+  header.append(title, description);
+  panel.append(header, body);
+  return panel;
+}
+
+function activateSettingsSection(name) {
+  activeSettingsSection = name;
+  for (const panel of document.querySelectorAll('.settings-panel')) {
+    panel.hidden = panel.dataset.section !== name;
+  }
+  for (const button of document.querySelectorAll('.settings-nav-item')) {
+    const active = button.dataset.section === name;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-current', active ? 'page' : 'false');
+  }
+}
+
 function renderSettings(config) {
   latestConfig = config;
   const content = document.querySelector('#settingsContent');
-  const fragments = [];
-  const storeGroup = document.createElement('section');
-  storeGroup.className = 'settings-group';
-  const storeTitle = document.createElement('h3');
-  storeTitle.textContent = 'Lojas habilitadas';
+  const panels = [];
   const options = document.createElement('div');
-  options.className = 'store-options';
+  options.className = 'store-settings-list';
   for (const store of latestStatus.stores) {
     const row = document.createElement('label');
-    row.className = 'check-row';
+    row.className = 'store-setting-row';
+    const copy = document.createElement('span');
+    copy.className = 'store-setting-copy';
+    const name = document.createElement('strong');
+    name.textContent = store.name;
+    const key = document.createElement('small');
+    key.textContent = store.key;
+    copy.append(name, key);
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.name = 'STORES';
     input.value = store.key;
     input.checked = config.values.STORES.includes(store.key);
-    const text = document.createElement('span');
-    text.textContent = store.name;
-    row.append(input, text);
+    row.append(createStoreIcon(store), copy, input);
     options.append(row);
   }
-  storeGroup.append(storeTitle, options);
-  fragments.push(storeGroup);
+  panels.push(createSettingsPanel('Lojas', options));
 
   const sections = new Map();
   for (const spec of config.schema.filter(item => item.key !== 'STORES')) {
@@ -278,19 +392,30 @@ function renderSettings(config) {
     sections.get(spec.section).push(spec);
   }
   for (const [name, specs] of sections) {
-    const group = document.createElement('section');
-    group.className = 'settings-group';
-    const heading = document.createElement('h3');
-    heading.textContent = name;
     const grid = document.createElement('div');
     grid.className = 'field-grid';
     for (const spec of specs) {
       grid.append(createInput(spec, config.values[spec.key], config.configured[spec.key]));
     }
-    group.append(heading, grid);
-    fragments.push(group);
+    panels.push(createSettingsPanel(name, grid));
   }
-  content.replaceChildren(...fragments);
+  content.replaceChildren(...panels);
+
+  const nav = document.querySelector('#settingsNav');
+  const navItems = panels.map(panel => {
+    const button = document.createElement('button');
+    button.className = 'settings-nav-item';
+    button.type = 'button';
+    button.dataset.section = panel.dataset.section;
+    button.textContent = panel.dataset.section;
+    button.addEventListener('click', () => activateSettingsSection(panel.dataset.section));
+    return button;
+  });
+  nav.replaceChildren(...navItems);
+  if (!panels.some(panel => panel.dataset.section === activeSettingsSection)) {
+    activeSettingsSection = 'Lojas';
+  }
+  activateSettingsSection(activeSettingsSection);
 }
 
 async function openSettings() {
