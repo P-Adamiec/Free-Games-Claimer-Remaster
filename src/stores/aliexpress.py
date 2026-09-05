@@ -279,10 +279,13 @@ class AliExpressClaimer(BaseClaimer):
             await self._dismiss_cookie_banner()
             await self._simulate_human_activity()
 
-            # Step 3: go to the coin page: the login form renders INLINE here, so it's the reliable place to detect login state.
+            # Step 3: go to the coin page...
             self.logger.debug("Navigating to mobile coins check-in page...")
             await self._goto_coins_organically()
-            await self._human_pause(4, 7)
+            await self._human_pause(2, 3)
+
+            # Step 3.5: Ensure we aren't trapped in a skeleton loading page or redirected before checking login
+            await self._handle_skeleton_loading()
 
             # Step 4: Ensure we are actually logged in.
             if await self._is_logged_in():
@@ -743,13 +746,74 @@ class AliExpressClaimer(BaseClaimer):
             self.logger.debug("Organic coins navigation exception: %s", e)
 
         # Ensure we actually ended up on the coin page (fallback to direct load)
-        try:
-            url = str(await self.page.evaluate("window.location.href"))
-        except Exception:
-            url = ""
-        if "/p/coin-index/" not in url:
-            self.logger.debug("Organic tap did not reach the coin page (url=%s), loading it directly", url or "?")
-            await self.page.get(URL_COINS)
+            try:
+                url = str(await self.page.evaluate("window.location.href"))
+            except Exception:
+                url = ""
+            if "/p/coin-index/" not in url:
+                self.logger.debug("Organic tap did not reach the coin page (url=%s), loading it directly", url or "?")
+                await self.page.get(URL_COINS)
+                # since the skeleton loading function was added I removed the pause here.
+
+            await self._handle_skeleton_loading()
+
+    async def _handle_skeleton_loading(self, max_retries: int = 3) -> None:
+        """Wait out the login-pending screen, or reload if stuck/redirected."""
+        self.logger.debug("Checking for login-pending container...")
+        for attempt in range(max_retries):
+            is_pending = False
+            is_coin_page = False
+
+            # Poll once per second for up to 4 seconds to see if it clears naturally
+            for _ in range(4):
+                try:
+                    raw = await self.page.evaluate(r"""
+                        (() => {
+                            const pending = document.querySelector('.login-pending-container');
+                            return JSON.stringify({
+                                pending: !!pending,
+                                url: location.href.toLowerCase()
+                            });
+                        })()
+                    """)
+                    import json
+                    info = json.loads(raw) if isinstance(raw, str) else {}
+                except Exception:
+                    info = {"pending": False, "url": ""}
+
+                is_coin_page = "/p/coin-index/" in info.get("url", "")
+                is_pending = info.get("pending")
+
+                # The coin page loaded and the pending overlay is gone
+                if is_coin_page and not is_pending:
+                    self.logger.debug("Coin page ready (login-pending cleared). Settling DOM...")
+                    await self._human_pause(1.5, 2.5)
+                    return
+
+                await self.sleep(1)
+
+            # Still stuck with the pending container after 4 seconds
+            if is_pending:
+                self.logger.warning("⏳ Stuck on login-pending container. Refreshing (%d/%d)...", attempt + 1,
+                                    max_retries)
+                await self.page.reload()
+
+                # Progressive backoff: adds 1.5s to the wait time for each consecutive failure incase this is a potato server
+                # Attempt 1: 2-4s | Attempt 2: 3.5-5.5s | Attempt 3: 5-7s
+                extra_wait = attempt * 1.5
+                await self._human_pause(2.0 + extra_wait, 4.0 + extra_wait)
+                continue
+
+            # Bounced off to the homepage or somewhere else
+            if not is_coin_page:
+                self.logger.warning("Redirected off coin page to %s. Reloading coin page...",
+                                    info.get("url", "unknown"))
+                await self.page.get(URL_COINS)
+
+                #shorter pause if we just need to re-navigate. It only navigates it the bot sat too long on the loading page
+                # so the bot should refresh sooner before Aliexpress sends it back to home page
+                await self._human_pause(1.0, 2.0)
+                continue
 
     async def _diagnose_page(self) -> None:
         """Log what an anti-bot layer can observe. Diagnostic aid while tuning stealth.
@@ -1519,7 +1583,9 @@ class AliExpressClaimer(BaseClaimer):
         if "/p/coin-index/" not in str(current_url):
             self.logger.debug("Navigating to coins page to trigger daily check-in...")
             await self.page.get(URL_COINS)
-            await self._human_pause(4, 7)
+            await self._human_pause(2, 3)
+        # adjusted timing here and added the loading check
+        await self._handle_skeleton_loading()
 
         await self._dismiss_overlays()
 
