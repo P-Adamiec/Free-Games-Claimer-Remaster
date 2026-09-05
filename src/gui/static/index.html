@@ -8,73 +8,91 @@
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-  <div class="ambient ambient-one"></div>
-  <div class="ambient ambient-two"></div>
-  <main class="shell">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true"><span>F</span></div>
-        <div>
-          <p class="eyebrow">FREE GAMES CLAIMER</p>
-          <h1>Control Center</h1>
+  <header class="app-header">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="Free Games Claimer">
+        <span class="brand-mark" aria-hidden="true">FGC</span>
+        <span class="brand-name">Free Games Claimer</span>
+        <span class="local-label">LOCAL</span>
+      </a>
+      <div class="header-actions">
+        <div class="system-state" id="runPill">
+          <span class="status-dot"></span>
+          <span id="runLabel">Pronto</span>
         </div>
+        <a class="button secondary" id="vncLink" target="_blank" rel="noreferrer">Navegador</a>
+        <button class="button secondary" id="settingsButton" type="button">Configurações</button>
       </div>
-      <div class="top-actions">
-        <a class="button ghost" id="vncLink" target="_blank" rel="noreferrer">Abrir navegador</a>
-        <button class="button ghost" id="settingsButton" type="button">Configurar</button>
-        <button class="button primary" id="runAllButton" type="button">Executar agora</button>
-      </div>
-    </header>
+    </div>
+  </header>
 
-    <section class="hero">
-      <div>
-        <p class="eyebrow">AUTOMAÇÃO LOCAL</p>
-        <h2>Suas lojas, uma visão clara.</h2>
-        <p class="hero-copy">Acompanhe as coletas, execute módulos individuais e ajuste o agendamento sem editar arquivos manualmente.</p>
+  <main class="workspace">
+    <section class="run-panel" aria-labelledby="automationTitle">
+      <div class="run-heading">
+        <h1 id="automationTitle">Automação</h1>
+        <p>Execute as lojas habilitadas ou acompanhe o próximo ciclo.</p>
       </div>
-      <div class="run-pill" id="runPill"><span class="pulse"></span><span id="runLabel">Sistema pronto</span></div>
+      <dl class="run-summary">
+        <div>
+          <dt>Próxima execução</dt>
+          <dd id="nextRun">—</dd>
+        </div>
+        <div>
+          <dt>Última execução</dt>
+          <dd id="lastRun">—</dd>
+        </div>
+        <div>
+          <dt>Lojas ativas</dt>
+          <dd id="activeStoreCount">—</dd>
+        </div>
+      </dl>
+      <button class="button primary run-all" id="runAllButton" type="button">Executar agora</button>
     </section>
 
-    <section class="summary-grid" aria-label="Resumo">
-      <article class="summary-card">
-        <span>Próxima execução</span>
-        <strong id="nextRun">—</strong>
-      </article>
-      <article class="summary-card">
-        <span>Lojas habilitadas</span>
-        <strong id="enabledCount">—</strong>
-      </article>
-      <article class="summary-card">
-        <span>Última execução</span>
-        <strong id="lastRun">—</strong>
-      </article>
-    </section>
-
-    <section class="stores-section">
-      <div class="section-heading">
+    <section class="stores-section" aria-labelledby="storesTitle">
+      <div class="section-header">
         <div>
-          <p class="eyebrow">MÓDULOS</p>
-          <h2>Status das lojas</h2>
+          <h2 id="storesTitle">Lojas ativas</h2>
+          <p>Somente as lojas selecionadas participam da execução automática.</p>
         </div>
-        <button class="icon-button" id="refreshButton" type="button" aria-label="Atualizar">↻</button>
+        <button class="text-button" id="refreshButton" type="button">Atualizar</button>
       </div>
-      <div class="store-grid" id="storeGrid" aria-live="polite"></div>
+      <div class="store-list" id="storeGrid" aria-live="polite"></div>
     </section>
   </main>
+
+  <div class="modal-backdrop" id="storeModalBackdrop" hidden>
+    <section class="store-modal" role="dialog" aria-modal="true" aria-labelledby="storeModalTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="storeModalTitle">Escolher lojas</h2>
+          <p>Marque as lojas que devem aparecer no painel e no agendamento.</p>
+        </div>
+        <button class="close-button" id="closeStoreModal" type="button" aria-label="Fechar">×</button>
+      </header>
+      <form id="storeManagerForm">
+        <div class="store-picker" id="storeManagerList"></div>
+        <footer class="modal-footer">
+          <button class="button secondary" id="cancelStoreModal" type="button">Cancelar</button>
+          <button class="button primary" type="submit">Salvar lojas</button>
+        </footer>
+      </form>
+    </section>
+  </div>
 
   <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
   <aside class="drawer" id="settingsDrawer" aria-hidden="true" aria-label="Configurações">
     <header class="drawer-header">
       <div>
-        <p class="eyebrow">PREFERÊNCIAS</p>
-        <h2>Configurar automação</h2>
+        <h2>Configurações</h2>
+        <p>Contas, agendamento e comportamento dos módulos.</p>
       </div>
-      <button class="icon-button" id="closeSettings" type="button" aria-label="Fechar">×</button>
+      <button class="close-button" id="closeSettings" type="button" aria-label="Fechar">×</button>
     </header>
     <form id="settingsForm">
       <div class="settings-content" id="settingsContent"></div>
       <footer class="drawer-footer">
-        <p>Senhas existentes nunca são exibidas. Deixe o campo vazio para mantê-las.</p>
+        <p>Campos de senha vazios mantêm o valor atual.</p>
         <button class="button primary" type="submit">Salvar configurações</button>
       </footer>
     </form>

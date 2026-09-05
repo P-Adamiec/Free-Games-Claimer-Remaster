@@ -52,6 +52,7 @@ def test_settings_are_validated_persisted_and_applied(tmp_path, monkeypatch):
     "values",
     [
         {"STORES": ["unknown"]},
+        {"STORES": []},
         {"SCHEDULER_HOURS": -1},
         {"SCHEDULER_FIXED_TIMES": "25:90"},
         {"SCHEDULER_TIMEZONE": "Nowhere/Invalid"},
@@ -154,11 +155,14 @@ def test_frontend_is_local_and_contains_store_controls():
 
     assert "__FGC_TOKEN__" in html
     assert "Executar agora" in html
-    assert "Configurar" in html
+    assert "Configurações" in html
     assert "http://" not in html and "https://" not in html
     assert "/api/run" in script
     assert "/api/config" in script
     assert "'aliexpress'" in script
+    assert "filter(store => store.enabled)" in script
+    assert "Adicionar loja" in script
+    assert "storeManagerForm" in html
     assert "/assets/icons/aliexpress.svg" in (
         static / "app.css"
     ).read_text(encoding="utf-8")

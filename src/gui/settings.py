@@ -117,6 +117,8 @@ def _normalise(spec: SettingSpec, value):
     if spec.kind == "stores":
         raw = value if isinstance(value, list) else str(value or "").split(",")
         stores = [str(item).strip().lower() for item in raw if str(item).strip()]
+        if not stores:
+            raise SettingsError("Selecione pelo menos uma loja")
         invalid = sorted(set(stores) - set(STORE_KEYS))
         if invalid:
             raise SettingsError(f"Lojas desconhecidas: {', '.join(invalid)}")

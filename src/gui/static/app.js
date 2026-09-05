@@ -1,9 +1,9 @@
 const token = document.querySelector('meta[name="fgc-token"]').content;
 const storeGrid = document.querySelector('#storeGrid');
 const toast = document.querySelector('#toast');
+const logoStores = new Set(['steam', 'epic', 'gog', 'ubisoft', 'aliexpress']);
 let latestStatus = null;
 let latestConfig = null;
-const logoStores = new Set(['steam', 'epic', 'gog', 'ubisoft', 'aliexpress']);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -38,16 +38,10 @@ function relativeTime(value) {
   return formatter.format(seconds, 'second');
 }
 
-function createStoreCard(store, globalRunning) {
-  const card = document.createElement('article');
-  card.className = 'store-card';
-  card.classList.add(`store-${store.key}`);
-  card.dataset.state = store.state;
-
-  const top = document.createElement('div');
-  top.className = 'store-top';
-  const icon = document.createElement('div');
-  icon.className = 'store-icon';
+function createStoreIcon(store) {
+  const icon = document.createElement('span');
+  icon.className = `store-icon store-${store.key}`;
+  icon.setAttribute('aria-hidden', 'true');
   if (logoStores.has(store.key)) {
     const logo = document.createElement('span');
     logo.className = `store-logo logo-${store.key}`;
@@ -55,52 +49,94 @@ function createStoreCard(store, globalRunning) {
   } else {
     icon.textContent = store.badge;
   }
-  icon.setAttribute('aria-hidden', 'true');
-  const dot = document.createElement('span');
-  dot.className = 'status-dot';
-  top.append(icon, dot);
+  return icon;
+}
 
+function createStoreRow(store, globalRunning) {
+  const row = document.createElement('article');
+  row.className = 'store-row';
+  row.dataset.state = store.state;
+
+  const identity = document.createElement('div');
+  identity.className = 'store-identity';
+  const names = document.createElement('div');
   const title = document.createElement('h3');
+  title.className = 'store-name';
   title.textContent = store.name;
-  const status = document.createElement('p');
-  status.className = 'store-status';
-  status.textContent = store.enabled ? store.message : 'Módulo desabilitado';
+  const key = document.createElement('p');
+  key.className = 'store-key';
+  key.textContent = store.key;
+  names.append(title, key);
+  identity.append(createStoreIcon(store), names);
 
-  const actions = document.createElement('div');
-  actions.className = 'store-actions';
-  const time = document.createElement('small');
-  time.textContent = store.lastRun ? relativeTime(store.lastRun) : 'Sem execução nesta sessão';
-  actions.append(time);
-  if (store.enabled) {
-    const run = document.createElement('button');
-    run.className = 'run-store';
-    run.type = 'button';
-    run.textContent = store.state === 'running' ? 'Executando…' : 'Executar';
-    run.disabled = globalRunning;
-    run.addEventListener('click', () => runStores([store.key]));
-    actions.append(run);
-  } else {
-    const tag = document.createElement('span');
-    tag.className = 'disabled-tag';
-    tag.textContent = 'Desativada';
-    actions.append(tag);
-  }
-  card.append(top, title, status, actions);
-  return card;
+  const state = document.createElement('div');
+  state.className = 'store-state';
+  const marker = document.createElement('span');
+  marker.className = 'state-marker';
+  const message = document.createElement('span');
+  message.textContent = store.message;
+  state.append(marker, message);
+
+  const lastRun = document.createElement('div');
+  lastRun.className = 'last-run';
+  const lastRunLabel = document.createElement('span');
+  lastRunLabel.className = 'last-run-label';
+  lastRunLabel.textContent = 'Última execução';
+  const lastRunValue = document.createElement('strong');
+  lastRunValue.className = 'last-run-value';
+  lastRunValue.textContent = store.lastRun ? relativeTime(store.lastRun) : 'Nesta sessão: nunca';
+  lastRun.append(lastRunLabel, lastRunValue);
+
+  const run = document.createElement('button');
+  run.className = 'button run-store';
+  run.type = 'button';
+  run.textContent = store.state === 'running' ? 'Executando' : 'Executar';
+  run.disabled = globalRunning;
+  run.addEventListener('click', () => runStores([store.key]));
+
+  row.append(identity, state, lastRun, run);
+  return row;
+}
+
+function createAddStoreRow(availableCount) {
+  const button = document.createElement('button');
+  button.className = 'add-store-row';
+  button.id = 'addStoreButton';
+  button.type = 'button';
+  const symbol = document.createElement('span');
+  symbol.className = 'add-symbol';
+  symbol.textContent = '+';
+  symbol.setAttribute('aria-hidden', 'true');
+  const copy = document.createElement('span');
+  copy.className = 'add-copy';
+  const title = document.createElement('strong');
+  title.textContent = availableCount ? 'Adicionar loja' : 'Gerenciar lojas';
+  const detail = document.createElement('small');
+  detail.textContent = availableCount
+    ? `${availableCount} ${availableCount === 1 ? 'loja disponível' : 'lojas disponíveis'}`
+    : 'Todas as lojas disponíveis estão ativas';
+  copy.append(title, detail);
+  button.append(symbol, copy);
+  button.addEventListener('click', openStoreManager);
+  return button;
 }
 
 function renderStatus(status) {
   latestStatus = status;
-  storeGrid.replaceChildren(...status.stores.map(store => createStoreCard(store, status.running)));
-  const enabled = status.stores.filter(store => store.enabled).length;
-  document.querySelector('#enabledCount').textContent = `${enabled} de ${status.stores.length}`;
+  const enabledStores = status.stores.filter(store => store.enabled);
+  const disabledCount = status.stores.length - enabledStores.length;
+  storeGrid.replaceChildren(
+    ...enabledStores.map(store => createStoreRow(store, status.running)),
+    createAddStoreRow(disabledCount),
+  );
+  document.querySelector('#activeStoreCount').textContent = String(enabledStores.length);
   document.querySelector('#lastRun').textContent = relativeTime(status.finishedAt);
   document.querySelector('#nextRun').textContent = status.schedule.nextRun
     ? relativeTime(status.schedule.nextRun)
     : 'Somente manual';
-  document.querySelector('#runLabel').textContent = status.running ? 'Execução em andamento' : 'Sistema pronto';
+  document.querySelector('#runLabel').textContent = status.running ? 'Executando' : 'Pronto';
   document.querySelector('#runPill').classList.toggle('running', status.running);
-  document.querySelector('#runAllButton').disabled = status.running || enabled === 0;
+  document.querySelector('#runAllButton').disabled = status.running || enabledStores.length === 0;
 }
 
 async function refreshStatus(silent = true) {
@@ -114,10 +150,64 @@ async function refreshStatus(silent = true) {
 async function runStores(stores = null) {
   try {
     await api('/api/run', { method: 'POST', body: JSON.stringify({ stores }) });
-    showToast(stores ? 'Loja adicionada à execução.' : 'Execução completa iniciada.');
+    showToast(stores ? 'Execução da loja iniciada.' : 'Execução das lojas iniciada.');
     await refreshStatus();
   } catch (error) {
-    showToast(error.message === 'Não foi possível concluir a operação.' ? 'Já existe uma execução em andamento.' : error.message, true);
+    showToast(error.message, true);
+  }
+}
+
+function renderStoreManager() {
+  const list = document.querySelector('#storeManagerList');
+  const rows = latestStatus.stores.map(store => {
+    const label = document.createElement('label');
+    label.className = 'store-picker-row';
+    const name = document.createElement('span');
+    name.className = 'store-picker-name';
+    name.textContent = store.name;
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.name = 'stores';
+    input.value = store.key;
+    input.checked = store.enabled;
+    label.append(createStoreIcon(store), name, input);
+    return label;
+  });
+  list.replaceChildren(...rows);
+}
+
+async function openStoreManager() {
+  try {
+    if (!latestStatus) await refreshStatus(false);
+    renderStoreManager();
+    document.querySelector('#storeModalBackdrop').hidden = false;
+    document.querySelector('#storeManagerList input')?.focus();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function closeStoreManager() {
+  document.querySelector('#storeModalBackdrop').hidden = true;
+}
+
+async function saveStoreSelection(event) {
+  event.preventDefault();
+  const stores = new FormData(event.currentTarget).getAll('stores');
+  if (stores.length === 0) {
+    showToast('Selecione pelo menos uma loja.', true);
+    return;
+  }
+  try {
+    await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({ values: { STORES: stores } }),
+    });
+    closeStoreManager();
+    showToast('Lojas atualizadas.');
+    await refreshStatus();
+  } catch (error) {
+    showToast(error.message, true);
   }
 }
 
@@ -218,7 +308,7 @@ async function openSettings() {
 function closeSettings() {
   document.querySelector('#settingsDrawer').classList.remove('open');
   document.querySelector('#settingsDrawer').setAttribute('aria-hidden', 'true');
-  setTimeout(() => { document.querySelector('#drawerBackdrop').hidden = true; }, 220);
+  setTimeout(() => { document.querySelector('#drawerBackdrop').hidden = true; }, 180);
 }
 
 async function saveSettings(event) {
@@ -246,6 +336,18 @@ document.querySelector('#settingsButton').addEventListener('click', openSettings
 document.querySelector('#closeSettings').addEventListener('click', closeSettings);
 document.querySelector('#drawerBackdrop').addEventListener('click', closeSettings);
 document.querySelector('#settingsForm').addEventListener('submit', saveSettings);
+document.querySelector('#closeStoreModal').addEventListener('click', closeStoreManager);
+document.querySelector('#cancelStoreModal').addEventListener('click', closeStoreManager);
+document.querySelector('#storeModalBackdrop').addEventListener('click', event => {
+  if (event.target.id === 'storeModalBackdrop') closeStoreManager();
+});
+document.querySelector('#storeManagerForm').addEventListener('submit', saveStoreSelection);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    closeStoreManager();
+    closeSettings();
+  }
+});
 
 refreshStatus(false);
 setInterval(() => refreshStatus(), 3000);
