@@ -121,6 +121,10 @@ leave a secret field blank to keep its current value. The Compose configuration
 binds this port to `127.0.0.1` by default, so the dashboard is available only on
 the computer running Docker. Do not expose port 8080 directly to the internet.
 
+Set `GUI_SETUP_REQUIRED=true` to show the six-step first-run assistant before
+automation starts. It covers language, local security, stores, optional
+credentials, scheduling, and a final review.
+
 ### 4. Monitor
 
 To see what the bot is doing in real-time regardless of your current terminal folder, inspect the container directly:
@@ -164,6 +168,7 @@ Options are set via environment variables in `.env`:
 | `NOVNC_PORT` | `7080` | noVNC web access port. |
 | `GUI_ENABLED` | `true` | Enable the local control dashboard. |
 | `GUI_PORT` | `8080` | Host port for the local dashboard, bound to `127.0.0.1` by Docker Compose. |
+| `GUI_SETUP_REQUIRED` | `false` | Show the six-step setup assistant and pause automation until setup is complete. |
 | `VNC_IP` | `localhost`| Host for VNC notification links. Alerts include a one-click `http://<VNC_IP>:<NOVNC_PORT>/?autoconnect=true`. |
 | `VNC_URL` | | Full public noVNC address for notification links, e.g. `https://fgc.example.tld`. Use it behind a reverse proxy: it keeps your scheme and drops the port, replacing `VNC_IP` and `NOVNC_PORT` in the link (`NOVNC_PORT` still publishes the container port). |
 | `VNC_PASSWORD` | | Optional password for VNC access (empty = no password). |

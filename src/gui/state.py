@@ -52,7 +52,7 @@ def _game_outcome(status: str) -> str:
 def summarize_store_result(store_key: str, result) -> tuple[str, dict | None]:
     """Build the dashboard summary using an explicit allowlist of safe fields."""
     if not isinstance(result, dict):
-        return "Concluído sem novidades", None
+        return "Completed with no changes", None
 
     if store_key == "aliexpress" and isinstance(result.get("checkin"), dict):
         source = result["checkin"]
@@ -70,13 +70,13 @@ def summarize_store_result(store_key: str, result) -> tuple[str, dict | None]:
         }
         claimed = details["claimedCoins"]
         if outcome in {"collected", "collected_manual"}:
-            message = f"{claimed} moedas coletadas" if claimed is not None else "Moedas coletadas"
+            message = f"{claimed} coins collected" if claimed is not None else "Coins collected"
         elif outcome == "already_collected":
-            message = "Moedas já coletadas hoje"
+            message = "Coins already collected today"
         elif outcome == "available":
-            message = "Coleta disponível (simulação)"
+            message = "Collection available (dry run)"
         else:
-            message = "Moedas não coletadas"
+            message = "Coins not collected"
         return message, details
 
     items = []
@@ -93,13 +93,13 @@ def summarize_store_result(store_key: str, result) -> tuple[str, dict | None]:
         })
 
     if not items:
-        return "Concluído sem novidades", None
+        return "Completed with no changes", None
 
     claimed = sum(item["outcome"] == "claimed" for item in items)
     if claimed:
-        message = f"{claimed} resgatado{'s' if claimed != 1 else ''} · {len(items)} verificado{'s' if len(items) != 1 else ''}"
+        message = f"{claimed} claimed · {len(items)} checked"
     else:
-        message = f"{len(items)} verificado{'s' if len(items) != 1 else ''}"
+        message = f"{len(items)} checked"
     return message, {"kind": "games", "items": items}
 
 
@@ -115,6 +115,7 @@ class DashboardState:
                 "key": key,
                 "state": "idle",
                 "message": "Aguardando execução",
+                "messageKey": "status.waiting",
                 "lastRun": None,
                 "details": None,
             }
@@ -127,12 +128,16 @@ class DashboardState:
             self._started_at = _now()
             for key in store_keys:
                 if key in self._stores:
-                    self._stores[key].update(state="queued", message="Na fila", details=None)
+                    self._stores[key].update(
+                        state="queued", message="Na fila", messageKey="status.queued", details=None
+                    )
 
     def begin_store(self, key: str) -> None:
         with self._lock:
             if key in self._stores:
-                self._stores[key].update(state="running", message="Executando agora", details=None)
+                self._stores[key].update(
+                    state="running", message="Executando agora", messageKey="status.runningNow", details=None
+                )
 
     def finish_store(
         self,
@@ -141,12 +146,20 @@ class DashboardState:
         *,
         failed: bool = False,
         details: dict | None = None,
+        message_key: str | None = None,
     ) -> None:
         with self._lock:
             if key in self._stores:
                 self._stores[key].update(
                     state="error" if failed else "success",
                     message=message,
+                    messageKey=message_key or (
+                        "status.failed" if failed else (
+                            "status.resultCoins" if details and details.get("kind") == "coins" else
+                            "status.resultGames" if details and details.get("kind") == "games" else
+                            "status.completedNoChanges"
+                        )
+                    ),
                     lastRun=_now(),
                     details=deepcopy(details),
                 )

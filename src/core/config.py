@@ -179,6 +179,9 @@ class Config:
     # --- Local web dashboard ---
     gui_enabled: bool = _bool("GUI_ENABLED", default=True)
     gui_port: int = _int("GUI_PORT", 8080)
+    # The Windows installer enables this until the local onboarding wizard is complete.
+    # Source/Docker users keep the established startup behaviour by default.
+    gui_setup_required: bool = _bool("GUI_SETUP_REQUIRED", default=False)
 
     # --- DB Reset ---
     reset_db_games: bool = _bool("RESET_DB_GAMES", default=False)

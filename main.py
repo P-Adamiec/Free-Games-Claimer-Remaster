@@ -22,6 +22,7 @@ import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.base import STATE_PAUSED
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -40,7 +41,13 @@ from src.stores.steam import claim_steam
 from src.stores.unity import claim_unity
 from src.stores.ubisoft import claim_ubisoft
 from src.core.notifier import notify
-from src.gui.settings import SettingsError, get_settings, save_settings
+from src.gui.settings import (
+    SettingsError,
+    complete_setup,
+    get_settings,
+    get_setup_state,
+    save_settings,
+)
 from src.gui.state import dashboard_state, summarize_store_result
 from src.version import __version__, __author__, __repo__, __contributors__
 
@@ -332,7 +339,7 @@ async def run_claimers(requested_stores: list[str] | None = None) -> None:
             dashboard_state.finish_store(store_key, message, details=details)
         except Exception:
             logger.exception("✗ %s crashed", name)
-            dashboard_state.finish_store(store_key, "Falha na última execução", failed=True)
+            dashboard_state.finish_store(store_key, "Last run failed", failed=True)
             if cfg.store_notify_enabled(_store_key(name)):
                 await notify(f"{name} claimer crashed with an unhandled exception. Check logs.")
 
@@ -535,18 +542,24 @@ async def main() -> None:
     logger.info("Waiting for virtual display to initialize...")
     await asyncio.sleep(3)
 
-    # Also run immediately on startup
-    if cfg.run_on_startup:
+    setup_pending = cfg.gui_setup_required and not get_setup_state()["complete"]
+
+    # The packaged Windows experience opens the local setup wizard before any
+    # account automation. Existing source/Docker users are unaffected unless
+    # they explicitly enable GUI_SETUP_REQUIRED.
+    if cfg.run_on_startup and not setup_pending:
         scheduler.add_job(
             run_claimers_scheduled,
             id="claim_all_startup",
             name="Initial claiming run",
             replace_existing=True,
         )
-    else:
+    elif not cfg.run_on_startup:
         logger.info("Initial claiming run disabled by RUN_ON_STARTUP=false.")
+    else:
+        logger.info("Initial claiming run paused until local setup is complete.")
 
-    scheduler.start()
+    scheduler.start(paused=setup_pending)
     dashboard_server = None
     if cfg.gui_enabled:
         from src.gui.server import start_dashboard
@@ -572,16 +585,25 @@ async def main() -> None:
             _configure_scheduled_jobs(scheduler)
             return result
 
+        async def dashboard_setup(values: dict) -> dict:
+            result = complete_setup(values)
+            _configure_scheduled_jobs(scheduler)
+            if scheduler.state == STATE_PAUSED:
+                scheduler.resume()
+            return result
+
         async def dashboard_run(stores: list[str] | None) -> bool:
             global _dashboard_run_task
+            if cfg.gui_setup_required and not get_setup_state()["complete"]:
+                raise SettingsError("Complete local setup before running", "error.setupRequired")
             if _claim_run_lock.locked() or (_dashboard_run_task and not _dashboard_run_task.done()):
                 return False
             if stores is not None:
                 if any(not isinstance(store, str) for store in stores):
-                    raise ValueError("Seleção de lojas inválida")
+                    raise ValueError("Invalid store selection")
                 resolved = _resolve_stores(stores)
                 if not resolved or len(resolved) != len(set(stores)):
-                    raise ValueError("Seleção de lojas inválida")
+                    raise ValueError("Invalid store selection")
                 stores = resolved
             _dashboard_run_task = asyncio.create_task(run_claimers_scheduled(stores))
             return True
@@ -592,6 +614,7 @@ async def main() -> None:
             status_callback=dashboard_status,
             config_callback=dashboard_config,
             save_callback=dashboard_save,
+            setup_callback=dashboard_setup,
             run_callback=dashboard_run,
         )
     interval_text = (
