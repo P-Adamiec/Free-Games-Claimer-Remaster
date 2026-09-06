@@ -14,14 +14,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env files (project root first, then data/config.env as fallback)
-# Docker passes env vars directly, so override=False means real env vars win.
+# Load .env files (project root first, then data/config.env as fallback).
+# The GUI writes only explicit user choices to data/gui.env; those choices win
+# so they survive container recreation without exposing the host's .env file.
 _root = Path(__file__).resolve().parent.parent.parent
 _env_root = _root / ".env"
 _env_data = _root / "data" / "config.env"
+_env_gui = _root / "data" / "gui.env"
 
 load_dotenv(_env_root, override=False)
 load_dotenv(_env_data, override=False)
+load_dotenv(_env_gui, override=True)
 
 
 def _bool(key: str, default: bool = False) -> bool:
@@ -172,6 +175,13 @@ class Config:
     scheduler_timezone: str = os.getenv("SCHEDULER_TIMEZONE", "UTC").strip() or "UTC"
     scheduler_fixed_times: str = os.getenv("SCHEDULER_FIXED_TIMES", "")
     run_on_startup: bool = _bool("RUN_ON_STARTUP", default=True)
+
+    # --- Local web dashboard ---
+    gui_enabled: bool = _bool("GUI_ENABLED", default=True)
+    gui_port: int = _int("GUI_PORT", 8080)
+    # The Windows installer enables this until the local onboarding wizard is complete.
+    # Source/Docker users keep the established startup behaviour by default.
+    gui_setup_required: bool = _bool("GUI_SETUP_REQUIRED", default=False)
 
     # --- DB Reset ---
     reset_db_games: bool = _bool("RESET_DB_GAMES", default=False)

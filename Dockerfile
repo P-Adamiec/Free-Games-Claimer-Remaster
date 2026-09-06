@@ -112,6 +112,7 @@ ENV NOW=${NOW}
 ENV VNC_PORT=5900
 ENV NOVNC_PORT=7080
 EXPOSE 7080
+EXPOSE 8080
 
 # ── Display settings (virtual screen resolution for the browser) ──
 ENV WIDTH=1280

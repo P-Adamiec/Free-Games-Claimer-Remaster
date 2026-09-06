@@ -1,0 +1,101 @@
+{
+  "app": {"title": "Free Games Claimer", "local": "LOCAL"},
+  "common": {"close": "Close", "cancel": "Cancel", "save": "Save", "continue": "Continue", "back": "Back", "never": "Never", "configured": "configured", "optional": "optional"},
+  "nav": {"browser": "Browser", "settings": "Settings", "language": "Language"},
+  "dashboard": {
+    "automation": "Automation", "automationCopy": "Run enabled stores or follow the next scheduled cycle.",
+    "nextRun": "Next run", "lastRun": "Last run", "activeStores": "Active stores", "runNow": "Run now",
+    "storesTitle": "Active stores", "storesCopy": "Only selected stores participate in automatic runs.", "refresh": "Refresh",
+    "securityLabel": "Privacy and local execution", "lastExecution": "Last run", "sessionNever": "Never in this session",
+    "manualOnly": "Manual only", "ready": "Ready", "running": "Running"
+  },
+  "security": {
+    "title": "Your data stays on this computer",
+    "summary": "The dashboard, settings and browser sessions run locally. The project does not operate a server that receives your credentials.",
+    "scope": "External connections: official stores and notifications you configure.",
+    "honest": "Credentials are stored locally in the Docker volume. When a login is needed, the automated browser sends them directly to the official store, just as a normal browser would.",
+    "notEncrypted": "Saved secrets are not sent back to the dashboard after saving. Protect access to your Windows account and computer."
+  },
+  "store": {
+    "add": "Add store", "manage": "Manage stores", "availableOne": "{count} store available", "availableMany": "{count} stores available",
+    "allActive": "All available stores are active", "choose": "Choose stores", "chooseCopy": "Select the stores shown on the dashboard and included in scheduling.",
+    "save": "Save stores", "updated": "Stores updated.", "selectOne": "Select at least one store.", "runStarted": "Store run started.", "allStarted": "Store runs started."
+  },
+  "status": {
+    "waiting": "Waiting for a run", "queued": "Queued", "runningNow": "Running now", "failed": "Last run failed",
+    "completedNoChanges": "Completed with no changes", "resultGames": "Run details", "resultCoins": "Coin check-in details",
+    "claimed": "Claimed", "owned": "Already in library", "available": "Available", "failedItem": "Failed", "skipped": "Skipped",
+    "actionRequired": "Action required", "processed": "Checked", "run": "Run", "runningButton": "Running"
+  },
+  "coins": {
+    "collected": "Automatic collection completed", "collectedManual": "Manual collection completed", "already": "Already collected today",
+    "notCollected": "Not collected", "simulation": "Available in dry run", "gained": "+{count} coins", "offer": "Offer: {count} coins",
+    "balance": "Balance: {count} coins", "streak": "Streak: {count} day", "streakMany": "Streak: {count} days", "tomorrow": "Tomorrow: {count} coins"
+  },
+  "settings": {
+    "title": "Settings", "copy": "Accounts, scheduling and module behavior.", "storageTitle": "Local storage:",
+    "storageCopy": "your accounts and preferences remain on this computer.", "blankSecret": "Leave a secret field blank to keep its current value.",
+    "saved": "{count} setting(s) saved.",
+    "STORES": {"label": "Enabled stores"}, "SCHEDULER_HOURS": {"label": "Interval in hours"},
+    "SCHEDULER_FIXED_TIMES": {"label": "Fixed times"}, "SCHEDULER_TIMEZONE": {"label": "Timezone"},
+    "RUN_ON_STARTUP": {"label": "Run when the app starts"}, "SHOW": {"label": "Show browser in VNC"},
+    "VNC_LOGIN_TIMEOUT": {"label": "Manual login wait (seconds)"}, "NOTIFY_SUMMARY": {"label": "Send summary"},
+    "NOTIFY_ERRORS": {"label": "Notify errors"}, "NOTIFY_CLAIM_FAILS": {"label": "Notify claim failures"},
+    "NOTIFY_LOGIN_REQUEST": {"label": "Notify when login is required"}, "DISCORD_WEBHOOK": {"label": "Discord webhook"},
+    "NOTIFY": {"label": "Apprise URL"}, "EG_EMAIL": {"label": "Epic Games email"}, "EG_PASSWORD": {"label": "Epic Games password"},
+    "EG_OTPKEY": {"label": "Epic Games TOTP key"}, "EG_MOBILE": {"label": "Claim mobile games"},
+    "PG_EMAIL": {"label": "Prime Gaming email"}, "PG_PASSWORD": {"label": "Prime Gaming password"},
+    "PG_OTPKEY": {"label": "Prime Gaming TOTP key"}, "PG_REDEEM": {"label": "Redeem external codes"},
+    "GOG_EMAIL": {"label": "GOG email"}, "GOG_PASSWORD": {"label": "GOG password"}, "GOG_NEWSLETTER": {"label": "Keep newsletter subscription"},
+    "STEAM_USERNAME": {"label": "Steam username"}, "STEAM_PASSWORD": {"label": "Steam password"},
+    "UBI_EMAIL": {"label": "Ubisoft email"}, "UBI_PASSWORD": {"label": "Ubisoft password"}, "UBI_OTPKEY": {"label": "Ubisoft TOTP key"},
+    "UNITY_EMAIL": {"label": "Unity email"}, "UNITY_PASSWORD": {"label": "Unity password"}, "UNITY_ACCEPT_TOS": {"label": "Accept Unity terms automatically"},
+    "AE_EMAIL": {"label": "AliExpress email"}, "AE_PASSWORD": {"label": "AliExpress password"}, "AE_MIN_COINS": {"label": "Minimum coins"},
+    "AE_FLAG_RETRIES": {"label": "Retries after restriction"}, "AE_FLAG_WAIT": {"label": "Wait after restriction (seconds)"},
+    "FAB_ACCEPT_EULA": {"label": "Accept Fab licence automatically"}, "FANATICAL_ENABLE": {"label": "Enable Fanatical"},
+    "ALIENWARE_ENABLE": {"label": "Enable Alienware"}, "ITCHIO_ENABLE": {"label": "Enable itch.io"}, "INDIEGALA_ENABLE": {"label": "Enable IndieGala"},
+    "FANATICAL_EMAIL": {"label": "Fanatical email"}, "FANATICAL_PASSWORD": {"label": "Fanatical password"},
+    "ITCHIO_EMAIL": {"label": "itch.io email"}, "ITCHIO_PASSWORD": {"label": "itch.io password"},
+    "INDIEGALA_EMAIL": {"label": "IndieGala email"}, "INDIEGALA_PASSWORD": {"label": "IndieGala password"}
+  },
+  "section": {"stores": "Stores", "schedule": "Schedule", "browser": "Browser", "notifications": "Notifications", "epic": "Epic Games", "prime": "Prime Gaming", "gog": "GOG", "steam": "Steam", "ubisoft": "Ubisoft", "unity": "Unity", "aliexpress": "AliExpress", "fab": "Fab", "gamerpower": "GamerPower", "fanatical": "Fanatical", "itchio": "itch.io", "indiegala": "IndieGala"},
+  "sectionDescription": {
+    "stores": "Choose which modules appear and run automatically.", "schedule": "Choose when automatic collections run.", "browser": "Configure the visual session used for logins and collections.",
+    "notifications": "Control summaries, alerts and external integrations.", "epic": "Epic Games credentials and options.", "prime": "Prime Gaming credentials and code redemption.",
+    "gog": "GOG credentials and account preferences.", "steam": "Credentials used by the Steam module.", "ubisoft": "Ubisoft credentials and authentication.",
+    "unity": "Unity Asset Store credentials and terms.", "aliexpress": "Credentials and limits for daily coin collection.", "fab": "Fab asset redemption behavior.",
+    "gamerpower": "Enable additional giveaway sources used by GamerPower.", "fanatical": "Optional credentials for Fanatical giveaways.", "itchio": "Optional credentials for itch.io giveaways.", "indiegala": "Optional credentials for IndieGala giveaways."
+  },
+  "help": {"fixedTimes": "Example: 07:30,12:00,21:00", "timezone": "Example: America/Sao_Paulo"},
+  "credentials": {
+    "epic": {"purpose": "Used only to sign in to Epic Games and claim selected free games. It stays in your local Docker volume and is sent only to Epic's official login."},
+    "prime": {"purpose": "Used only to sign in to Amazon Prime Gaming. It stays in your local Docker volume and is sent only to Amazon's official login."},
+    "gog": {"purpose": "Used only to sign in to GOG and redeem eligible games or codes. It stays locally and is sent only to GOG's official login."},
+    "steam": {"purpose": "Used only to sign in to Steam for eligible free-to-keep games. It stays locally and is sent only to Steam's official login."},
+    "ubisoft": {"purpose": "Used only to sign in to Ubisoft. It stays locally and is sent only to Ubisoft's official login."},
+    "unity": {"purpose": "Used only to sign in to the Unity Asset Store. It stays locally and is sent only to Unity's official login."},
+    "aliexpress": {"purpose": "Used only to sign in to AliExpress for the daily coin check-in. It stays locally and is sent only to AliExpress's official login."},
+    "fanatical": {"purpose": "Used only for eligible Fanatical giveaways. It stays locally and is sent only to Fanatical's official login."},
+    "itchio": {"purpose": "Used only for eligible itch.io giveaways. It stays locally and is sent only to itch.io's official login."},
+    "indiegala": {"purpose": "Used only for eligible IndieGala giveaways. It stays locally and is sent only to IndieGala's official login."}
+  },
+  "onboarding": {
+    "eyebrow": "FIRST-TIME SETUP", "title": "Welcome to Free Games Claimer", "intro": "Configure your local automation in a few clear steps.",
+    "stepLanguage": "Language", "stepSecurity": "Security", "stepStores": "Stores", "stepAccounts": "Accounts", "stepSchedule": "Schedule", "stepReview": "Review",
+    "languageTitle": "Choose your language", "languageCopy": "We selected the language detected from Windows and your browser. You can change it at any time.",
+    "securityTitle": "Private by design", "securityCopy": "Free Games Claimer runs on this computer. Read exactly where account data is stored and when it is used.",
+    "storesTitle": "Choose your stores", "storesCopy": "Only selected stores appear on the dashboard and participate in automation.",
+    "accountsTitle": "Connect your accounts", "accountsCopy": "Credentials are optional. Leave fields blank and use the visual browser for manual login if you prefer.",
+    "scheduleTitle": "Choose automation", "scheduleCopy": "Set the interval and whether the first check runs when Free Games Claimer starts.",
+    "reviewTitle": "Ready to run locally", "reviewCopy": "Review your choices. You can change every setting later.",
+    "finish": "Finish and run", "selectedStores": "Selected stores", "credentialsConfigured": "Accounts filled now", "interval": "Run interval", "hours": "every {count} hours",
+    "manualSchedule": "manual or fixed times only", "localOnly": "Dashboard available only on this computer"
+  },
+  "error": {
+    "generic": "The operation could not be completed.", "invalidSettings": "Check the settings and try again.", "integer": "Enter a whole number.", "minimum": "The value is below the allowed minimum.",
+    "maximum": "The value is above the allowed maximum.", "selectStore": "Select at least one store.", "unknownStore": "One of the selected stores is unknown.",
+    "invalidCharacters": "This field contains invalid characters.", "tooLong": "This value is too long.", "timezone": "Enter a valid timezone.",
+    "fixedTimes": "Use comma-separated times in HH:MM format.", "fixedTimesRange": "One of the times is outside the valid range.",
+    "settingNotAllowed": "This setting is not allowed.", "invalidRequest": "Invalid request.", "setupRequired": "Complete the initial setup before running stores."
+  }
+}

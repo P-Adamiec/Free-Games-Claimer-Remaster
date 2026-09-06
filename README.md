@@ -95,6 +95,13 @@ DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 docker compose up -d
 ```
 
+When running directly from a source checkout after changing or updating the
+code, rebuild the local image first with `docker compose up -d --build app`.
+
+On Windows, you can instead double-click `Start-FGC-Control-Center.cmd`. The
+launcher starts Docker Desktop when necessary, starts the Compose service, and
+opens the local dashboard automatically.
+
 > 💡 **Want to test experimental development features?** Add `FGC_TAG=dev` to your `.env` file before running Docker to automatically download our pre-release build!
 
 ### 3. Login (first run)
@@ -102,6 +109,21 @@ docker compose up -d
 Open **http://localhost:7080** in your browser to access the VNC session.
 
 Each store will wait for you to login manually on the first run if you don't supply credentials. After that, session cookies are natively restored using persistent browser profiles!
+
+### Local dashboard
+
+Open **http://localhost:8080** to see each store's status, start all stores or
+just one store, open the browser session, and edit the supported settings.
+
+Settings saved in the dashboard are stored in `data/gui.env` inside the
+persistent Docker volume. Existing secrets are never sent back to the browser;
+leave a secret field blank to keep its current value. The Compose configuration
+binds this port to `127.0.0.1` by default, so the dashboard is available only on
+the computer running Docker. Do not expose port 8080 directly to the internet.
+
+Set `GUI_SETUP_REQUIRED=true` to show the six-step first-run assistant before
+automation starts. It covers language, local security, stores, optional
+credentials, scheduling, and a final review.
 
 ### 4. Monitor
 
@@ -144,6 +166,9 @@ Options are set via environment variables in `.env`:
 | `WIDTH` | `1280` | Browser/VNC screen width. |
 | `HEIGHT` | `720` | Browser/VNC screen height. |
 | `NOVNC_PORT` | `7080` | noVNC web access port. |
+| `GUI_ENABLED` | `true` | Enable the local control dashboard. |
+| `GUI_PORT` | `8080` | Host port for the local dashboard, bound to `127.0.0.1` by Docker Compose. |
+| `GUI_SETUP_REQUIRED` | `false` | Show the six-step setup assistant and pause automation until setup is complete. |
 | `VNC_IP` | `localhost`| Host for VNC notification links. Alerts include a one-click `http://<VNC_IP>:<NOVNC_PORT>/?autoconnect=true`. |
 | `VNC_URL` | | Full public noVNC address for notification links, e.g. `https://fgc.example.tld`. Use it behind a reverse proxy: it keeps your scheme and drops the port, replacing `VNC_IP` and `NOVNC_PORT` in the link (`NOVNC_PORT` still publishes the container port). |
 | `VNC_PASSWORD` | | Optional password for VNC access (empty = no password). |

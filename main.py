@@ -22,6 +22,7 @@ import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.base import STATE_PAUSED
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -40,6 +41,14 @@ from src.stores.steam import claim_steam
 from src.stores.unity import claim_unity
 from src.stores.ubisoft import claim_ubisoft
 from src.core.notifier import notify
+from src.gui.settings import (
+    SettingsError,
+    complete_setup,
+    get_settings,
+    get_setup_state,
+    save_settings,
+)
+from src.gui.state import dashboard_state, summarize_store_result
 from src.version import __version__, __author__, __repo__, __contributors__
 
 # ---------------------------------------------------------------------------
@@ -161,6 +170,7 @@ _CLAIM_JOB_OPTIONS = {
     "misfire_grace_time": 1800,
 }
 _claim_run_lock = asyncio.Lock()
+_dashboard_run_task: asyncio.Task | None = None
 
 
 def _parse_fixed_times(raw: str) -> list[tuple[int, int]]:
@@ -244,7 +254,7 @@ def _warn_about_settings() -> None:
                        "Valid: %s", ", ".join(unknown), ", ".join(ALL_CLAIMERS))
 
 
-def _get_active_claimers() -> list[tuple[str, object]]:
+def _get_active_claimers(requested_stores: list[str] | None = None) -> list[tuple[str, object]]:
     """Determine which claimers to run based on CLI args / STORES env var.
 
     Priority:
@@ -252,10 +262,11 @@ def _get_active_claimers() -> list[tuple[str, object]]:
       2. ``STORES`` env var   (e.g.  ``STORES=steam,prime``)
       3. ``DEFAULT_STORES``   (default)
     """
-    # Collect positional args (skip flags like --once)
+    # An explicit dashboard selection has priority over CLI and environment.
     cli_stores = [a for a in sys.argv[1:] if not a.startswith("-")]
-
-    if cli_stores:
+    if requested_stores is not None:
+        selected = _resolve_stores(requested_stores)
+    elif cli_stores:
         selected = _resolve_stores(cli_stores)
     elif cfg.stores:
         selected = _resolve_stores([s for s in cfg.stores.split(",") if s.strip()])
@@ -296,15 +307,17 @@ def _print_banner() -> None:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-async def run_claimers() -> None:
+async def run_claimers(requested_stores: list[str] | None = None) -> None:
     """Run selected claimers sequentially (they each open their own browser)."""
-    claimers = _get_active_claimers()
+    claimers = _get_active_claimers(requested_stores)
 
     if not claimers:
         logger.warning("No valid stores selected. Nothing to do.")
         return
 
     store_names = [name for name, _ in claimers]
+    store_keys = [_store_key(name) for name in store_names]
+    dashboard_state.begin_run(store_keys)
     logger.info("🎮 Starting claiming run… %s", ", ".join(store_names))
 
     # Long-running containers never restart, so this is the only place they'd hear about a release.
@@ -313,6 +326,8 @@ async def run_claimers() -> None:
     aggregated_results = []
 
     for name, func in claimers:
+        store_key = _store_key(name)
+        dashboard_state.begin_store(store_key)
         try:
             logger.debug("▶ Running %s claimer…", name)
             res = await func()
@@ -320,8 +335,11 @@ async def run_claimers() -> None:
                 logger.debug("%s returned %d game entr(ies): %s", name, len(res.get("games") or []), res.get("games"))
             if isinstance(res, dict) and res.get("games"):
                 aggregated_results.append(res)
+            message, details = summarize_store_result(store_key, res)
+            dashboard_state.finish_store(store_key, message, details=details)
         except Exception:
             logger.exception("✗ %s crashed", name)
+            dashboard_state.finish_store(store_key, "Last run failed", failed=True)
             if cfg.store_notify_enabled(_store_key(name)):
                 await notify(f"{name} claimer crashed with an unhandled exception. Check logs.")
 
@@ -399,17 +417,60 @@ async def run_claimers() -> None:
                 final_msg = "🛑 **DRY RUN SUMMARY: games remaining to be claimed**\n\n" + final_msg
             await notify(final_msg)
 
+    dashboard_state.finish_run()
     logger.info("✔ Claiming run complete.")
 
 
-async def run_claimers_scheduled() -> None:
+async def run_claimers_scheduled(requested_stores: list[str] | None = None) -> None:
     """Run claimers from scheduler jobs without overlapping executions."""
     if _claim_run_lock.locked():
         logger.warning("A claiming run is already in progress; skipping this scheduled trigger.")
         return
 
     async with _claim_run_lock:
-        await run_claimers()
+        try:
+            await run_claimers(requested_stores)
+        finally:
+            # Keep the dashboard usable even if an unexpected orchestration
+            # error escapes after an individual store has finished.
+            dashboard_state.finish_run()
+
+
+def _configure_scheduled_jobs(scheduler: AsyncIOScheduler) -> list[tuple[int, int]]:
+    """Replace recurring jobs with the dashboard/current config values."""
+    for job in scheduler.get_jobs():
+        if job.id == "claim_all" or job.id.startswith("claim_fixed_"):
+            scheduler.remove_job(job.id)
+
+    if cfg.scheduler_hours > 0:
+        scheduler.add_job(
+            run_claimers_scheduled,
+            trigger=IntervalTrigger(hours=cfg.scheduler_hours),
+            id="claim_all",
+            name="Claim free games",
+            replace_existing=True,
+        )
+
+    fixed_times = _parse_fixed_times(cfg.scheduler_fixed_times)
+    fixed_timezone = _scheduler_timezone() if fixed_times else None
+    for hour, minute in fixed_times:
+        scheduler.add_job(
+            run_claimers_scheduled,
+            trigger=CronTrigger(hour=hour, minute=minute, timezone=fixed_timezone),
+            id=f"claim_fixed_{hour:02d}_{minute:02d}",
+            name=f"Claim free games at {hour:02d}:{minute:02d}",
+            replace_existing=True,
+        )
+    return fixed_times
+
+
+def _next_scheduled_run(scheduler: AsyncIOScheduler) -> str | None:
+    runs = [
+        job.next_run_time
+        for job in scheduler.get_jobs()
+        if job.id != "claim_all_startup" and job.next_run_time is not None
+    ]
+    return min(runs).isoformat() if runs else None
 
 
 async def main() -> None:
@@ -472,47 +533,90 @@ async def main() -> None:
         return
 
     # Otherwise start the scheduler
-    fixed_times = _parse_fixed_times(cfg.scheduler_fixed_times)
-    fixed_timezone = _scheduler_timezone() if fixed_times else None
-
     scheduler = AsyncIOScheduler(job_defaults=_CLAIM_JOB_OPTIONS)
-    if cfg.scheduler_hours > 0:
-        scheduler.add_job(
-            run_claimers_scheduled,
-            # Interval, not cron: a cron step ("*/24") is invalid for 24h and longer.
-            trigger=IntervalTrigger(hours=cfg.scheduler_hours),
-            id="claim_all",
-            name="Claim free games",
-            replace_existing=True,
-        )
-    else:
+    fixed_times = _configure_scheduled_jobs(scheduler)
+    if cfg.scheduler_hours <= 0:
         logger.info("Interval scheduler disabled because SCHEDULER_HOURS=%s.", cfg.scheduler_hours)
-
-    for hour, minute in fixed_times:
-        scheduler.add_job(
-            run_claimers_scheduled,
-            trigger=CronTrigger(hour=hour, minute=minute, timezone=fixed_timezone),
-            id=f"claim_fixed_{hour:02d}_{minute:02d}",
-            name=f"Claim free games at {hour:02d}:{minute:02d}",
-            replace_existing=True,
-        )
 
     # Delay slightly to ensure TurboVNC/X11 is fully initialized BEFORE starting Chrome
     logger.info("Waiting for virtual display to initialize...")
     await asyncio.sleep(3)
 
-    # Also run immediately on startup
-    if cfg.run_on_startup:
+    setup_pending = cfg.gui_setup_required and not get_setup_state()["complete"]
+
+    # The packaged Windows experience opens the local setup wizard before any
+    # account automation. Existing source/Docker users are unaffected unless
+    # they explicitly enable GUI_SETUP_REQUIRED.
+    if cfg.run_on_startup and not setup_pending:
         scheduler.add_job(
             run_claimers_scheduled,
             id="claim_all_startup",
             name="Initial claiming run",
             replace_existing=True,
         )
-    else:
+    elif not cfg.run_on_startup:
         logger.info("Initial claiming run disabled by RUN_ON_STARTUP=false.")
+    else:
+        logger.info("Initial claiming run paused until local setup is complete.")
 
-    scheduler.start()
+    scheduler.start(paused=setup_pending)
+    dashboard_server = None
+    if cfg.gui_enabled:
+        from src.gui.server import start_dashboard
+
+        async def dashboard_status() -> dict:
+            enabled = [_store_key(name) for name, _ in _get_active_claimers()]
+            schedule = {
+                "nextRun": _next_scheduled_run(scheduler),
+                "timezone": cfg.scheduler_timezone,
+                "fixedTimes": cfg.scheduler_fixed_times,
+                "intervalHours": cfg.scheduler_hours,
+            }
+            return dashboard_state.snapshot(enabled, schedule)
+
+        async def dashboard_config() -> dict:
+            return get_settings(DEFAULT_STORES)
+
+        async def dashboard_save(values: dict) -> dict:
+            try:
+                result = save_settings(values)
+            except SettingsError:
+                raise
+            _configure_scheduled_jobs(scheduler)
+            return result
+
+        async def dashboard_setup(values: dict) -> dict:
+            result = complete_setup(values)
+            _configure_scheduled_jobs(scheduler)
+            if scheduler.state == STATE_PAUSED:
+                scheduler.resume()
+            return result
+
+        async def dashboard_run(stores: list[str] | None) -> bool:
+            global _dashboard_run_task
+            if cfg.gui_setup_required and not get_setup_state()["complete"]:
+                raise SettingsError("Complete local setup before running", "error.setupRequired")
+            if _claim_run_lock.locked() or (_dashboard_run_task and not _dashboard_run_task.done()):
+                return False
+            if stores is not None:
+                if any(not isinstance(store, str) for store in stores):
+                    raise ValueError("Invalid store selection")
+                resolved = _resolve_stores(stores)
+                if not resolved or len(resolved) != len(set(stores)):
+                    raise ValueError("Invalid store selection")
+                stores = resolved
+            _dashboard_run_task = asyncio.create_task(run_claimers_scheduled(stores))
+            return True
+
+        dashboard_server = start_dashboard(
+            loop=asyncio.get_running_loop(),
+            port=cfg.gui_port,
+            status_callback=dashboard_status,
+            config_callback=dashboard_config,
+            save_callback=dashboard_save,
+            setup_callback=dashboard_setup,
+            run_callback=dashboard_run,
+        )
     interval_text = (
         f"runs every {cfg.scheduler_hours} hours"
         if cfg.scheduler_hours > 0
@@ -534,6 +638,8 @@ async def main() -> None:
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down…")
         scheduler.shutdown(wait=False)
+        if dashboard_server is not None:
+            dashboard_server.shutdown()
 
 
 if __name__ == "__main__":
