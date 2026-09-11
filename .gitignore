@@ -23,6 +23,11 @@ Thumbs.db
 # Debug tools
 debug_*
 
+# Local AliExpress captures and runtime artifacts
+ae_coin_api.json
+fgc-data/
+screenshots/
+
 # AI assistants (local only, not committed)
 .claude/
 CLAUDE.md
