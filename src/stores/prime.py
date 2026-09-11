@@ -10,7 +10,7 @@ import nodriver as uc
 import pyotp
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, open_first_tab, now_str, filenamify
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, open_first_tab, now_str, filenamify
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 
@@ -47,6 +47,29 @@ def _save_to_json(title: str, *, code: str = "", store: str = "", url: str = "",
         JSON_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         logger.debug("Failed to write to %s", JSON_FILE, exc_info=True)
+
+
+# Wording Amazon has used for the code screen. Kept as a fallback: the DOM check below
+# is the one that works whatever language the account is in.
+_CODE_MARKERS = (
+    "enter security code",
+    "enter your code",
+    "approval required",
+    "approve the notification",
+    "two-step verification",
+    "one time password",
+)
+
+
+def is_code_screen(state: dict) -> bool:
+    """True when Amazon is asking for a verification code (issue #46)."""
+    state = state or {}
+    if state.get("otpField") or state.get("mfaForm"):
+        return True
+    body = (state.get("body") or "").lower()
+    if "security code" in body and "verify" in body:
+        return True
+    return any(marker in body for marker in _CODE_MARKERS)
 
 
 class PrimeGamingClaimer(BaseClaimer):
@@ -298,6 +321,9 @@ class PrimeGamingClaimer(BaseClaimer):
                             
                         # Workaround: sometimes Amazon redirects to home page but drops
                         # the auth session, requiring a second 'Sign in' click manually.
+                        if await self._code_screen_present():
+                            return False        # the user is typing a code, leave the page alone
+
                         url = await self.page.evaluate("window.location.href")
                         if isinstance(url, str) and ("claims/home" in url or "gaming.amazon" in url):
                             if await _has_sign_in_button():
@@ -310,6 +336,10 @@ class PrimeGamingClaimer(BaseClaimer):
                     if not logged_in:
                         logger.warning("VNC login timed out – skipping.")
                         return
+
+            # Taking the page away mid-code is what made manual 2FA impossible (issue #46).
+            if await self._code_screen_present():
+                await self._handle_security_code_challenge()
 
             # Navigate back to claims page and re-check
             await self.page.get(URL_CLAIM)
@@ -412,21 +442,27 @@ class PrimeGamingClaimer(BaseClaimer):
             pass
         await self.sleep(4)
 
-        # Handle MFA (TOTP authenticator app)
-        if cfg.pg_otpkey:
+        # Handle MFA (TOTP authenticator app). A refused code gets one more go with a fresh one.
+        if cfg.pg_otp_key:
             await self.sleep(3)
-            try:
-                otp_input = await self.page.find("input[name='otpCode']", timeout=5)
-                if otp_input:
-                    otp_code = pyotp.TOTP(cfg.pg_otpkey).now()
+            for attempt in range(OTP_KEY_ATTEMPTS):
+                try:
+                    otp_input = await self.page.find("input[name='otpCode']", timeout=5)
+                    if not otp_input:
+                        break
+                    if attempt:
+                        logger.warning("Amazon did not accept the code, trying once more with a fresh one.")
+                    self._last_totp = await self._fresh_totp(cfg.pg_otp_key, self._last_totp)
                     logger.debug("Entering MFA code")
-                    await otp_input.send_keys(otp_code)
+                    await otp_input.send_keys(self._last_totp)
+                    # Amazon stops asking on this profile once this is ticked.
+                    await self._remember_this_browser()
                     submit = await self.page.find('input[type="submit"]', timeout=5)
                     if submit:
                         await submit.click()
                         await self.sleep(4)
-            except Exception:
-                pass  # No MFA prompt
+                except Exception:
+                    break  # No MFA prompt
 
         # Handle Amazon security code verification (shopping app push / SMS code).
         # Amazon may ask the user to enter a code sent to their Amazon shopping app
@@ -437,6 +473,25 @@ class PrimeGamingClaimer(BaseClaimer):
     # Amazon security code (2FA via shopping app / SMS)
     # ------------------------------------------------------------------
 
+    async def _code_screen_state(self) -> dict:
+        """What the page says about a verification code: the DOM first, the wording second."""
+        try:
+            raw = await self.page.evaluate("""
+                JSON.stringify({
+                    otpField: !!document.querySelector('input[name="otpCode"], #auth-mfa-otpcode'),
+                    mfaForm: !!document.querySelector('form[action*="mfa"], form[action*="/ap/cvf"]'),
+                    body: (document.body?.innerText || '').slice(0, 4000)
+                })
+            """)
+            return json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as exc:
+            logger.debug("Could not read the page while looking for a code screen: %s", exc)
+            return {}
+
+    async def _code_screen_present(self) -> bool:
+        """True while Amazon's verification code screen is on screen."""
+        return is_code_screen(await self._code_screen_state())
+
     async def _handle_security_code_challenge(self) -> None:
         """Detect and handle Amazon's security code verification page.
 
@@ -445,24 +500,14 @@ class PrimeGamingClaimer(BaseClaimer):
         text input and a "Verify" button. Since we can't read the code
         programmatically, we notify the user and wait for manual VNC entry.
         """
-        # Give page a bit more time to render any popups/challenges
-        await self.sleep(2)
-        
-        # Check if we landed on a security code page
-        is_security_page = await self.page.evaluate("""
-            (() => {
-                const body = (document.body?.innerText || '').toLowerCase();
-                // Detect both English and common variations, including SMS OTP
-                return body.includes('enter security code') ||
-                       body.includes('security code') && body.includes('verify') ||
-                       body.includes('enter your code') && body.includes('amazon') ||
-                       body.includes('approval required') ||
-                       body.includes('approve the notification') ||
-                       body.includes('two-step verification') ||
-                       body.includes('one time password') ||
-                       body.includes('text message with a one time password');
-            })()
-        """)
+        # Amazon can take a while to swap the password form for the code form, and one
+        # look right after submitting used to miss it entirely (issue #46).
+        is_security_page = False
+        for _ in range(10):
+            await self.sleep(2)
+            if await self._code_screen_present():
+                is_security_page = True
+                break
 
         if not is_security_page:
             return
@@ -474,17 +519,7 @@ class PrimeGamingClaimer(BaseClaimer):
         # Wait for the user to enter the code and the page to move on.
         # Uses the same timeout as VNC manual login (VNC_LOGIN_TIMEOUT).
         async def _security_code_done() -> bool:
-            body = await self.page.evaluate(
-                "(document.body?.innerText || '').toLowerCase()"
-            )
-            # If the page no longer shows the security code prompt, we're done
-            return not (
-                'enter security code' in body or
-                'approval required' in body or
-                ('security code' in body and 'verify' in body) or
-                'two-step verification' in body or
-                'one time password' in body
-            )
+            return not await self._code_screen_present()
 
         msg = self._vnc_notice(
             "Prime Gaming / Amazon: security code needed",
@@ -676,7 +711,7 @@ class PrimeGamingClaimer(BaseClaimer):
         # --- Statistics ---
         force_check_str = "true" if cfg.pg_force_check_collected else "false"
         stats_raw = await self.page.evaluate(
-            f"""
+            rf"""
             JSON.stringify((() => {{
                 const forceCheck = {force_check_str};
                 const container = document.querySelector('div[data-a-target="offer-list-FGWP_FULL"]');
@@ -1030,7 +1065,7 @@ class PrimeGamingClaimer(BaseClaimer):
             # If still unknown, try text-based detection as fallback
             if store == 'unknown':
                 store_raw = await self.page.evaluate(
-                    """
+                    r"""
                     (() => {
                         const bodyText = (document.body.innerText || '').toLowerCase();
                         const descEl = document.querySelector('[data-a-target="DescriptionItemDetails"]');

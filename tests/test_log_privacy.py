@@ -4,6 +4,7 @@ The README used to ask you to delete your e-mail from the log before sending it
 to a bug report. That only protects the people who remember to do it.
 """
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -68,3 +69,36 @@ class TestEveryLogSiteUsesIt:
                     continue
                 statement = " ".join(lines[i:i + 3])
                 assert "mask_account" in statement, line
+
+
+class TestNoCodeReachesTheLog:
+    """A log file goes into bug reports, so not even part of a code belongs in it."""
+
+    STORES = sorted((ROOT / "src" / "stores").glob("*.py")) + [ROOT / "src" / "core" / "claimer.py"]
+
+    def _logged_arguments(self, source):
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in ("debug", "info", "warning", "error", "exception"):
+                continue
+            for arg in node.args[1:]:
+                yield arg
+
+    @pytest.mark.parametrize("path", STORES, ids=lambda p: p.name)
+    def test_no_slice_of_a_code_is_logged(self, path):
+        # GOG used to log code_to_use[:3] at info level, which is three characters too many.
+        for arg in self._logged_arguments(path.read_text(encoding="utf-8")):
+            for node in ast.walk(arg):
+                if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+                    assert "code" not in node.value.id.lower(), f"{path.name}: {ast.unparse(node)}"
+
+    @pytest.mark.parametrize("path", STORES, ids=lambda p: p.name)
+    def test_no_whole_two_factor_code_is_logged(self, path):
+        # Game keys are logged on purpose, you need them to redeem by hand. Sign-in codes are not.
+        banned = ("raw_code", "code_to_use", "otp_code", "backup_code", "recovery_code", "totp")
+        for arg in self._logged_arguments(path.read_text(encoding="utf-8")):
+            for node in ast.walk(arg):
+                if isinstance(node, ast.Name):
+                    assert node.id.lower() not in banned, path.name

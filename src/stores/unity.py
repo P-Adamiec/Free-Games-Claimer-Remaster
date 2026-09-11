@@ -27,7 +27,6 @@ LOGIN_HOST = "login.unity.com"
 CHECKOUT_HOST = "pay.unity.com"
 
 # One-time billing setup is a human job, so it gets its own, longer window than a login.
-SETUP_TIMEOUT = 300
 
 # Unity rejects the whole checkout, coupon included, until these carry a value.
 REQUIRED_FIELDS = {
@@ -391,7 +390,14 @@ class UnityClaimer(BaseClaimer):
             "Unity: login needs you",
             "Open the browser and sign in to your Unity account so the weekly free asset can be claimed.",
         )
-        if await self._wait_for_vnc_login(self._is_logged_in, custom_msg=custom_msg):
+        async def _check() -> bool:
+            # _is_logged_in() navigates, and doing that every few seconds would wipe
+            # whatever you are typing into the sign-in form.
+            if url_has_allowed_host(await self._current_url(), LOGIN_HOST):
+                return False
+            return await self._is_logged_in()
+
+        if await self._wait_for_vnc_login(_check, custom_msg=custom_msg):
             self.log_signed_in(cfg.unity_email or "UnityUser")
             return True
 
@@ -572,13 +578,12 @@ class UnityClaimer(BaseClaimer):
             "Open the browser, fill those in, and answer 'Are you exempt from paying consumption "
             "tax?' with No unless you really have a tax number. Unity saves this on your account, "
             "so it is a one-time job.",
-            timeout=SETUP_TIMEOUT,
         )
 
         async def _ready() -> bool:
             return not checkout_blockers(await self._checkout_state())
 
-        if await self._wait_for_vnc_login(_ready, timeout=SETUP_TIMEOUT, custom_msg=msg):
+        if await self._wait_for_vnc_login(_ready, custom_msg=msg):
             logger.info("Checkout details completed, carrying on with the claim.")
             return True
         return False

@@ -15,7 +15,7 @@ import httpx
 import nodriver as uc
 import pyotp
 
-from src.core.claimer import BaseClaimer
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -344,7 +344,7 @@ class UbisoftClaimer(BaseClaimer):
             custom_msg = self._vnc_notice(
                 "Ubisoft: 2FA code needed",
                 "Enter the code Ubisoft sent to your email (or from your authenticator app) in the browser. "
-                "Set UBI_OTPKEY to let the bot fill authenticator codes by itself.",
+                "Set UBI_OTP_KEY to let the bot fill authenticator codes by itself.",
             )
         else:
             custom_msg = self._vnc_notice(
@@ -386,17 +386,18 @@ class UbisoftClaimer(BaseClaimer):
             return False
 
     async def _fill_totp(self) -> bool:
-        """Auto-enter the authenticator code from UBI_OTPKEY, then submit."""
-        if not cfg.ubi_otpkey:
+        """Auto-enter the authenticator code from UBI_OTP_KEY, then submit."""
+        if not cfg.ubi_otp_key:
             return False
         try:
             field = await self.page.find('#AuthCode, input[name*="code" i], input[type="tel"]', timeout=5)
             if not field:
                 return False
-            logger.debug("Entering the Ubisoft two-step code from UBI_OTPKEY.")
+            logger.debug("Entering the Ubisoft two-step code from UBI_OTP_KEY.")
             await field.clear_input()
             await self.sleep(0.4)
-            await field.send_keys(pyotp.TOTP(cfg.ubi_otpkey).now())
+            self._last_totp = await self._fresh_totp(cfg.ubi_otp_key, self._last_totp)
+            await field.send_keys(self._last_totp)
             await self.sleep(0.8)
             await self.page.evaluate(
                 "(() => { const b = document.querySelector('button.btn-primary'); if (b) b.click(); })()"
@@ -464,7 +465,7 @@ class UbisoftClaimer(BaseClaimer):
 
     async def _await_login_outcome(self, timeout: int = 45) -> str:
         """Watch the login page until the session lands, a code is asked for, or time runs out."""
-        otp_tried = False
+        otp_tried = 0
         waited = 0
         while waited < timeout:
             await self.sleep(3)
@@ -476,13 +477,13 @@ class UbisoftClaimer(BaseClaimer):
                 break
 
             if await self._mfa_prompt_present():
-                if cfg.ubi_otpkey and not otp_tried:
-                    otp_tried = True
+                if cfg.ubi_otp_key and otp_tried < OTP_KEY_ATTEMPTS:
+                    otp_tried += 1
                     await self._fill_totp()
                     continue
-                if not cfg.ubi_otpkey:
+                if not cfg.ubi_otp_key:
                     # Stay on the code screen so the user can finish it over VNC.
-                    logger.debug("Login outcome: mfa, a two-step code is due and UBI_OTPKEY is not set.")
+                    logger.debug("Login outcome: mfa, a two-step code is due and UBI_OTP_KEY is not set.")
                     return "mfa"
 
             if await self._human_challenge_present() and not await self._wait_out_challenge("Ubisoft"):

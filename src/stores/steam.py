@@ -27,7 +27,7 @@ URL_LOGIN = "https://store.steampowered.com/login/"
 class SteamClaimer(BaseClaimer):
     store_name = "steam"
 
-    async def run(self) -> None:
+    async def run(self, extra_games: list | None = None) -> None:
         """Main entry point: find free Steam games and claim them.
         
         Flow:
@@ -58,11 +58,13 @@ class SteamClaimer(BaseClaimer):
 
             if not sdb_games:
                 logger.info("No free games found on SteamDB. Done.")
-                return
 
-            # Step 3: Claim all SteamDB games
+            # Step 3: Claim SteamDB's games, then whatever GamerPower found for Steam.
             for game in sdb_games:
                 await self._claim_game(game)
+            for game in (extra_games or []):
+                logger.info("🎮 [GamerPower] '%s' → Steam", game.get("title", "Unknown"))
+                await self._claim_game({**game, "url": game["final_url"], "source": "gamerpower"})
 
         except Exception as exc:
             logger.exception("Fatal error")
@@ -372,23 +374,21 @@ class SteamClaimer(BaseClaimer):
             ''')
             
             if has_guard:
-                logger.warning("⚠ Steam Guard detected! Open %s to enter the code via VNC or approve on your phone. (Waiting up to 2 min)", cfg.vnc_url)
-                if cfg.notify_login_request:
-                    await self.notify(self._vnc_notice(
+                logger.warning("⚠ Steam Guard detected, waiting for you to finish it.")
+
+                async def _guard_done() -> bool:
+                    url = await self.page.evaluate("window.location.href")
+                    return (isinstance(url, str)
+                            and url_has_allowed_host(url, "store.steampowered.com")
+                            and "/login" not in url)
+
+                # The shared wait sends the notification and honours VNC_LOGIN_TIMEOUT.
+                if await self._wait_for_vnc_login(_guard_done, custom_msg=self._vnc_notice(
                         "Steam: Steam Guard code needed",
-                        "Enter the Steam Guard code in the browser, or approve the login on your Steam mobile app.",
-                        120,
-                    ))
-                
-                # Wait for user to complete Steam Guard
-                for guard_wait in range(120):
-                    guard_url = await self.page.evaluate("window.location.href")
-                    if url_has_allowed_host(guard_url, "store.steampowered.com") and "/login" not in guard_url:
-                        logger.info("Steam Guard passed successfully!")
-                        return
-                    await self.sleep(1)
-                
-                logger.warning("Steam Guard wait timed out")
+                        "Enter the Steam Guard code in the browser, or approve the login on your Steam mobile app.")):
+                    logger.info("Steam Guard passed successfully!")
+                else:
+                    logger.warning("Steam Guard wait timed out")
                 return
             
             await self.sleep(1)
@@ -853,8 +853,8 @@ class SteamClaimer(BaseClaimer):
         return part.split("/")[0] if "/" in part else part
 
 
-async def claim_steam() -> dict:
+async def claim_steam(extra_games: list | None = None) -> dict:
     """Convenience entry point."""
     claimer = SteamClaimer()
-    await claimer.run()
+    await claimer.run(extra_games)
     return {"store": "Steam", "user": claimer.user, "games": claimer.notify_games}

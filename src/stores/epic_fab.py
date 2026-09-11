@@ -12,7 +12,7 @@ import logging
 import nodriver as uc
 import pyotp
 
-from src.core.claimer import BaseClaimer
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -299,7 +299,7 @@ class FabClaimer(BaseClaimer):
             custom_msg = self._vnc_notice(
                 "Fab: 2FA code needed",
                 "Enter the code Epic sent to your email or phone (or from your authenticator app) in the browser. "
-                "Set EG_OTPKEY to let the bot fill authenticator codes by itself.",
+                "Set EG_OTP_KEY to let the bot fill authenticator codes by itself.",
             )
         else:
             custom_msg = self._vnc_notice(
@@ -410,9 +410,11 @@ class FabClaimer(BaseClaimer):
             (() => {
                 const btn = [...document.querySelectorAll('button, a[role=button]')]
                     .find(b => /^continue$/i.test((b.innerText || '').trim()));
-                if (!btn) return false;
-                btn.click();
-                return true;
+                if (btn) { btn.click(); return true; }
+                // The store shows the same screen as a list of accounts with no Continue button.
+                const tile = document.querySelector('[id^="account-"]');
+                if (tile) { tile.click(); return true; }
+                return false;
             })()
         """)
         if clicked:
@@ -423,7 +425,7 @@ class FabClaimer(BaseClaimer):
 
     async def _await_login_outcome(self, timeout: int = 60) -> str:
         """Watch until Fab recognises the session, a code is asked for, or time runs out."""
-        otp_tried = False
+        otp_tried = 0
         waited = 0
         while waited < timeout:
             await self.sleep(4)
@@ -438,13 +440,13 @@ class FabClaimer(BaseClaimer):
                 continue
 
             if await self._mfa_prompt_present():
-                if cfg.eg_otpkey and not otp_tried:
-                    otp_tried = True
+                if cfg.eg_otp_key and otp_tried < OTP_KEY_ATTEMPTS:
+                    otp_tried += 1
                     await self._fill_totp()
                     continue
-                if not cfg.eg_otpkey:
+                if not cfg.eg_otp_key:
                     # Stay on the code screen so the user can finish it over VNC.
-                    logger.debug("Login outcome: mfa, a code is due and EG_OTPKEY is not set.")
+                    logger.debug("Login outcome: mfa, a code is due and EG_OTP_KEY is not set.")
                     return "mfa"
 
         await self._confirm_account_prompt()
@@ -469,17 +471,18 @@ class FabClaimer(BaseClaimer):
             return False
 
     async def _fill_totp(self) -> bool:
-        """Auto-enter the authenticator code from EG_OTPKEY, then submit."""
-        if not cfg.eg_otpkey:
+        """Auto-enter the authenticator code from EG_OTP_KEY, then submit."""
+        if not cfg.eg_otp_key:
             return False
         try:
             field = await self.page.find('input[name="code-input-0"]', timeout=5)
             if not field:
                 return False
-            logger.debug("Entering the Epic two-step code from EG_OTPKEY.")
+            logger.debug("Entering the Epic two-step code from EG_OTP_KEY.")
             await field.clear_input()
             await self.sleep(0.4)
-            await field.send_keys(pyotp.TOTP(cfg.eg_otpkey).now())
+            self._last_totp = await self._fresh_totp(cfg.eg_otp_key, self._last_totp)
+            await field.send_keys(self._last_totp)
             await self.sleep(1)
             submit = await self.page.find('button[type="submit"]', timeout=5)
             if submit:

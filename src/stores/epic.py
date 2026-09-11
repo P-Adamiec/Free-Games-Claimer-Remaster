@@ -12,8 +12,9 @@ import nodriver as uc
 import pyotp
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, now_str
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, now_str
 from src.core.config import cfg
+from src.core.run_state import needs_you, waits_for_nobody
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
 from src.stores.epic_mobile import fetch_mobile_free_games
@@ -32,6 +33,15 @@ URL_LOGIN = (
 
 # Reads the product page's main action button. The order matters: an "In Library" chip in a
 # recommendation row must never win over this product's own Get button.
+# Epic keeps backup codes on the same URL as the authenticator, so the heading is the only tell.
+BACKUP_SCREEN_JS = """
+    (() => {
+        const boxes = document.querySelectorAll('input[name^="code-input-"]');
+        const text = (document.body ? document.body.innerText : '').toLowerCase();
+        return boxes.length > 6 || text.includes('enter backup code');
+    })()
+"""
+
 PAGE_STATE_JS = """
 JSON.stringify((() => {
     // NEW flow: "Add to library" button (checkout overlay)
@@ -79,7 +89,7 @@ class EpicGamesClaimer(BaseClaimer):
         # Mobile game URL -> "Android"/"iOS", so claims can be told apart (same title on every platform).
         self._platform_labels: dict[str, str] = {}
 
-    async def run(self) -> None:
+    async def run(self, extra_games: list | None = None) -> None:
         """Main entry point: detect free games and claim them."""
         logger.debug("Starting Epic Games claiming flow")
         try:
@@ -107,7 +117,7 @@ class EpicGamesClaimer(BaseClaimer):
 
             # Step 2: Find which games are currently free
             free_games = await self._detect_free_games()
-            if not free_games:
+            if not free_games and not extra_games:
                 logger.info("No free games found to claim.")
                 return
                 
@@ -129,9 +139,12 @@ class EpicGamesClaimer(BaseClaimer):
             if free_games:
                 logger.info("🎮 [bold magenta]Found %d free game(s) to claim:[/bold magenta]\n%s", len(free_games), "\n".join(links))
 
-            # --- Claim each game ---
+            # --- Claim each game, then whatever GamerPower found for Epic ---
             for game in free_games:
                 await self._claim_game(game["url"])
+            for game in (extra_games or []):
+                logger.info("🎮 [GamerPower] '%s' → Epic Games", game.get("title", "Unknown"))
+                await self._claim_game(game["final_url"])
 
         except Exception as exc:
             logger.exception("Fatal error")
@@ -273,6 +286,11 @@ class EpicGamesClaimer(BaseClaimer):
         challenge_blocked = False
         mfa_manual = False
         for attempt in range(3):
+            # A prompt nobody answered means nobody will answer the next two either.
+            if waits_for_nobody(self.store_name):
+                logger.warning("Epic is waiting for you, so the remaining attempts are skipped.")
+                needs_you(self.store_name)
+                return False
             logger.warning("Not signed in – attempting automated login (attempt %d/3)…", attempt + 1)
 
             if attempt > 0:
@@ -284,7 +302,8 @@ class EpicGamesClaimer(BaseClaimer):
 
             await self._do_stealth_login()
 
-            otp_tried = False
+            otp_tried = 0
+            backup_tried = False
             # Wait loop to detect auth completion or interstitial
             for wait_sec in range(120):
                 try:
@@ -296,16 +315,41 @@ class EpicGamesClaimer(BaseClaimer):
                 if url_has_allowed_host(curr_url, "store.epicgames.com"):
                     break
 
-                # 2FA code screen: auto-fill TOTP if EG_OTPKEY is set, else stop and let the user type it via VNC.
+                # 2FA code screen: fill in the TOTP if EG_OTP_KEY is set, otherwise hand it to the user.
                 if await self._mfa_prompt_present():
-                    if cfg.eg_otpkey and not otp_tried:
-                        otp_tried = True
-                        await self._fill_totp()
-                        await self.sleep(2)
-                    elif not cfg.eg_otpkey:
+                    if not cfg.eg_otp_key or otp_tried >= OTP_KEY_ATTEMPTS:
+                        # Seed gone or absent: one recovery code, then it is over to you.
+                        if not backup_tried and await self._fill_backup_code():
+                            backup_tried = True
+                            await self.sleep(3)
+                            continue
                         mfa_manual = True
                         break
-                    await self.sleep(1)
+                    if otp_tried:
+                        # Epic answers a stale request with "Incorrect response. Please refresh the page."
+                        logger.warning("Epic did not accept the code (%s), reloading and trying once more.",
+                                       await self._mfa_error_text() or "no message on screen")
+                        await self.page.reload()
+                        await self.sleep(4)
+                    otp_tried += 1
+                    await self._fill_totp()
+                    await self.sleep(3)
+                    continue
+
+                # Epic asks which account to continue with after any half-finished sign-in.
+                # Verified live: the screen is a list of accounts, there is no Continue button.
+                if "/id/login/switch-account" in curr_url.lower():
+                    logger.debug("Epic is asking which account to continue with, picking yours.")
+                    await self.page.evaluate(f"""
+                        (() => {{
+                            const want = {json.dumps((cfg.eg_email or "").lower())};
+                            const tiles = [...document.querySelectorAll('[id^="account-"]')];
+                            const tile = tiles.find(t => (t.textContent || '').toLowerCase().includes(want))
+                                || tiles[0];
+                            if (tile) tile.click();
+                        }})()
+                    """)
+                    await self.sleep(5)
                     continue
 
                 if "login/review" in curr_url:
@@ -348,6 +392,10 @@ class EpicGamesClaimer(BaseClaimer):
                     break
 
                 await self.sleep(1)
+
+            # The wait loop can also run out of time with the code screen still up (issue #46).
+            if not mfa_manual and await self._mfa_prompt_present():
+                mfa_manual = True
 
             # On a manual-code screen, don't navigate away, hand off to VNC below.
             if mfa_manual:
@@ -403,27 +451,94 @@ class EpicGamesClaimer(BaseClaimer):
         except Exception:
             return False
 
-    async def _fill_totp(self) -> bool:
-        """Auto-enter the authenticator (TOTP) code from EG_OTPKEY, then submit."""
-        if not cfg.eg_otpkey:
-            return False
+    async def _mfa_error_text(self) -> str:
+        """Whatever Epic printed above the code boxes, empty when it printed nothing."""
         try:
-            otp_input = await self.page.find('input[name="code-input-0"]', timeout=5)
-            if not otp_input:
+            said = await self.page.evaluate(r"""
+                (() => {
+                    const box = document.querySelector('[role="alert"], [class*="error"], [class*="Error"]');
+                    return box ? (box.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+                })()
+            """)
+            return str(said or "")
+        except Exception as exc:
+            logger.debug("Could not read Epic's 2FA message: %s", exc)
+            return ""
+
+    async def _fill_code(self, code: str) -> bool:
+        """Type a code into Epic's six boxes and submit. Verified live: they take all six at once."""
+        try:
+            first_box = await self.page.find('input[name="code-input-0"]', timeout=5)
+            if not first_box:
                 return False
-            otp_code = pyotp.TOTP(cfg.eg_otpkey).now()
-            logger.debug("Entering MFA (TOTP) code")
-            await otp_input.clear_input()
+            await first_box.clear_input()
             await self.sleep(0.5)
-            await otp_input.send_keys(otp_code)
+            await first_box.send_keys(code)
             await self.sleep(1)
+            # Epic ticks "Remember device" by default; this only helps when it did not.
+            await self._remember_this_browser()
             submit = await self.page.find('button[type="submit"]', timeout=5)
             if submit:
                 await submit.click()
                 await self.sleep(3)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.debug("Could not enter the 2FA code: %s", exc)
             return False
+
+    async def _fill_totp(self) -> bool:
+        """Auto-enter the authenticator (TOTP) code from EG_OTP_KEY, then submit."""
+        if not cfg.eg_otp_key:
+            return False
+        logger.debug("Entering MFA (TOTP) code")
+        self._last_totp = await self._fresh_totp(cfg.eg_otp_key, self._last_totp)
+        return await self._fill_code(self._last_totp)
+
+    async def _open_backup_code_screen(self) -> bool:
+        """Switch from the authenticator boxes to the backup-code ones.
+
+        Verified live: "Try another way" opens /id/login/mfa/options, where #option-backupCode
+        returns eight text boxes instead of the six numeric ones.
+        """
+        # The options page renders on its own schedule, so each step is waited for, not assumed.
+        for _ in range(6):
+            try:
+                if await self.page.evaluate(BACKUP_SCREEN_JS):
+                    return True
+                step = await self.page.evaluate("""
+                    (() => {
+                        const opt = document.querySelector('#option-backupCode');
+                        if (opt) { opt.click(); return 'option'; }
+                        const link = [...document.querySelectorAll('a, button, [role="button"]')]
+                            .find(e => /another way/i.test((e.textContent || '').trim()));
+                        if (link) { link.click(); return 'link'; }
+                        return '';
+                    })()
+                """)
+                logger.debug("Backup code screen step: %s", step or "nothing to click")
+            except Exception as exc:
+                logger.debug("Could not open Epic's backup code screen: %s", exc)
+                return False
+            await self.sleep(2)
+        return False
+
+    async def _fill_backup_code(self) -> bool:
+        """Spend one recovery code from EG_OTP_CODES, the way GOG does."""
+        if not cfg.eg_otp_codes:
+            return False
+        code = self._next_unused_code(cfg.eg_otp_codes, "used_epic_codes.txt")
+        if not code:
+            logger.warning("Every Epic recovery code has been used already.")
+            return False
+        # The authenticator boxes take digits only, a backup code is eight characters of text.
+        if not await self._open_backup_code_screen():
+            logger.warning("Epic's backup code screen did not open, leaving your codes alone.")
+            return False
+        logger.info("Trying one of your Epic recovery codes.")
+        if not await self._fill_code(code.replace("-", "").replace(" ", "")):
+            return False
+        self._mark_code_used(code, "used_epic_codes.txt", cfg.eg_otp_codes)
+        return True
 
     async def _navigate_organically_to_login(self) -> None:
         """Navigates to the login page mimicking a click from the store, preserving Referer headers."""
@@ -501,7 +616,7 @@ class EpicGamesClaimer(BaseClaimer):
             await self.sleep(3)
 
         # Authenticator (TOTP) auto-fill; email/SMS codes are handled in the loop.
-        if cfg.eg_otpkey:
+        if cfg.eg_otp_key:
             await self.sleep(3)
             await self._fill_totp()
 
@@ -798,8 +913,9 @@ class EpicGamesClaimer(BaseClaimer):
 
             if "requires base game" in btn_text:
                 logger.warning("'%s' requires base game.", title)
-                obj.status = "failed:requires-base-game"
-                notify_game["status"] = "requires base game"
+                # Same tag as Steam, so one setting silences both (issue #48).
+                obj.status = "failed:missing_base"
+                notify_game["status"] = "failed:missing_base"
                 await session.commit()
                 return
 
@@ -1458,8 +1574,8 @@ class EpicGamesClaimer(BaseClaimer):
         return False
 
 
-async def claim_epic() -> dict:
+async def claim_epic(extra_games: list | None = None) -> dict:
     """Convenience entry point."""
     claimer = EpicGamesClaimer()
-    await claimer.run()
+    await claimer.run(extra_games)
     return {"store": "Epic Games", "user": claimer.user, "games": claimer.notify_games}

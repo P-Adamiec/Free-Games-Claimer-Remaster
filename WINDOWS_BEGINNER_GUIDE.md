@@ -26,8 +26,8 @@ By default, Docker's WSL 2 engine can greedily consume a lot of your system's RA
 [wsl2]
 memory=3GB
 ```
-5. Save the file.
-6. Open your Windows **Command Prompt** (`cmd`) and type `wsl --shutdown` and press enter. When Docker turns back on, it will strictly obey the 3GB limit!
+6. Save the file.
+7. Open your Windows **Command Prompt** (`cmd`) and type `wsl --shutdown` and press enter. When Docker turns back on, it will strictly obey the 3GB limit!
 
 ---
 
@@ -49,7 +49,7 @@ There are two primary ways to set up the claimer. **Method A** is highly recomme
 4. Set up your `.env` configuration (e.g. `EG_EMAIL=twoj@mail.com`) within the environment variables block or `.env` editor in Dockhand matching the `.env.example` file.
 5. Click **Deploy / Update**. That's it! Dockhand handles the downloading and execution automatically in the background.
 
-51: ### Method B: The Classic Folder Method
+### Method B: The Classic Folder Method
 If for some reason you don't want to use a visual interface:
 1. Go to the main page of this GitHub repository. Click the green **"Code"** button and select **"Download ZIP"**.
 2. Extract the ZIP file somewhere safe (like `Documents/free-games-claimer`).
@@ -59,15 +59,31 @@ If for some reason you don't want to use a visual interface:
 
 ---
 
----
-
 ## Phase 5: The First-Time Login (Optional) 🔐
 If you provided your emails and passwords safely in the `.env` file, the bot will try to log in entirely by itself! However, **if you left them blank** or **if stores require a 2FA code (like Steam Guard mobile tokens or email verification)**, the system will pause and wait for your manual intervention.
 
 1. Open your internet browser and go to **`http://localhost:7080`**.
 2. You will see a live video feed of the bot operating a virtual Chrome browser inside the container.
 3. If it is stuck at a login screen waiting for a 2FA code, password, or CAPTCHA, simply interact with the window and log in normally using your mouse/keyboard. 
+   - It waits three minutes for you (`VNC_LOGIN_TIMEOUT` in `.env` if you want longer). If nobody answers, that one store is skipped for the rest of the run and tried again on the next one, so nothing sits waiting forever.
 4. Once you see the storefront's homepage, **you can simply close the `7080` tab**.
+
+---
+
+## Phase 6: The Four Commands You Will Actually Need 🧰
+
+Open a terminal in the folder that holds your `docker-compose.yml` (click the address bar, type `cmd`, hit Enter), or use the same buttons in Dockhand.
+
+| What you want | Command |
+|---|---|
+| See what the bot is doing | `docker logs -f fgc-remaster` (press `Ctrl + C` to stop watching, the bot keeps running) |
+| Update to the newest version | `docker compose pull` then `docker compose up -d` |
+| Stop it, keeping your logins | `docker compose down` |
+| Start completely fresh | `docker compose down -v` then `docker compose up -d` |
+
+**What the difference is:** your logins and the record of what was already claimed live in a Docker volume next to the container, not inside it. `down` leaves that volume alone, so starting again picks up where you left off and you do not sign in a second time. `down -v` deletes it, which means every store asks you to sign in again through VNC. Updating never touches it, the new version simply starts using what is already there.
+
+---
 
 From now on, because your container is configured with `restart: unless-stopped`, the Free Games Claimer operates autonomously utilizing its built-in memory of your session. It will silently wake up, check for free games every 12 hours behind the scenes, and go back to sleep. 
 

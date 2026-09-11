@@ -24,12 +24,19 @@ load_dotenv(_env_root, override=False)
 load_dotenv(_env_data, override=False)
 
 
-def _bool(key: str, default: bool = False) -> bool:
+def _bool(key: str, default: bool = False, legacy: str = "") -> bool:
     """Read an env var as a boolean (truthy: '1', 'true', 'yes')."""
     val = os.getenv(key, "").strip().lower()
+    if not val and legacy:
+        val = os.getenv(legacy, "").strip().lower()
     if not val:
         return default
     return val in ("1", "true", "yes")
+
+
+def _secret(key: str, legacy: str = "") -> str | None:
+    """Read a setting, falling back to the name it had before it was renamed."""
+    return os.getenv(key) or (os.getenv(legacy) if legacy else None)
 
 
 def _int(key: str, default: int = 0) -> int:
@@ -57,14 +64,26 @@ def _skip_stores(key: str) -> set:
 # ----- Settings guard: a setting nobody reads, or a value that cannot mean what it says (issue #40) -----
 
 # The same scan tests/test_docs_env.py uses, with the helper captured so the expected type is known too.
-_SETTING_RE = re.compile(r'(os\.getenv|_bool|_int|_skip_stores)\(\s*"([A-Z_0-9]+)"')
+_SETTING_RE = re.compile(r'(os\.getenv|_bool|_int|_skip_stores|_secret)\(\s*"([A-Z_0-9]+)"')
 _ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", re.M)
-_KIND_BY_HELPER = {"_bool": "bool", "_int": "int", "_skip_stores": "str", "os.getenv": "str"}
+_KIND_BY_HELPER = {"_bool": "bool", "_int": "int", "_skip_stores": "str", "os.getenv": "str",
+                   "_secret": "str"}
 _TRUTHY = ("1", "true", "yes")
 _FALSY = ("", "0", "false", "no")
 # Anything that must never reach a log someone pastes into a bug report.
-_SECRET_HINTS = ("PASSWORD", "SECRET", "TOKEN", "OTPKEY", "OTP_CODES", "PIN",
+_SECRET_HINTS = ("PASSWORD", "SECRET", "TOKEN", "OTPKEY", "OTP_KEY", "OTP_CODES", "PIN",
                  "COOKIE", "AUTH", "CREDENTIAL", "WEBHOOK", "EMAIL", "USERNAME")
+
+# Settings that changed name or went away, and only ones that really shipped: the old spelling
+# still works, with one line in the log. GOG and Itch.io never had an authenticator secret before.
+_DEPRECATED = {
+    "EG_OTPKEY": "EG_OTP_KEY",
+    "PG_OTPKEY": "PG_OTP_KEY",
+    "UBI_OTPKEY": "UBI_OTP_KEY",
+    "UNKNOWN_STORES_ENABLE": "GP_UNKNOWN_STORES",
+    "GOG_OTP_ENABLE": "",
+    "ITCHIO_OTP_ENABLE": "",
+}
 
 
 def env_setting_kinds() -> dict:
@@ -78,7 +97,7 @@ def env_setting_kinds() -> dict:
 
 def known_env_names() -> set:
     """Settings the bot reads, plus the Docker-only ones, which live in .env.example."""
-    names = set(env_setting_kinds())
+    names = set(env_setting_kinds()) | set(_DEPRECATED)
     try:
         example = (_root / ".env.example").read_text(encoding="utf-8")
     except OSError:
@@ -126,7 +145,12 @@ def settings_warnings() -> list:
     known = known_env_names()
     out = []
     for name, value in env_file_settings().items():
-        if name not in known:
+        if name in _DEPRECATED:
+            new_name = _DEPRECATED[name]
+            out.append(f"{name} has been renamed to {new_name}, please update your .env. "
+                       "The old name still works in this version." if new_name else
+                       f"{name} is no longer needed: the codes themselves switch this on.")
+        elif name not in known:
             out.append(f"{name} is not a setting this bot reads, so it does nothing.")
         elif kinds.get(name) == "bool" and value.lower() not in _TRUTHY + _FALSY:
             out.append(f"{name}={mask_value(name, value)} is not a yes/no value, so it reads as false.")
@@ -197,6 +221,9 @@ class Config:
     notify_updates: bool = _bool("NOTIFY_UPDATES", default=True)
     notify_login_request: bool = _bool("NOTIFY_LOGIN_REQUEST", default=True)
     notify_test: bool = _bool("NOTIFY_TEST", default=False)
+    # Outcomes that repeat every run because the user cannot do anything about them.
+    notify_missing_base: bool = _bool("NOTIFY_MISSING_BASE", default=True)
+    notify_download_only: bool = _bool("NOTIFY_DOWNLOAD_ONLY", default=True)
     # Stores whose notifications are silenced (they still run and claim).
     notify_skip_stores: set = _skip_stores("NOTIFY_SKIP_STORES")
 
@@ -207,8 +234,11 @@ class Config:
     # --- Epic Games ---
     eg_email: str | None = os.getenv("EG_EMAIL") or os.getenv("EMAIL")
     eg_password: str | None = os.getenv("EG_PASSWORD") or os.getenv("PASSWORD")
-    eg_otpkey: str | None = os.getenv("EG_OTPKEY")
+    eg_otp_key: str | None = _secret("EG_OTP_KEY", "EG_OTPKEY")
     eg_parentalpin: str | None = os.getenv("EG_PARENTALPIN")
+    # Recovery codes from Epic's authenticator setup, spent one at a time and
+    # remembered in data/used_epic_codes.txt. Filling this in is what switches it on.
+    eg_otp_codes: list[str] = [c.strip() for c in os.getenv("EG_OTP_CODES", "").split(",") if c.strip()]
     # Epic's weekly mobile giveaways (claimed on the same store pages as the PC games).
     eg_mobile: bool = _bool("EG_MOBILE", default=True)
     eg_mobile_platforms: str = os.getenv("EG_MOBILE_PLATFORMS", "android,ios")
@@ -222,17 +252,16 @@ class Config:
     # --- Prime Gaming ---
     pg_email: str | None = os.getenv("PG_EMAIL") or os.getenv("EMAIL")
     pg_password: str | None = os.getenv("PG_PASSWORD") or os.getenv("PASSWORD")
-    pg_otpkey: str | None = os.getenv("PG_OTPKEY")
+    pg_otp_key: str | None = _secret("PG_OTP_KEY", "PG_OTPKEY")
     pg_force_check_collected: bool = _bool("PG_FORCE_CHECK_COLLECTED")
     pg_redeem: bool = _bool("PG_REDEEM")
-    pg_claimdlc: bool = _bool("PG_CLAIMDLC")
 
     # --- GOG ---
     gog_email: str | None = os.getenv("GOG_EMAIL") or os.getenv("EMAIL")
     gog_password: str | None = os.getenv("GOG_PASSWORD") or os.getenv("PASSWORD")
     gog_newsletter: bool = _bool("GOG_NEWSLETTER")
     gog_force_redeem: bool = _bool("GOG_FORCE_REDEEM")
-    gog_otp_enable: bool = _bool("GOG_OTP_ENABLE")
+    gog_otp_key: str | None = _secret("GOG_OTP_KEY")
     gog_otp_codes: list[str] = [c.strip() for c in os.getenv("GOG_OTP_CODES", "").split(",") if c.strip()]
 
     # --- Steam ---
@@ -252,7 +281,7 @@ class Config:
     # --- Ubisoft ---
     ubi_email: str | None = os.getenv("UBI_EMAIL") or os.getenv("EMAIL")
     ubi_password: str | None = os.getenv("UBI_PASSWORD") or os.getenv("PASSWORD")
-    ubi_otpkey: str | None = os.getenv("UBI_OTPKEY")
+    ubi_otp_key: str | None = _secret("UBI_OTP_KEY", "UBI_OTPKEY")
 
     # --- GamerPower ---
     # Most giveaways are in-game DLC needing a per-game account, so they are skipped by default.
@@ -273,10 +302,9 @@ class Config:
     itchio_enable: bool = _bool("ITCHIO_ENABLE", default=False)
     itchio_email: str | None = os.getenv("ITCHIO_EMAIL") or os.getenv("EMAIL")
     itchio_password: str | None = os.getenv("ITCHIO_PASSWORD") or os.getenv("PASSWORD")
-    # Recovery codes are static, so the bot can spend them; a TOTP secret would only move
-    # your second factor onto this machine, so two-factor sign-in goes through VNC instead.
-    # Spent one at a time and remembered in data/used_itchio_codes.txt.
-    itchio_otp_enable: bool = _bool("ITCHIO_OTP_ENABLE")
+    # Spent one at a time and remembered in data/used_itchio_codes.txt. The README's
+    # two-factor section explains how this differs from an authenticator secret.
+    itchio_otp_key: str | None = _secret("ITCHIO_OTP_KEY")
     itchio_otp_codes: list[str] = [c.strip() for c in os.getenv("ITCHIO_OTP_CODES", "").split(",") if c.strip()]
 
     # --- IndieGala ---
@@ -296,7 +324,9 @@ class Config:
     ae_page_retries: int = _int("AE_PAGE_RETRIES", 4)
 
     # --- Unknown/Other Indirect Stores ---
-    unknown_stores_enable: bool = _bool("UNKNOWN_STORES_ENABLE", default=False)
+    # Opening a site the bot does not know is not supported yet, so this stays off either way.
+    gp_unknown_stores: bool = _bool("GP_UNKNOWN_STORES", default=False,
+                                    legacy="UNKNOWN_STORES_ENABLE")
 
     # --- Module selection ---
     # Comma-separated list of stores to run (e.g. "steam,prime").

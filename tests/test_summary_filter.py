@@ -25,9 +25,11 @@ GAMES = [
 
 
 class _Cfg:
-    def __init__(self, fails=False, owned=False):
+    def __init__(self, fails=False, owned=False, missing_base=True, download_only=True):
         self.notify_claim_fails = fails
         self.notify_already_claimed = owned
+        self.notify_missing_base = missing_base
+        self.notify_download_only = download_only
 
 
 @pytest.fixture(scope="module")
@@ -93,3 +95,50 @@ def test_entries_without_status_are_dropped(summary_filter):
         assert "No status" not in summary_filter(_Cfg(True, True))
     finally:
         GAMES = original
+
+
+class TestTheRepeatingOutcomesCanBeSilenced:
+    """Three outcomes come back every run and the user cannot act on any of them."""
+
+    def test_a_missing_base_game_goes_while_other_failures_stay(self, summary_filter):
+        # e-magon's case: NOTIFY_CLAIM_FAILS on, but the same DLC every single run.
+        assert "Missing base" in summary_filter(_Cfg(fails=True))
+
+        without = summary_filter(_Cfg(fails=True, missing_base=False))
+        assert "Missing base" not in without
+        assert "Broken" in without
+
+    def test_a_download_only_giveaway_can_be_silenced_from_the_first_run(self, summary_filter):
+        assert "Download once" in summary_filter(_Cfg())
+        assert "Download once" not in summary_filter(_Cfg(download_only=False))
+
+    def test_each_switch_minds_its_own_business(self, summary_filter):
+        titles = summary_filter(_Cfg(fails=True, owned=True, missing_base=False))
+        assert "Missing base" not in titles
+        for other in ("Download once", "Download again", "Broken", "Owned"):
+            assert other in titles
+
+
+class TestWhatNeededYou:
+    """A store that waited for you and gave up has to say so somewhere you will see it."""
+
+    SOURCE = MAIN_PY.read_text(encoding="utf-8")
+
+    def test_the_section_is_built_from_the_run_state(self):
+        assert "stuck = waiting_for_you()" in self.SOURCE
+
+    def test_it_is_silent_when_nothing_waited(self):
+        block = self.SOURCE.split("stuck = waiting_for_you()", 1)[1][:400]
+        assert "if stuck:" in block
+
+    def test_it_says_the_store_and_how_much_it_missed(self):
+        block = self.SOURCE.split("stuck = waiting_for_you()", 1)[1][:400]
+        assert "waiting for you" in block and "{count} skipped" in block
+
+    def test_it_is_not_filtered_like_a_game(self):
+        # "skipped" in a game status is dropped by default, so this line is its own section.
+        filter_at = self.SOURCE.index("relevant_games = [")
+        assert self.SOURCE.index("stuck = waiting_for_you()") > filter_at
+
+    def test_every_run_starts_without_yesterdays_note(self):
+        assert "reset_run_state()" in self.SOURCE

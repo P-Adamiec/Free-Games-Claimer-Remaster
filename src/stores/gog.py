@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 
+import pyotp
 import nodriver as uc
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, now_str
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, now_str
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -21,8 +22,13 @@ URL_CLAIM = "https://www.gog.com/en"
 class GOGClaimer(BaseClaimer):
     store_name = "gog"
 
-    async def run(self) -> None:
+    async def run(self, extra_games: list | None = None) -> None:
         """Main entry point for the GOG claiming flow."""
+        # GOG's claimer takes no URL, it claims whatever giveaway gog.com is running, so a
+        # GamerPower find here only means there is a reason to look.
+        if extra_games:
+            logger.debug("GamerPower also points at GOG (%d entr(ies)), the normal run covers them.",
+                         len(extra_games))
         logger.debug("Starting GOG claiming flow")
         try:
             # Step 1: Open a Chrome browser with stealth patches
@@ -226,6 +232,7 @@ class GOGClaimer(BaseClaimer):
 
         # After successful login, GOG redirects to gog.com/on_login_success then to /en/
         # Wait for redirect back to gog.com and check login status
+        totp_tried = 0
         for idx in range(15):
             current_url = await self.page.evaluate("window.location.href")
             logger.debug("GOG Wait Loop %s: current_url is %s", idx, current_url)
@@ -255,60 +262,12 @@ class GOGClaimer(BaseClaimer):
                 """)
             
             if is_2fa:
-                if cfg.gog_otp_enable and cfg.gog_otp_codes:
-                    used_codes_file = cfg._data_dir / "used_gog_codes.txt"
-                    used_codes = []
-                    if used_codes_file.exists():
-                        used_codes = used_codes_file.read_text("utf-8").splitlines()
-                    
-                    # Find first unused code
-                    raw_code = None
-                    for c in cfg.gog_otp_codes:
-                        if c not in used_codes:
-                            raw_code = c
-                            break
-                            
-                    if raw_code:
-                        code_to_use = raw_code.replace("-", "").replace(" ", "")[:8]
-                        logger.info("GOG 2FA detected! GOG_OTP_ENABLE is true. Using backup code %s...", code_to_use[:3] + "*****")
-                        
-                        # Ensure we are on the backup code page
-                        if "backup" not in current_url:
-                            await self.page.get("https://login.gog.com/login/two_factor/backup")
-                            await self.sleep(2)
-                        
-                        # Fill the inputs
-                        await self.page.evaluate(f'''
-                            (() => {{
-                                const code = "{code_to_use}";
-                                const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"])'));
-                                if (inputs.length > 0) {{
-                                    inputs.forEach((inp, i) => {{
-                                        if (i < code.length) {{
-                                            let setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                                            if(setter) setter.call(inp, code[i]);
-                                            inp.dispatchEvent(new Event("input", {{bubbles: true}}));
-                                        }}
-                                    }});
-                                }}
-                            }})()
-                        ''')
-                        await self.sleep(1)
-                        
-                        # Click the continue/submit button
-                        await self.page.evaluate('''
-                            const btn = document.querySelector('button[type="submit"]') || Array.from(document.querySelectorAll('button')).find(b => b.textContent.toLowerCase().includes('contin') || b.textContent.toLowerCase().includes('konty'));
-                            if (btn) btn.click();
-                        ''')
-                        await self.sleep(5)
-                        
-                        # Record the code as used in the persistent data directory
-                        with used_codes_file.open("a", encoding="utf-8") as f:
-                            f.write(raw_code + "\n")
-                        logger.debug("Successfully consumed a backup code and appended it to %s", used_codes_file.name)
-                        continue # Jump to the next iteration of the loop to verify login again
-                    else:
-                        logger.warning("All provided GOG_OTP_CODES have been exhausted! Falling back to VNC...")
+                # Same order in every store: authenticator secret, then a recovery code, then you.
+                if totp_tried < OTP_KEY_ATTEMPTS and await self._fill_totp():
+                    totp_tried += 1
+                    continue
+                if await self._fill_backup_code(current_url):
+                    continue
 
                 logger.warning("GOG Two-Step Verification detected (Email/App 2FA)! Falling back to VNC...")
                 
@@ -321,11 +280,9 @@ class GOGClaimer(BaseClaimer):
                     
                 logged_in = await self._wait_for_vnc_login(
                     _vnc_check_gog_2fa,
-                    timeout=180,
                     custom_msg=self._vnc_notice(
                         "GOG: 2FA code needed",
                         "GOG needs a 2FA verification code. Open the browser and enter it.",
-                        180,
                     ),
                 )
                 if logged_in:
@@ -340,7 +297,7 @@ class GOGClaimer(BaseClaimer):
                 # check to work on the main site, we navigate back to main page.
                 await self.page.get(URL_CLAIM)
                 await self.sleep(3)
-                logged_in = await self._wait_for_vnc_login(_is_logged_in, timeout=120)
+                logged_in = await self._wait_for_vnc_login(_is_logged_in)
                 if logged_in:
                     self.log_signed_in()
                     return True
@@ -362,6 +319,59 @@ class GOGClaimer(BaseClaimer):
     # ------------------------------------------------------------------
 
     # Retry up to 2 times if claiming fails (with increasing wait between attempts)
+    async def _fill_2fa_code(self, code: str) -> None:
+        """Type one character per box into GOG's code fields, then submit."""
+        await self.page.evaluate(f'''
+            (() => {{
+                const code = {json.dumps(code)};
+                const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"])'));
+                inputs.forEach((inp, i) => {{
+                    if (i < code.length) {{
+                        let setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                        if (setter) setter.call(inp, code[i]);
+                        inp.dispatchEvent(new Event("input", {{bubbles: true}}));
+                    }}
+                }});
+            }})()
+        ''')
+        await self.sleep(1)
+        await self.page.evaluate("""
+            (() => {
+                const btn = document.querySelector('button[type="submit"]')
+                    || [...document.querySelectorAll('button')].find(b =>
+                        (b.textContent || '').toLowerCase().includes('contin')
+                        || (b.textContent || '').toLowerCase().includes('konty'));
+                if (btn) btn.click();
+            })()
+        """)
+        await self.sleep(5)
+
+    async def _fill_totp(self) -> bool:
+        """Auto-enter the authenticator (TOTP) code from GOG_OTP_KEY, then submit."""
+        if not cfg.gog_otp_key:
+            return False
+        logger.debug("Entering GOG two-step code from GOG_OTP_KEY")
+        self._last_totp = await self._fresh_totp(cfg.gog_otp_key, self._last_totp)
+        await self._fill_2fa_code(self._last_totp)
+        return True
+
+    async def _fill_backup_code(self, current_url: str) -> bool:
+        """Spend one recovery code from GOG_OTP_CODES, remembered in data/used_gog_codes.txt."""
+        if not cfg.gog_otp_codes:
+            return False
+        code = self._next_unused_code(cfg.gog_otp_codes, "used_gog_codes.txt")
+        if not code:
+            logger.warning("Every GOG recovery code has been used already.")
+            return False
+        logger.info("Trying one of your GOG recovery codes.")
+        # GOG keeps recovery codes on their own page, the authenticator field will not take them.
+        if "backup" not in (current_url or ""):
+            await self.page.get("https://login.gog.com/login/two_factor/backup")
+            await self.sleep(2)
+        await self._fill_2fa_code(code.replace("-", "").replace(" ", "")[:8])
+        self._mark_code_used(code, "used_gog_codes.txt", cfg.gog_otp_codes)
+        return True
+
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=3, max=15), reraise=True)
     async def _claim_giveaway(self) -> None:
         """Look for a free giveaway on the GOG homepage and claim it."""
@@ -554,7 +564,7 @@ class GOGClaimer(BaseClaimer):
                 async def _gog_logged_in() -> bool:
                     cur = await self.page.evaluate("window.location.href")
                     return isinstance(cur, str) and "redeem" in cur
-                logged_in = await self._wait_for_vnc_login(_gog_logged_in, timeout=60)
+                logged_in = await self._wait_for_vnc_login(_gog_logged_in)
                 if not logged_in:
                     logger.warning("GOG login timed out – code not redeemed: %s", code)
                     self.notify_games.append({"title": title, "url": url, "status": f"code: {code} (GOG, not redeemed)"})
@@ -667,8 +677,8 @@ class GOGClaimer(BaseClaimer):
             logger.exception("Failed to redeem GOG code for '%s'", title)
             self.notify_games.append({"title": title, "url": url, "status": f"code: {code} (GOG, failed)"})
 
-async def claim_gog() -> dict:
+async def claim_gog(extra_games: list | None = None) -> dict:
     """Convenience entry point."""
     claimer = GOGClaimer()
-    await claimer.run()
+    await claimer.run(extra_games)
     return {"store": "GOG", "user": claimer.user, "games": claimer.notify_games}

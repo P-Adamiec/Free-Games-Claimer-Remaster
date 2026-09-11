@@ -27,8 +27,10 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import nodriver as uc
+import pyotp
 
 from src.core.config import cfg
+from src.core.run_state import mark_answered, mark_unanswered, waits_for_nobody
 
 logger = logging.getLogger("fgc.claimer")
 
@@ -74,6 +76,10 @@ async def open_first_tab(browser, url: str = "about:blank", attempts: int = 10, 
 def filenamify(s: str) -> str:
     """Sanitise a string for use as a filename."""
     return re.sub(r'[^a-zA-Z0-9 _\-.]', '_', s.replace(":", "."))
+
+
+# Two goes with the authenticator secret, then a recovery code if there is one, then you over VNC.
+OTP_KEY_ATTEMPTS = 2
 
 
 class BaseClaimer:
@@ -324,6 +330,7 @@ class BaseClaimer:
                 if attempt < 3:
                     await asyncio.sleep(2 * attempt)
         if launch_error is not None:
+            self._log_launch_diagnostics(store_browser_dir, chrome_path)
             raise RuntimeError(
                 f"Chrome failed to start after 3 attempts (a container restart may help): {launch_error}"
             ) from launch_error
@@ -355,7 +362,8 @@ class BaseClaimer:
         self.log_browser_ready()
         return self.browser
 
-    def _normalize_title(self, title: str) -> str:
+    @staticmethod
+    def _normalize_title(title: str) -> str:
         """Strip non-alphanumeric chars and lowercase for fuzzy matching."""
         return re.sub(r'[^a-z0-9]', '', str(title).lower())
 
@@ -383,6 +391,52 @@ class BaseClaimer:
         self._kill_process_tree(pid)
         self.browser = None
         self.page = None
+
+    def _log_launch_diagnostics(self, profile_dir: Path, chrome_path: str | None) -> None:
+        """Say what the machine looked like when Chrome refused to start, so a bug report can be answered."""
+        import os
+        import shutil
+        import subprocess
+
+        try:
+            usage = shutil.disk_usage(profile_dir if profile_dir.exists() else profile_dir.parent)
+            free = f"{usage.free / 1_000_000_000:.1f} GB free"
+        except Exception as exc:
+            free = f"unknown ({exc})"
+
+        version = "not checked, nodriver picked the binary"
+        if chrome_path:
+            try:
+                done = subprocess.run([chrome_path, "--version"], capture_output=True, text=True, timeout=15)
+                version = (done.stdout or done.stderr or "no output").strip()
+            except Exception as exc:
+                version = f"could not run it ({exc})"
+
+        # nodriver swallows Chrome's own output, and that is where the real reason lives.
+        startup = "not attempted, nodriver picked the binary"
+        if chrome_path:
+            try:
+                done = subprocess.run(
+                    [chrome_path, "--headless=new", "--no-sandbox", "--disable-gpu",
+                     "--disable-dev-shm-usage", f"--user-data-dir={profile_dir}",
+                     "--dump-dom", "about:blank"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                said = [line for line in (done.stderr or "").strip().splitlines() if line.strip()]
+                # A healthy Chrome still writes noise to stderr, so only quote it when it actually died.
+                startup = ("exit=0, so Chrome itself runs fine here" if done.returncode == 0
+                           else f"exit={done.returncode}, " + (" / ".join(said[-3:]) if said else "said nothing"))
+            except subprocess.TimeoutExpired:
+                startup = "hung for 30s instead of starting"
+            except Exception as exc:
+                startup = f"could not be started at all ({exc})"
+
+        self.logger.warning(
+            "Chrome would not start. binary=%s (%s) | profile=%s exists=%s writable=%s | disk %s | "
+            "started by hand: %s",
+            chrome_path or "auto", version, profile_dir, profile_dir.exists(),
+            profile_dir.exists() and os.access(profile_dir, os.W_OK), free, startup,
+        )
 
     def _clear_profile_locks(self, store_browser_dir: Path) -> None:
         """Remove Chrome singleton lock files only (not cookies/session)."""
@@ -503,13 +557,79 @@ class BaseClaimer:
         from src.core.notifier import notify as _notify
         await _notify(message, **kwargs)
 
-    async def _wait_for_vnc_login(self, check_fn, *, timeout: int | None = None, interval: int = 5, log_interval: int = 60, custom_msg: str | None = None) -> bool:
+    # The last code sent from an authenticator secret, so a retry never repeats it.
+    _last_totp: str = ""
+
+    async def _fresh_totp(self, secret: str, previous: str = "") -> str:
+        """A code from the authenticator secret, never the same one twice in a row.
+
+        Codes come from 30-second windows, so a refused code stays refused until the window
+        turns over. Waiting for a new one is what makes a second attempt worth making.
+        """
+        totp = pyotp.TOTP(secret)
+        code = totp.now()
+        waited = 0
+        while previous and code == previous and waited < 35:
+            await self.sleep(3)
+            waited += 3
+            code = totp.now()
+        if previous and code == previous:
+            self.logger.debug("The authenticator code did not change in %ds, sending it anyway.", waited)
+        return code
+
+    def _next_unused_code(self, codes: list, used_name: str) -> str | None:
+        """First recovery code that has not been spent yet, None once they are gone."""
+        used_file = cfg._data_dir / used_name
+        used = used_file.read_text("utf-8").splitlines() if used_file.exists() else []
+        return next((c for c in codes if c not in used), None)
+
+    def _mark_code_used(self, code: str, used_name: str, codes: list) -> None:
+        """Written even when the login still fails: the site has seen the code either way."""
+        used_file = cfg._data_dir / used_name
+        with used_file.open("a", encoding="utf-8") as fh:
+            print(code, file=fh)
+        spent = len(used_file.read_text("utf-8").splitlines())
+        self.logger.info("Used one recovery code, %d left.", max(0, len(codes) - spent))
+
+    async def _remember_this_browser(self) -> bool:
+        """Tick the store's "do not ask for a code here again" box, when it offers one."""
+        try:
+            clicked = await self.page.evaluate(r"""
+                (() => {
+                    const boxes = [...document.querySelectorAll('input[type="checkbox"]')];
+                    const box = boxes.find(b => {
+                        const named = ((b.id || '') + ' ' + (b.name || '')).toLowerCase();
+                        const label = (b.closest('label')?.textContent
+                            || document.querySelector('label[for="' + b.id + '"]')?.textContent
+                            || b.parentElement?.textContent || '').toLowerCase();
+                        return /remember|trust/.test(named)
+                            || /require code|remember this|trust this/.test(label);
+                    });
+                    if (!box || box.checked) return false;
+                    box.click();
+                    return true;
+                })()
+            """)
+        except Exception as exc:
+            self.logger.debug("Could not tick the remember-this-browser box: %s", exc)
+            return False
+        if clicked:
+            self.logger.debug("Asked the store not to require a code on this browser again.")
+        return bool(clicked)
+
+    async def _wait_for_vnc_login(self, check_fn, *, timeout: int | None = None, interval: int = 5, log_interval: int = 60, custom_msg: str | None = None, store_key: str | None = None) -> bool:
         """Wait for manual VNC login.
 
         Polls every `interval` seconds, but only logs a waiting message every `log_interval` seconds.
+        A store whose last prompt went unanswered is not asked again in this run.
         """
         timeout = timeout or cfg.vnc_login_timeout
+        key = store_key or self.store_name
         from src.core.notifier import notify
+
+        if waits_for_nobody(key):
+            self.logger.info("Nobody answered the last prompt, so this step is skipped.")
+            return False
 
         if custom_msg:
             msg = custom_msg
@@ -530,6 +650,8 @@ class BaseClaimer:
             await asyncio.sleep(interval)
             elapsed += interval
             if await check_fn():
+                # You acted, so the next screen in this store gets the full wait again.
+                mark_answered(key)
                 return True
             
             if elapsed - last_log >= log_interval:
@@ -537,6 +659,7 @@ class BaseClaimer:
                 remaining = timeout - elapsed
                 if remaining > 0:
                     self.logger.info("Still waiting for login… %ds left.", remaining)
+        mark_unanswered(key)
         return False
 
     async def _human_challenge_present(self) -> bool:
@@ -574,7 +697,7 @@ class BaseClaimer:
         except Exception:
             return False
 
-    async def _wait_out_challenge(self, label: str, settle: int = 12) -> bool:
+    async def _wait_out_challenge(self, label: str, settle: int = 12, store_key: str | None = None) -> bool:
         """Clear a human-check: let it auto-pass, else alert the user to solve via VNC.
 
         First waits up to ``settle`` seconds for a managed/invisible challenge to
@@ -598,7 +721,7 @@ class BaseClaimer:
         async def _cleared() -> bool:
             return not await self._human_challenge_present()
 
-        return await self._wait_for_vnc_login(_cleared, custom_msg=custom_msg)
+        return await self._wait_for_vnc_login(_cleared, custom_msg=custom_msg, store_key=store_key)
 
     async def sleep(self, seconds: float) -> None:
         """Async sleep wrapper."""

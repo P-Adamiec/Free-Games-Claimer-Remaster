@@ -13,7 +13,7 @@ aiosqlite>=0.22.1
 
 # Notifications
 # Capped below 2.0: the author calls 1.13 the last 1.x and says 2.x will break the API,
-apprise>=1.13.0,<2.0.0
+apprise>=1.13.1,<2.0.0
 
 # Retry logic
 tenacity>=9.1.4

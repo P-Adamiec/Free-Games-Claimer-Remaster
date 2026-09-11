@@ -22,9 +22,9 @@ def _reload(monkeypatch, **env):
     """
     # Patch the source module: reloading config re-imports load_dotenv from it.
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: False)
-    for key in ("EG_MOBILE", "EG_MOBILE_PLATFORMS", "NOTIFY_SKIP_STORES",
-                "NOTIFY_CLAIM_FAILS", "NOTIFY_ALREADY_CLAIMED", "DRYRUN", "WIDTH",
-                "DEBUG", "DEBUG_LIBS", "VNC_IP", "NOVNC_PORT", "VNC_URL"):
+    # Importing config once already loaded the developer's .env into the environment, so every
+    # setting it knows about is cleared here. A named list would go stale and let secrets through.
+    for key in set(config_module.env_setting_kinds()) | set(config_module._DEPRECATED):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -180,23 +180,58 @@ class TestAliExpressPageRetries:
 
 
 class TestItchioRecoveryCodes:
-    """Recovery codes follow the GOG shape: a switch plus a comma-separated list."""
+    """Recovery codes are a comma-separated list, and the list itself is the switch."""
 
-    def test_off_and_empty_by_default(self, monkeypatch):
-        cfg = _reload(monkeypatch)
-        assert cfg.itchio_otp_enable is False and cfg.itchio_otp_codes == []
+    def test_no_codes_by_default(self, monkeypatch):
+        assert _reload(monkeypatch).itchio_otp_codes == []
 
     def test_codes_are_split_and_trimmed(self, monkeypatch):
-        cfg = _reload(monkeypatch, ITCHIO_OTP_ENABLE="true", ITCHIO_OTP_CODES=" 12345678 , 23456789,34567890 ")
-        assert cfg.itchio_otp_enable is True
+        cfg = _reload(monkeypatch, ITCHIO_OTP_CODES=" 12345678 , 23456789,34567890 ")
         assert cfg.itchio_otp_codes == ["12345678", "23456789", "34567890"]
 
     def test_blank_entries_are_dropped(self, monkeypatch):
-        assert _reload(monkeypatch, ITCHIO_OTP_CODES="12345678,,  ,23456789").itchio_otp_codes == \
-            ["12345678", "23456789"]
+        codes = _reload(monkeypatch, ITCHIO_OTP_CODES="12345678,,  ,23456789").itchio_otp_codes
+        assert codes == ["12345678", "23456789"]
 
-    def test_the_switch_is_independent_of_the_codes(self, monkeypatch):
-        # Codes without the switch stay unused, exactly like GOG_OTP_CODES.
-        cfg = _reload(monkeypatch, ITCHIO_OTP_CODES="12345678")
-        assert cfg.itchio_otp_codes and cfg.itchio_otp_enable is False
+    def test_no_second_setting_is_needed(self, monkeypatch):
+        # Pasting codes in used to do nothing until a switch nobody knew about was found.
+        assert not hasattr(_reload(monkeypatch), "itchio_otp_enable")
 
+
+class TestAuthenticatorSecrets:
+    """Every store spells it the same way now, and the old spelling still works."""
+
+    NEW = {"EG_OTP_KEY": "eg_otp_key", "PG_OTP_KEY": "pg_otp_key", "GOG_OTP_KEY": "gog_otp_key",
+           "UBI_OTP_KEY": "ubi_otp_key", "ITCHIO_OTP_KEY": "itchio_otp_key"}
+
+    @pytest.mark.parametrize("name,field", sorted(NEW.items()))
+    def test_the_new_name_is_read(self, monkeypatch, name, field):
+        assert getattr(_reload(monkeypatch, **{name: "ABCDEF"}), field) == "ABCDEF"
+
+    @pytest.mark.parametrize("name,field", sorted(NEW.items()))
+    def test_your_own_env_cannot_reach_these_tests(self, monkeypatch, name, field):
+        # A failing assert prints the value it compared, and these values are live secrets.
+        assert getattr(_reload(monkeypatch), field) is None
+
+    # Only these three ever shipped under the old spelling: EG and PG since 1.0, UBI since 1.6.
+    @pytest.mark.parametrize("name,field", [("EG_OTPKEY", "eg_otp_key"), ("PG_OTPKEY", "pg_otp_key"),
+                                            ("UBI_OTPKEY", "ubi_otp_key")])
+    def test_the_old_name_still_works(self, monkeypatch, name, field):
+        assert getattr(_reload(monkeypatch, **{name: "ABCDEF"}), field) == "ABCDEF"
+
+    @pytest.mark.parametrize("name", ["GOG_OTPKEY", "ITCHIO_OTPKEY"])
+    def test_a_name_that_never_shipped_carries_no_shim(self, monkeypatch, name):
+        from src.core import config as config_module
+        assert name not in config_module._DEPRECATED
+
+    def test_the_new_name_wins(self, monkeypatch):
+        assert _reload(monkeypatch, EG_OTP_KEY="new", EG_OTPKEY="old").eg_otp_key == "new"
+
+    def test_the_old_name_is_named_in_the_warning(self, monkeypatch, tmp_path):
+        from src.core import config as config_module
+        monkeypatch.setattr(config_module, "_env_root", tmp_path / ".env")
+        monkeypatch.setattr(config_module, "_env_data", tmp_path / "config.env")
+        (tmp_path / ".env").write_text("EG_OTPKEY=secret\n", encoding="utf-8")
+        warnings = config_module.settings_warnings()
+        assert any("EG_OTPKEY" in line and "EG_OTP_KEY" in line for line in warnings)
+        assert not any("secret" in line for line in warnings)

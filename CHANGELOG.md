@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.9] - 2026-09-11
+
+### Added
+- **Epic can sign in with a recovery code** – `EG_OTP_CODES` takes the backup codes from Epic's authenticator setup. The bot opens Epic's own backup code screen ("Try another way"), spends one only after the authenticator code was refused, and records it in `data/used_epic_codes.txt` so the same code is never sent twice.
+- **GOG and Itch.io can use an authenticator secret too** – `GOG_OTP_KEY` and `ITCHIO_OTP_KEY` join `EG_OTP_KEY`, `PG_OTP_KEY` and `UBI_OTP_KEY`, so those two stores are no longer limited to a finite pile of recovery codes. The README has a table of which store takes what.
+- **The bot asks a store to stop requiring a code on that browser** – Amazon's "Don't require code on this browser" and Epic's "Remember device" are ticked on the code screen, so two-factor sign-in becomes a one-time event per profile instead of something that happens every run.
+- **Two switches for the outcomes that keep coming back ([#48](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/48))** – `NOTIFY_MISSING_BASE` and `NOTIFY_DOWNLOAD_ONLY` drop DLC whose base game you do not own and download-only Itch.io giveaways, one at a time, so `NOTIFY_CLAIM_FAILS=true` no longer means living with the same line every run.
+
+### Changed
+- **Every two-factor setting is spelled the same way** – the secret is `EG_OTP_KEY`, `PG_OTP_KEY`, `GOG_OTP_KEY`, `UBI_OTP_KEY` and `ITCHIO_OTP_KEY`, matching the `*_OTP_CODES` beside them. `EG_OTPKEY`, `PG_OTPKEY` and `UBI_OTPKEY` still work and say so in the log. `*_OTP_ENABLE` is gone: the codes themselves switch it on.
+- **One two-factor rule in every store** – two codes from the secret, then one recovery code where there is one, then the screen is left to you over VNC. The second code is never the same digits as the first, because a refused code stays refused until its 30-second window turns over, which is also what a drifted container clock looks like.
+- **The README explains the two ways through two-factor sign-in** – a secret never runs out but puts your second factor in the same file as your password, while recovery codes are one-shot, traceable and finite. Neither is required: by default a code screen simply waits for you over VNC.
+- **GamerPower is no longer a store you pick** – it is asked once per run and its finds go to the store they belong to, claimed in that store's own session, so `STORES=steam` also takes the Steam giveaways it lists. Itch.io, Fanatical, IndieGala and Alienware Arena are names in `STORES` now, each still needing an account there; the old `*_ENABLE` switches work for one more release.
+- **One recovery-code implementation instead of three** – picking the first unused code and recording it lived separately in `gog.py`, `gamerpower.py` and `claimer.py`. GOG and Itch.io now call the shared `BaseClaimer` helpers, so all three stores count, skip and remember codes the same way.
+- **`UNKNOWN_STORES_ENABLE` is now `GP_UNKNOWN_STORES`** – opening a site nobody mapped is not built yet, so the setting stays off whatever you put in it and says so once in the log. The old name keeps working and tells you what it is called now.
+- **`PG_CLAIMDLC` is gone** – nothing in the Python rewrite ever read it, and Amazon has retired that section: `gaming.amazon.com` now offers only games and Luna. Dropped rather than left as a switch that does nothing.
+- **Epic reports a missing base game the way Steam does** – it said `requires base game` while Steam said `failed:missing_base`, so no single setting could cover both stores. Both use the Steam wording now.
+- **Dependency update** – `apprise` to `>=1.13.1` (Dependabot [#42](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/pull/42)), which fixes in-memory e-mail attachments. The `<2.0.0` cap from 1.8 held.
+- **The bug report instructions say what to actually send** – the README now names the log file and the folder it lands in, asks you to check your version first, and tells you to try a clean start and send both logs when the fault survives it.
+- **A Chrome that refuses to start now leaves evidence** – the run used to end on `Chrome failed to start after 3 attempts` and nothing else. It now logs the binary and its version, the profile path, whether that folder is writable and how much disk is free, then starts Chrome by hand and quotes what it printed, which nodriver otherwise swallows.
+
+### Fixed
+- **A store that waited for you in vain is left alone for the rest of the run** – every manual step got its own full `VNC_LOGIN_TIMEOUT`, so one run could sit for hours re-opening the same sign-in page, which is exactly what lowers a session's standing there. An unanswered prompt now ends that store's manual steps for the run, a prompt you answered costs it nothing, and the summary says what was skipped.
+- **Epic's account picker no longer stops the sign-in** – after an interrupted login Epic shows "Welcome back, which account?" instead of the password form, and the bot waited there until the attempt ran out, three times over. It now picks your account and carries on.
+- **After you clear a human check the bot finishes the sign-in itself** – the check interrupts a sign-in that was already sent, and the bot used to ask you for a password it has in your `.env`. It now waits for the form to come back and sends it again, on Itch.io, Fanatical and IndieGala alike.
+- **Itch.io stopped re-claiming games you already own** – a sign-in was judged needed by a "Log in" link that creator subdomains do not carry, so the ownership check read a signed-out page and an owned game was reported as freshly claimed. It now signs in once per run, decided on itch.io itself, and asks about ownership only then.
+- **GOG stopped printing part of a recovery code into the log** – it logged the first three characters of the code at normal log level, which ends up in any log file someone attaches to a bug report. It says how many codes are left instead.
+- **A refused 2FA code no longer wastes the whole sign-in ([#46](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/46))** – a refused code left the bot idling for two minutes, then reloading the store page and taking your code screen with it, three times over. It now reloads that screen, tries once more with a fresh code, quotes what Epic said, and hands over to you after a second refusal.
+- **IndieGala asked you to sign in when you already were ([#47](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/47))** – the check looked for CSS classes such as `.user-menu` that IndieGala does not use anywhere, so it could never conclude you were signed in. It now reads the page's own links, the way the Itch.io check does.
+- **Amazon's verification code screen no longer vanishes while you type it ([#46](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/46))** – Prime looked once, six seconds after the password and only by English wording, and a miss sent the login loop back to the claims page while you were typing. It now waits for that screen, knows it by the code field in any language, and never navigates away while it is up.
+- **The bot no longer reloads the page while you are typing into it** – it looks every five seconds to see whether you have finished, and Unity did that by re-opening the orders page, which wiped whatever you had entered. Every one of those checks now reads the page instead of acting on it, and a test keeps it that way.
+- **`VNC_LOGIN_TIMEOUT` reaches every manual step** – four waits ignored it: GOG's 2FA sat at 180 seconds, Steam Guard counted its own 120 in a hand-written loop, and Unity's checkout form kept a 300 second floor. Whatever you set is now what you get everywhere.
+
 ## [1.8] - 2026-09-05
 
 ### Added

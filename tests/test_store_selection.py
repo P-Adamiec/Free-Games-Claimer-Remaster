@@ -14,7 +14,7 @@ import pytest
 MAIN_PY = Path(__file__).resolve().parent.parent / "main.py"
 SOURCE = MAIN_PY.read_text(encoding="utf-8")
 
-EXPECTED_DEFAULT = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress", "gamerpower"]
+EXPECTED_DEFAULT = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress"]
 
 
 def _default_stores() -> list[str]:
@@ -56,10 +56,71 @@ class TestDefaultSelection:
         order = _default_stores()
         assert order.index("epic") < order.index("fab")
 
-    def test_gamerpower_runs_last(self):
-        # Its dedup reads the database, so the stores with their own module claim first.
-        assert _default_stores()[-1] == "gamerpower"
+    def test_gamerpower_is_not_a_store(self):
+        # It finds giveaways and hands them to the store they belong to, it claims nothing itself.
+        assert "gamerpower" not in _registry_keys()
+        assert "gamerpower" not in _default_stores()
+
+    def test_the_side_stores_are_selectable_but_never_default(self):
+        # Each one needs an account on that site, so naming it is the opt-in.
+        match = re.search(r'^SIDE_STORES.*?=\s*\((.*?)\)', SOURCE, re.S | re.M)
+        assert match, "SIDE_STORES not found in main.py"
+        sides = re.findall(r'"([a-z.]+)"', match.group(1))
+        assert sides == ["itchio", "fanatical", "indiegala", "alienware"]
+        assert not set(sides) & set(_default_stores())
+
+    def test_every_side_store_has_a_name_you_can_type(self):
+        aliases = re.search(r'^_ALIASES.*?=\s*\{(.*?)^\}', SOURCE, re.S | re.M)
+        assert aliases
+        for side in ("itchio", "fanatical", "indiegala", "alienware"):
+            assert f'"{side}"' in aliases.group(1)
 
     def test_the_hardcoded_list_is_gone(self):
         # The old literal lived inside _get_active_claimers and drifted from the registry.
         assert '["steam", "epic", "prime", "gog", "aliexpress"]' not in SOURCE
+
+
+class TestRunOrder:
+    """GamerPower finds, the stores claim: the order that makes that work."""
+
+    RUN = SOURCE.split("async def run_claimers", 1)[1].split("\nasync def ", 1)[0]
+
+    def test_gamerpower_is_asked_before_any_store_runs(self):
+        assert self.RUN.index("discover_giveaways()") < self.RUN.index("for key, name, func in claimers")
+
+    def test_it_is_asked_only_when_this_run_can_use_the_answer(self):
+        # STORES=prime has nothing GamerPower feeds, so it must not cost a single request.
+        guard = self.RUN.split("routed: dict = {}", 1)[1][:200]
+        assert "if sides or any(key in GP_TARGETS for key in selected)" in guard
+
+    def test_the_big_stores_are_handed_their_own_finds(self):
+        assert "await func(routed.get(key)) if key in GP_TARGETS else await func()" in self.RUN
+
+    def test_the_side_stores_come_after_the_gog_codes(self):
+        assert self.RUN.index("redeem_pending_codes") < self.RUN.index("claim_side_stores(routed)")
+
+    def test_only_three_stores_take_the_finds(self):
+        match = re.search(r'^GP_TARGETS.*?=\s*\((.*?)\)', SOURCE, re.S | re.M)
+        assert match and re.findall(r'"([a-z]+)"', match.group(1)) == ["steam", "epic", "gog"]
+
+
+class TestUnknownSitesStayOff:
+    """Opening a site nobody mapped is not built yet, so the setting cannot switch it on."""
+
+    def test_the_switch_does_not_reach_the_run(self, monkeypatch):
+        from src.core.config import cfg
+        from src.stores.gamerpower import GamerPowerClaimer
+
+        monkeypatch.setattr(cfg, "gp_unknown_stores", True)
+        assert GamerPowerClaimer._side_store_selected("unknown") is False
+
+    def test_a_named_side_store_still_runs(self, monkeypatch):
+        from src.core import selection
+        from src.stores.gamerpower import GamerPowerClaimer
+
+        selection.set_active_stores(["itchio"])
+        try:
+            assert GamerPowerClaimer._side_store_selected("itchio") is True
+            assert GamerPowerClaimer._side_store_selected("fanatical") is False
+        finally:
+            selection.reset_active_stores()

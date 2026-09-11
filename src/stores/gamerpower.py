@@ -13,9 +13,10 @@ from urllib.parse import urlparse
 
 from sqlalchemy import select
 
-from src.core.claimer import BaseClaimer, mask_account
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, mask_account
 from src.core.config import cfg
 from src.core.database import async_session, ClaimedGame, get_or_create
+from src.core.run_state import needs_you, waits_for_nobody
 from src.core.selection import is_store_active
 from src.core.url_security import url_has_allowed_host
 import logging
@@ -202,6 +203,142 @@ def login_help_message(label: str, code_screen: bool, tried_backup: bool = False
     return " ".join(lines)
 
 
+# One claimer serves four sites, so what the person reads is not what the run state counts by.
+SIDE_STORE_KEYS = {"Itch.io": "itchio", "Fanatical": "fanatical",
+                   "IndieGala": "indiegala", "Alienware Arena": "alienware"}
+
+
+def side_store_key(label: str) -> str:
+    """The store key behind a label shown to the user."""
+    return SIDE_STORE_KEYS.get(label, (label or "").lower())
+
+
+# Some giveaway hosts answer a bare client with a different redirect than a browser gets.
+_ROUTE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+             "Chrome/120.0.0.0 Safari/537.36")
+
+# A giveaway that lands on a storefront banner instead of a product page cannot be claimed.
+_PRODUCT_MARKERS = {"steam": ("/app/", "/sub/"), "epic": ("/p/", "/bundles/")}
+
+
+def is_product_page(store: str, final_url: str) -> bool:
+    """False when a giveaway lands on a storefront banner instead of a page you can claim."""
+    markers = _PRODUCT_MARKERS.get(store)
+    return True if not markers else any(marker in (final_url or "") for marker in markers)
+
+
+def _clean_title(title: str) -> str:
+    """Drop the "(Steam) Key Giveaway" tails GamerPower puts on its titles."""
+    for pattern in (r'(?i)\s*\(\s*steam\s*\)\s*(?:key\s*)?giveaway\s*$',
+                    r'(?i)\s*(?:steam\s*)?key\s*giveaway\s*$',
+                    r'(?i)\s*giveaway\s*$',
+                    r'(?i)\s*\(\s*steam\s*\)\s*key\s*$',
+                    r'(?i)\s*steam\s*key\s*$'):
+        title = re.sub(pattern, '', title)
+    return title.strip()
+
+
+async def _claimed_titles() -> set:
+    """Every title already claimed anywhere, so the same game is not chased twice."""
+    titles = set()
+    async with async_session() as session:
+        stmt = select(ClaimedGame).where(ClaimedGame.status.in_(["claimed", "existed"]))
+        result = await session.execute(stmt)
+        for db_game in result.scalars().all():
+            titles.add(BaseClaimer._normalize_title(db_game.title))
+    return titles
+
+
+async def _resolve_target(game: dict) -> tuple[str, str]:
+    """Follow a giveaway's redirect and work out which store it ends at. No browser."""
+    giveaway_url = game.get("giveaway_url", "")
+    final_url = giveaway_url.lower()
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, headers={"User-Agent": _ROUTE_UA},
+                                     timeout=20) as client:
+            res = await client.get(giveaway_url)
+            final_url = str(res.url).lower()
+    except Exception as e:
+        logger.debug("Failed to pre-resolve URL %s: %s", giveaway_url, e)
+
+    instructions = (game.get("instructions", "") or "").lower()
+    target_store = classify_target(final_url, instructions)
+    if target_store != "unknown" and classify_target(final_url) == "unknown":
+        logger.debug("[GamerPower] '%s' routed to %s by its instructions, the URL gave nothing.",
+                     game.get("title", "Unknown"), target_store)
+    return target_store, final_url
+
+
+async def discover_giveaways() -> dict:
+    """Find GamerPower's giveaways and sort them by the store they end at. Never raises.
+
+    This is the only part that talks to GamerPower: the stores themselves do the claiming.
+    """
+    try:
+        logger.debug("Fetching giveaways from GamerPower API")
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(GAMERPOWER_API_URL)
+            resp.raise_for_status()
+            data = resp.json()
+        if not isinstance(data, list):
+            logger.debug("GamerPower returned non-list data")
+            return {}
+
+        # Filter before resolving redirects: every entry kept costs one extra HTTP request.
+        kept = [item for item in data if is_wanted(item, cfg.gp_claim_dlc)]
+        if len(data) - len(kept):
+            logger.debug("Skipped %d giveaway(s) of an unwanted type (GP_CLAIM_DLC=%s).",
+                         len(data) - len(kept), cfg.gp_claim_dlc)
+
+        games = [{
+            "title": _clean_title(item.get("title", "Unknown")),
+            "url": item.get("open_giveaway_url", ""),
+            "giveaway_url": item.get("open_giveaway_url", ""),
+            # Carried through so routing can fall back on them, see classify_target().
+            "instructions": item.get("instructions", "") or "",
+            "type": item.get("type", "") or "",
+            "platforms": item.get("platforms", "") or "",
+        } for item in kept]
+
+        logger.debug("GamerPower API returned %d giveaway(s)", len(games))
+        db_titles = await _claimed_titles()
+        unique_gp = []
+        for gp in games:
+            norm = BaseClaimer._normalize_title(gp["title"])
+            if any(s in norm or norm in s for s in db_titles):
+                logger.debug("GamerPower duplicate (already processed globally): %s", gp["title"])
+            else:
+                unique_gp.append(gp)
+
+        if not unique_gp:
+            logger.info("No unique GamerPower giveaways found.")
+            return {}
+
+        links = [f"  • [bold cyan]{g['title']}[/bold cyan] 🔗 {g.get('giveaway_url', '')}" for g in unique_gp]
+        logger.info("🎮 [bold magenta]GamerPower: %d extra game(s):[/bold magenta]\n%s",
+                    len(unique_gp), "\n".join(links))
+
+        routed: dict = {}
+        for game in unique_gp:
+            store, final_url = await _resolve_target(game)
+            game["final_url"] = final_url
+            if not is_product_page(store, final_url):
+                logger.info("⏭️ [GamerPower] '%s' → %s URL is not a game page (%s), skipping",
+                            game["title"], store.title(), final_url)
+                continue
+            if store in COVERED_ELSEWHERE:
+                logger.info("⏭️ [GamerPower] '%s' → %s, already covered by the '%s' store, skipping",
+                            game["title"], store.title(), COVERED_ELSEWHERE[store])
+                continue
+            routed.setdefault(store, []).append(game)
+        logger.debug("GamerPower routing: %s",
+                     {store: len(items) for store, items in sorted(routed.items())})
+        return routed
+    except Exception:
+        logger.exception("Could not read the GamerPower giveaways")
+        return {}
+
+
 class GamerPowerClaimer(BaseClaimer):
     store_name = "gamerpower"
     # The browser profile keeps its original folder name so existing side-store logins survive.
@@ -211,115 +348,36 @@ class GamerPowerClaimer(BaseClaimer):
         super().__init__()
         self.user = "GamerPower"
         self._fanatical_games = []
+        # Itch.io signs in once per run, not once per giveaway.
+        self._itch_session_ok = False
 
-    async def _get_claimed_titles_from_db(self) -> set[str]:
-        """Fetch all previously claimed/existed game titles from the DB."""
-        titles = set()
-        async with async_session() as session:
-            stmt = select(ClaimedGame).where(ClaimedGame.status.in_(["claimed", "existed"]))
-            result = await session.execute(stmt)
-            for db_game in result.scalars().all():
-                titles.add(self._normalize_title(db_game.title))
-        return titles
-
-    async def run(self) -> None:
+    async def run(self, routed: dict | None = None) -> None:
+        """Claim the giveaways that land on sites with no store module of their own."""
+        routed = routed or {}
         try:
-            # 1. Fetch API
-            logger.debug("Fetching giveaways from GamerPower API")
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(GAMERPOWER_API_URL)
-                resp.raise_for_status()
-                data = resp.json()
-
-            if not isinstance(data, list):
-                logger.debug("GamerPower returned non-list data")
-                return
-
-            # Filter before resolving redirects: every entry kept costs one extra HTTP request.
-            kept = [item for item in data if is_wanted(item, cfg.gp_claim_dlc)]
-            dropped = len(data) - len(kept)
-            if dropped:
-                logger.debug("Skipped %d giveaway(s) of an unwanted type (GP_CLAIM_DLC=%s).",
-                             dropped, cfg.gp_claim_dlc)
-
-            games = []
-            for item in kept:
-                giveaway_url = item.get("open_giveaway_url", "")
-                title = item.get("title", "Unknown")
-
-                # Clean up dirty GamerPower titles
-                title = re.sub(r'(?i)\s*\(\s*steam\s*\)\s*(?:key\s*)?giveaway\s*$', '', title)
-                title = re.sub(r'(?i)\s*(?:steam\s*)?key\s*giveaway\s*$', '', title)
-                title = re.sub(r'(?i)\s*giveaway\s*$', '', title)
-                title = re.sub(r'(?i)\s*\(\s*steam\s*\)\s*key\s*$', '', title)
-                title = re.sub(r'(?i)\s*steam\s*key\s*$', '', title)
-                title = title.strip()
-
-                games.append({
-                    "title": title,
-                    "url": giveaway_url,
-                    "giveaway_url": giveaway_url,
-                    # Carried through so routing can fall back on them, see classify_target().
-                    "instructions": item.get("instructions", "") or "",
-                    "type": item.get("type", "") or "",
-                    "platforms": item.get("platforms", "") or "",
-                })
-
-            # 2. Global deduplication against DB (already claimed in Steam, Epic, GOG, etc)
-            logger.debug("GamerPower API returned %d giveaway(s)", len(games))
-            db_titles = await self._get_claimed_titles_from_db()
-            unique_gp = []
-            for gp in games:
-                norm = self._normalize_title(gp["title"])
-                is_dup = any(s in norm or norm in s for s in db_titles)
-                if is_dup:
-                    logger.debug("GamerPower duplicate (already processed globally): %s", gp["title"])
-                else:
-                    unique_gp.append(gp)
-
-            if not unique_gp:
-                logger.info("No unique GamerPower giveaways found.")
-                return
-
-            links = [f"  • [bold cyan]{g['title']}[/bold cyan] 🔗 {g.get('giveaway_url', '')}" for g in unique_gp]
-            logger.info("🎮 [bold magenta]GamerPower: %d extra game(s):[/bold magenta]\n%s", 
-                        len(unique_gp), "\n".join(links))
-
-            # 3. Resolve and classify everything first, so browsers can be grouped per store.
-            routed: dict[str, list[dict]] = {}
-            for game in unique_gp:
-                store, final_url = await self._route(game)
-                game["final_url"] = final_url
-                routed.setdefault(store, []).append(game)
-            logger.debug("GamerPower routing: %s",
-                         {store: len(items) for store, items in sorted(routed.items())})
-
-            for store, items in routed.items():
-                if store in COVERED_ELSEWHERE:
-                    for game in items:
-                        logger.info("⏭️ [GamerPower] '%s' → %s, already covered by the '%s' store, skipping",
-                                    game.get("title", "Unknown"), store.title(), COVERED_ELSEWHERE[store])
-
-            # 4. Side sites share this claimer's browser, so it only opens when one has work.
-            side_work = []
+            work = []
             for store in ("fanatical", "alienware", "itchio", "indiegala", "unknown"):
-                enabled, label, _ = self._side_store(store)
+                label, _ = self._side_store(store)
                 for game in routed.get(store, []):
-                    if enabled:
-                        side_work.append((store, game))
+                    if self._side_store_selected(store):
+                        work.append((store, game))
                     else:
-                        logger.info("⏭️ [GamerPower] '%s' → %s (skipped, disabled in config)",
+                        logger.info("⏭️ [GamerPower] '%s' → %s, not part of this run, skipping",
                                     game.get("title", "Unknown"), label)
-            if side_work:
-                await self.start_browser(force_headful=True)
-                for store, game in side_work:
-                    await self._process_side_store(store, game)
+            if not work:
+                return
 
-            # 5. Big stores: one browser per store, not one per game.
-            for store in ("steam", "epic", "gog"):
-                if routed.get(store):
-                    await self._claim_major_store_batch(store, routed[store])
-
+            # One browser for all of them: these sites are claimed page by page, not in batches.
+            await self.start_browser(force_headful=True)
+            for store, game in work:
+                # A site whose prompt nobody answered is left alone: opening its sign-in page
+                # once per giveaway would cost hours and lower the session's standing there.
+                if waits_for_nobody(store):
+                    logger.info("⏭️ [GamerPower] '%s' → %s is waiting for you, skipping",
+                                game.get("title", "Unknown"), self._side_store(store)[0])
+                    needs_you(store)
+                    continue
+                await self._process_side_store(store, game)
         except Exception as exc:
             logger.exception("Fatal error in GamerPower")
             if cfg.notify_errors:
@@ -328,43 +386,31 @@ class GamerPowerClaimer(BaseClaimer):
             # Summary notifications deferred to main.py
             await self.close_browser()
 
-    async def _route(self, game: dict) -> tuple[str, str]:
-        """Resolve a giveaway's redirect and work out which store it ends at. No browser."""
-        title = game.get("title", "Unknown")
-        giveaway_url = game.get("giveaway_url", "")
-        game["url"] = giveaway_url  # Explicit url for the side-store claimers.
+    @staticmethod
+    def _side_store_selected(target_store: str) -> bool:
+        """Side stores need an account, so each one runs only when STORES names it."""
+        if target_store == "unknown":
+            # Opening a site nobody mapped is not supported yet, whatever GP_UNKNOWN_STORES says.
+            if cfg.gp_unknown_stores:
+                logger.warning("Opening unknown sites is not supported yet, GP_UNKNOWN_STORES stays off.")
+            return False
+        return is_store_active(target_store)
 
-        final_url = giveaway_url.lower()
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/114.0.0.0 Safari/537.36"}) as client:
-                res = await client.get(giveaway_url)
-                final_url = str(res.url).lower()
-        except Exception as e:
-            logger.debug("Failed to pre-resolve URL %s: %s", giveaway_url, e)
-
-        instructions = (game.get("instructions", "") or "").lower()
-        target_store = classify_target(final_url, instructions)
-        if target_store != "unknown" and classify_target(final_url) == "unknown":
-            logger.debug("[GamerPower] '%s' routed to %s by its instructions, the URL gave nothing.",
-                         title, target_store)
-        logger.debug("[GamerPower] '%s' resolved to %s -> target_store=%s", title, final_url, target_store)
-        return target_store, final_url
-
-    def _side_store(self, target_store: str) -> tuple[bool, str, object]:
-        """Switch, label and handler for a site with no store module of its own."""
+    def _side_store(self, target_store: str) -> tuple[str, object]:
+        """Label and handler for a site with no store module of its own."""
         table = {
-            "fanatical": (cfg.fanatical_enable, "Fanatical giveaway", self._claim_fanatical_game),
-            "alienware": (cfg.alienware_enable, "Alienware Arena", self._claim_alienware_game),
-            "itchio": (cfg.itchio_enable, "Itch.io giveaway", self._claim_itchio_game),
-            "indiegala": (cfg.indiegala_enable, "IndieGala giveaway", self._claim_indiegala_game),
+            "fanatical": ("Fanatical giveaway", self._claim_fanatical_game),
+            "alienware": ("Alienware Arena", self._claim_alienware_game),
+            "itchio": ("Itch.io giveaway", self._claim_itchio_game),
+            "indiegala": ("IndieGala giveaway", self._claim_indiegala_game),
         }
         # No handler for an unknown site, all we can do is open it for a human.
-        return table.get(target_store, (cfg.unknown_stores_enable, "Unknown site", None))
+        return table.get(target_store, ("Unknown site", None))
 
     async def _process_side_store(self, target_store: str, game: dict) -> None:
         """Claim one giveaway on a side site, in the browser this claimer already opened."""
         title = game.get("title", "Unknown")
-        _, label, handler = self._side_store(target_store)
+        label, handler = self._side_store(target_store)
 
         try:
             if handler:
@@ -378,103 +424,6 @@ class GamerPowerClaimer(BaseClaimer):
                 await self.sleep(10)
         except Exception:
             logger.exception("[GamerPower] Error processing '%s'", title)
-
-    @staticmethod
-    def _product_pages(games: list[dict], markers: tuple[str, ...], label: str) -> list[dict]:
-        """Keep only the entries that land on a real product page, not a storefront banner."""
-        wanted = []
-        for game in games:
-            final_url = game.get("final_url", "")
-            if any(marker in final_url for marker in markers):
-                wanted.append(game)
-            else:
-                logger.info("⏭️ [GamerPower] '%s' → %s URL is not a game page (%s), skipping",
-                            game.get("title", "Unknown"), label, final_url)
-        return wanted
-
-    async def _claim_major_store_batch(self, target_store: str, games: list[dict]) -> None:
-        """Claim every giveaway landing on one big store in a single browser session."""
-        if not is_store_active(target_store):
-            for game in games:
-                logger.info("⏭️ [GamerPower] '%s' → %s, which is not part of this run, skipping",
-                            game.get("title", "Unknown"), target_store.title())
-            return
-
-        if target_store == "steam":
-            wanted = self._product_pages(games, ("/app/", "/sub/"), "Steam")
-            if not wanted:
-                return
-
-            from src.stores.steam import SteamClaimer
-            claimer = SteamClaimer()
-            claimer.user = cfg.steam_username or "shared_session"
-            claimer.notify_games = self.notify_games
-
-            try:
-                # A dedicated browser on the Steam profile, so cookies and auth carry over.
-                await claimer.start_browser(
-                    force_headful=True,
-                    extra_args=["--ignore-gpu-blocklist", "--enable-unsafe-webgpu"]
-                )
-                for game in wanted:
-                    try:
-                        await claimer._claim_game({**game, "url": game["final_url"], "source": "gamerpower"})
-                    except Exception:
-                        logger.exception("[GamerPower] Steam delegation failed for '%s'",
-                                         game.get("title", "Unknown"))
-            except Exception:
-                logger.exception("[GamerPower] Steam delegation failed to start")
-            finally:
-                await claimer.close_browser()
-
-        elif target_store == "epic":
-            wanted = self._product_pages(games, ("/p/", "/bundles/"), "Epic")
-            if not wanted:
-                return
-
-            from src.stores.epic import EpicGamesClaimer
-            claimer = EpicGamesClaimer()
-            claimer.user = cfg.eg_email or "shared_session"
-            claimer.notify_games = self.notify_games
-
-            try:
-                # Same GPU flags epic.py uses: software rendering is what summons the captcha.
-                await claimer.start_browser(
-                    force_headful=True,
-                    extra_args=["--ignore-gpu-blocklist", "--enable-unsafe-webgpu"]
-                )
-                if not await claimer._ensure_logged_in():
-                    logger.warning("[GamerPower] Epic login failed, skipping %d game(s)", len(wanted))
-                    return
-                for game in wanted:
-                    try:
-                        await claimer._claim_game(game["final_url"])
-                    except Exception:
-                        logger.exception("[GamerPower] Epic delegation failed for '%s'",
-                                         game.get("title", "Unknown"))
-            except Exception:
-                logger.exception("[GamerPower] Epic delegation failed to start")
-            finally:
-                await claimer.close_browser()
-
-        elif target_store == "gog":
-            # GOG's claimer takes no URL, it claims whatever giveaway gog.com is running,
-            # so it runs once no matter how many entries point there.
-            from src.stores.gog import GOGClaimer
-            claimer = GOGClaimer()
-            claimer.user = cfg.gog_email or "shared_session"
-            claimer.notify_games = self.notify_games
-
-            try:
-                await claimer.start_browser()
-                if not await claimer._ensure_logged_in():
-                    logger.warning("[GamerPower] GOG login failed, skipping %d game(s)", len(games))
-                    return
-                await claimer._claim_giveaway()
-            except Exception:
-                logger.exception("[GamerPower] GOG delegation failed")
-            finally:
-                await claimer.close_browser()
 
     async def _itch_logged_in(self) -> bool:
         """Signed in when itch.io offers a logout link and no login link. Verified live."""
@@ -490,14 +439,83 @@ class GamerPowerClaimer(BaseClaimer):
             logger.debug("[Itch.io] Sign-in check failed: %s", e)
             return False
 
+    async def _ig_logged_in(self) -> bool:
+        """Signed in when IndieGala offers a way out and none in. Verified live signed out."""
+        try:
+            raw = await self.page.evaluate("""
+                JSON.stringify((() => {
+                    const hrefs = [...document.querySelectorAll('a[href]')].map(a => a.getAttribute('href') || '');
+                    const labels = [...document.querySelectorAll('a, button')]
+                        .map(b => (b.textContent || '').trim().toLowerCase());
+                    return {
+                        logout: hrefs.some(h => h.includes('logout')),
+                        login: hrefs.some(h => h.includes('/login'))
+                            || labels.some(t => t === 'login' || t === 'log in' || t === 'sign in')
+                    };
+                })())
+            """)
+            state = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as e:
+            logger.debug("[IndieGala] Sign-in check failed: %s", e)
+            return False
+        # Signed out always offers a way in, on indiegala.com and on freebies.indiegala.com alike.
+        return bool(state.get("logout")) or not state.get("login")
+
     def _log_side_signed_in(self, label: str, account: str | None) -> None:
         """The line every store prints. `log_signed_in()` would also overwrite `self.user`,
         which this claimer keeps as the database key for all its side stores."""
         self.logger.info("🔓 [bold green]Signed in as:[/bold green] %s (%s)",
                          mask_account(account) or "unknown", label)
 
+    async def _resubmit_login(self, label: str, email: str, password: str) -> bool:
+        """Send the sign-in form again. A human check interrupts the first attempt, it does not undo it."""
+        js_email = json.dumps(email)
+        js_password = json.dumps(password)
+        try:
+            sent = await self.page.evaluate(f'''
+                (() => {{
+                    const vis = el => {{ const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }};
+                    const inputs = [...document.querySelectorAll('input')].filter(vis);
+                    const user = inputs.find(i => /email|user|login/i.test(i.name + ' ' + i.id + ' ' + i.type));
+                    const pass = inputs.find(i => (i.type || '').toLowerCase() === 'password');
+                    if (!user || !pass) return false;
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    setter.call(user, {js_email});
+                    user.dispatchEvent(new Event("input", {{bubbles: true}}));
+                    setter.call(pass, {js_password});
+                    pass.dispatchEvent(new Event("input", {{bubbles: true}}));
+                    const submit = document.querySelector('button[type="submit"], input[type="submit"]')
+                        || [...document.querySelectorAll('button')].filter(vis)
+                            .find(b => /log ?in|sign ?in/i.test(b.textContent || ''));
+                    if (!submit) return false;
+                    submit.click();
+                    return true;
+                }})()
+            ''')
+        except Exception as e:
+            logger.debug("[%s] Could not send the sign-in form again: %s", label, e)
+            return False
+        if sent:
+            logger.info("[%s] The check is done, sending your sign-in again.", label)
+            await self.sleep(6)
+        return bool(sent)
+
+    async def _resubmit_when_form_returns(self, label: str, email: str, password: str) -> bool:
+        """Wait for the sign-in form to come back after a human check, then send it.
+
+        The check disappears a moment before the page reloads, and one look at that moment
+        finds no form at all.
+        """
+        for _ in range(6):
+            if await self._resubmit_login(label, email, password):
+                return True
+            await self.sleep(3)
+        logger.debug("[%s] No sign-in form came back after the check.", label)
+        return False
+
     async def _confirm_side_login(self, label: str, check_fn, backup_codes: list | None = None,
-                                 backup_file: str = "") -> bool:
+                                 backup_file: str = "", otp_key: str | None = None,
+                                 credentials: tuple | None = None) -> bool:
         """Finish a side-store login: answer a code screen if one shows, else hand over via VNC."""
         if await check_fn():
             return True
@@ -506,8 +524,13 @@ class GamerPowerClaimer(BaseClaimer):
         # a correct password with "we just need to check that you're a real person".
         if await self._human_challenge_present():
             logger.warning("[%s] The site is showing a human check, handing over.", label)
-            if await self._wait_out_challenge(label) and await check_fn():
-                return True
+            if await self._wait_out_challenge(label, store_key=side_store_key(label)):
+                if await check_fn():
+                    return True
+                # The check interrupted a sign-in that was already sent, so send it again
+                # rather than asking you to type a password the bot already has.
+                if credentials and await self._resubmit_when_form_returns(label, *credentials)                         and await check_fn():
+                    return True
 
         state = {}
         tried_backup = False
@@ -519,28 +542,74 @@ class GamerPowerClaimer(BaseClaimer):
 
         if needs_otp(state):
             logger.debug("[%s] Two-factor screen detected: %s", label, state)
+            for attempt in range(OTP_KEY_ATTEMPTS if otp_key else 0):
+                if attempt:
+                    logger.warning("[%s] The code was not accepted, trying once more with a fresh one.", label)
+                if await self._fill_totp(label, otp_key) and await check_fn():
+                    return True
+                if not await self._code_screen_still_up(label):
+                    break
             if backup_codes:
                 tried_backup = await self._fill_backup_code(label, backup_codes, backup_file)
                 if tried_backup and await check_fn():
                     return True
-            else:
+            elif not otp_key:
                 logger.info("[%s] The site is asking for a two-factor code, handing over to you.", label)
 
         code_screen = needs_otp(state)
         msg = self._vnc_notice(
             f"{label}: 2FA code needed" if code_screen else f"{label}: login needs you",
             login_help_message(label, code_screen, tried_backup))
-        if await self._wait_for_vnc_login(check_fn, custom_msg=msg):
+        if await self._wait_for_vnc_login(check_fn, custom_msg=msg, store_key=side_store_key(label)):
             return True
         logger.warning("[%s] Still not signed in, skipping this giveaway.", label)
+        needs_you(side_store_key(label))
         return False
 
+    async def _type_otp(self, label: str, code: str) -> bool:
+        """Type a code into whatever box OTP_STATE_JS marked, then press the site's submit button."""
+        try:
+            field = await self.page.select(OTP_FIELD, timeout=8)
+            if not field:
+                return False
+            await field.click()
+            await self.sleep(0.4)
+            await field.send_keys(code)
+            await self.sleep(0.6)
+            await self.page.evaluate("""
+                (() => {
+                    const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+                    const b = [...document.querySelectorAll('button, input[type="submit"]')].filter(vis)
+                        .find(x => /^(log ?in|verify|continue|submit|sign ?in)$/i
+                            .test(((x.innerText || x.value || '')).trim()));
+                    if (b) b.click();
+                })()
+            """)
+            await self.sleep(6)
+            return True
+        except Exception as e:
+            logger.debug("[%s] Could not enter the two-factor code: %s", label, e)
+            return False
+
+    async def _code_screen_still_up(self, label: str) -> bool:
+        """True when the code box is still there, which means the code was turned down."""
+        try:
+            raw = await self.page.evaluate(OTP_STATE_JS)
+            return needs_otp(json.loads(raw) if isinstance(raw, str) else {})
+        except Exception as e:
+            logger.debug("[%s] Could not re-read the code screen: %s", label, e)
+            return False
+
+    async def _fill_totp(self, label: str, otp_key: str) -> bool:
+        """Auto-enter the authenticator (TOTP) code from the store's own secret."""
+        logger.debug("[%s] Entering the two-factor code from your authenticator secret.", label)
+        self._last_totp = await self._fresh_totp(otp_key, self._last_totp)
+        return await self._type_otp(label, self._last_totp)
+
     async def _fill_backup_code(self, label: str, codes: list, used_name: str) -> bool:
-        """Spend one recovery code, the way gog.py does: first unused, then remember it."""
-        used_file = cfg._data_dir / used_name
-        used = used_file.read_text("utf-8").splitlines() if used_file.exists() else []
-        raw_code = next((c for c in codes if c not in used), None)
-        if not raw_code:
+        """Spend one recovery code, the way epic.py and gog.py do: first unused, then remember it."""
+        code = self._next_unused_code(codes, used_name)
+        if not code:
             logger.warning("[%s] Every recovery code has been used already.", label)
             return False
 
@@ -559,31 +628,12 @@ class GamerPowerClaimer(BaseClaimer):
             if not needs_otp(json.loads(raw) if isinstance(raw, str) else {}):
                 logger.debug("[%s] No code box after opening the recovery screen.", label)
                 return False
-            field = await self.page.select(OTP_FIELD, timeout=8)
-            if not field:
-                return False
-            await field.click()
-            await self.sleep(0.4)
-            await field.send_keys(raw_code.replace("-", "").replace(" ", ""))
-            await self.sleep(0.6)
-            await self.page.evaluate("""
-                (() => {
-                    const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-                    const b = [...document.querySelectorAll('button, input[type="submit"]')].filter(vis)
-                        .find(x => /^(log ?in|verify|continue|submit|sign ?in)$/i
-                            .test(((x.innerText || x.value || '')).trim()));
-                    if (b) b.click();
-                })()
-            """)
-            await self.sleep(6)
         except Exception as e:
-            logger.debug("[%s] Could not enter the recovery code: %s", label, e)
+            logger.debug("[%s] Could not read the recovery screen: %s", label, e)
             return False
-
-        # Written even when the login still fails: the site has seen the code either way.
-        with used_file.open("a", encoding="utf-8") as fh:
-            print(raw_code, file=fh)
-        logger.info("[%s] Used one recovery code, %d left.", label, max(0, len(codes) - len(used) - 1))
+        if not await self._type_otp(label, code.replace("-", "").replace(" ", "")):
+            return False
+        self._mark_code_used(code, used_name, codes)
         return True
 
     async def _clear_challenge(self, label: str) -> bool:
@@ -591,7 +641,7 @@ class GamerPowerClaimer(BaseClaimer):
         if not await self._human_challenge_present():
             return True
         logger.warning("[%s] A human check appeared during the claim.", label)
-        return await self._wait_out_challenge(label)
+        return await self._wait_out_challenge(label, store_key=side_store_key(label))
 
     async def _fanatical_signed_in(self) -> bool:
         """Signed in when no Sign in control is left on the page.
@@ -759,12 +809,13 @@ class GamerPowerClaimer(BaseClaimer):
                     await self._fanatical_login(email, password)
                     # Two-factor codes are typed by you over VNC: Fanatical hands out no
                     # recovery codes, so there is nothing worth keeping in .env.
-                    if not await self._confirm_side_login("Fanatical", self._fanatical_signed_in):
+                    if not await self._confirm_side_login("Fanatical", self._fanatical_signed_in,
+                                                          credentials=(email, password)):
                         return
                     self._log_side_signed_in("Fanatical", email)
                 else:
                     logger.warning("[Fanatical] No credentials set (FANATICAL_EMAIL/PASSWORD). Waiting for VNC...")
-                    if not await self._wait_for_vnc_login(self._fanatical_signed_in):
+                    if not await self._wait_for_vnc_login(self._fanatical_signed_in, store_key="fanatical"):
                         return
 
             current_url = str(await self.page.evaluate("window.location.href") or "")
@@ -876,6 +927,69 @@ class GamerPowerClaimer(BaseClaimer):
     # ─────────────────────────────────────────────────────────────────────
     # Itch.io
     # ─────────────────────────────────────────────────────────────────────
+    async def _submit_itch_credentials(self, email: str, password: str) -> None:
+        """Fill itch.io's sign-in form and send it."""
+        js_email = json.dumps(email)
+        js_password = json.dumps(password)
+        await self.page.evaluate(f'''
+            (() => {{
+                const emailInp = document.querySelector('input[name="username"], input[type="email"]');
+                const passInp = document.querySelector('input[name="password"], input[type="password"]');
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                if (emailInp) {{
+                    setter.call(emailInp, {js_email});
+                    emailInp.dispatchEvent(new Event("input", {{bubbles: true}}));
+                }}
+                if (passInp) {{
+                    setter.call(passInp, {js_password});
+                    passInp.dispatchEvent(new Event("input", {{bubbles: true}}));
+                }}
+                const submit = document.querySelector('button[type="submit"]')
+                    || [...document.querySelectorAll('button')]
+                        .find(b => (b.textContent || '').toLowerCase().includes('log in'));
+                if (submit) submit.click();
+            }})()
+        ''')
+        await self.sleep(5)
+
+    async def _itch_session_ready(self) -> bool:
+        """Sign in to itch.io once per run, judged on itch.io itself.
+
+        A creator's own subdomain shows no sign-in link, so asking the game page whether a
+        login is needed answered "no" while signed out, and every check after it was wrong.
+        """
+        if self._itch_session_ok:
+            return True
+
+        await self.page.get("https://itch.io/")
+        await self.sleep(3)
+        if await self._itch_logged_in():
+            self._itch_session_ok = True
+            return True
+
+        email = cfg.itchio_email
+        password = cfg.itchio_password
+        if not (email and password):
+            logger.warning("[Itch.io] No credentials set (ITCHIO_EMAIL/PASSWORD). Waiting for VNC...")
+            self._itch_session_ok = await self._wait_for_vnc_login(self._itch_logged_in, store_key="itchio")
+            return self._itch_session_ok
+
+        logger.info("[Itch.io] Logging in as %s…", mask_account(email))
+        await self.page.get("https://itch.io/login")
+        await self.sleep(3)
+        await self._submit_itch_credentials(email, password)
+
+        # A code screen or a rejected password used to pass silently from here.
+        if not await self._confirm_side_login(
+                "Itch.io", self._itch_logged_in,
+                backup_codes=cfg.itchio_otp_codes,
+                backup_file="used_itchio_codes.txt", otp_key=cfg.itchio_otp_key,
+                credentials=(email, password)):
+            return False
+        self._log_side_signed_in("Itch.io", email)
+        self._itch_session_ok = True
+        return True
+
     async def _claim_itchio_game(self, game: dict) -> None:
         title = game.get("title", "Unknown")
         url = game.get("final_url") or game.get("url", "")
@@ -886,14 +1000,15 @@ class GamerPowerClaimer(BaseClaimer):
         self.notify_games.append(notify_game)
 
         try:
-            # The host alone is not enough: staying on the previous game's page made every
-            # later giveaway inherit its "you own this" banner.
-            current_url = str(await self.page.evaluate("window.location.href") or "")
-            if not current_url.startswith(url):
-                await self.page.get(url)
-                await self.sleep(4)
+            # Signing in is decided on itch.io itself and done once per run.
+            if not await self._itch_session_ready():
+                return
 
-            # Check if already owned
+            # Staying on the previous game's page made every later giveaway inherit its banner.
+            await self.page.get(url)
+            await self.sleep(4)
+
+            # A signed-out page never shows the ownership banner, so this waits for the session.
             if await self._itch_owns_this():
                 logger.info("[Itch.io] '%s' already owned.", title)
                 if cfg.dryrun:
@@ -908,63 +1023,6 @@ class GamerPowerClaimer(BaseClaimer):
                     await session.commit()
                 notify_game["status"] = "existed"
                 return
-
-            # Check if login needed
-            needs_login = await self.page.evaluate("""
-                (() => {
-                    const links = [...document.querySelectorAll('a')];
-                    return links.some(a => {
-                        const t = (a.textContent || '').trim().toLowerCase();
-                        const href = (a.getAttribute('href') || '').toLowerCase();
-                        return t === 'log in' || t === 'sign in' || href.includes('/login');
-                    });
-                })()
-            """)
-
-            if needs_login:
-                email = cfg.itchio_email
-                password = cfg.itchio_password
-                if email and password:
-                    logger.info("[Itch.io] Logging in as %s…", mask_account(email))
-                    await self.page.get("https://itch.io/login")
-                    await self.sleep(3)
-
-                    js_email = json.dumps(email)
-                    js_password = json.dumps(password)
-                    await self.page.evaluate(f'''
-                        (() => {{
-                            const emailInp = document.querySelector('input[name="username"], input[type="email"]');
-                            const passInp = document.querySelector('input[name="password"], input[type="password"]');
-                            if (emailInp) {{
-                                let setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                                if(setter) {{ setter.call(emailInp, {js_email}); emailInp.dispatchEvent(new Event("input", {{bubbles: true}})); }}
-                            }}
-                            if (passInp) {{
-                                let setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                                if(setter) {{ setter.call(passInp, {js_password}); passInp.dispatchEvent(new Event("input", {{bubbles: true}})); }}
-                            }}
-                            const submit = document.querySelector('button[type="submit"]') ||
-                                [...document.querySelectorAll('button')].find(b => (b.textContent || '').toLowerCase().includes('log in'));
-                            if (submit) submit.click();
-                        }})()
-                    ''')
-                    await self.sleep(5)
-
-                    # A code screen or a rejected password used to pass silently from here.
-                    if not await self._confirm_side_login(
-                            "Itch.io", self._itch_logged_in,
-                            backup_codes=cfg.itchio_otp_codes if cfg.itchio_otp_enable else None,
-                            backup_file="used_itchio_codes.txt"):
-                        return
-                    self._log_side_signed_in("Itch.io", email)
-
-                    # Navigate back to game page
-                    await self.page.get(url)
-                    await self.sleep(4)
-                else:
-                    logger.warning("[Itch.io] No credentials set (ITCHIO_EMAIL/PASSWORD). Waiting for VNC...")
-                    if not await self._wait_for_vnc_login(self._itch_logged_in):
-                        return
 
             # Try to claim: click "Download or Claim" or "Claim" button
             if cfg.dryrun:
@@ -1038,21 +1096,8 @@ class GamerPowerClaimer(BaseClaimer):
                 return
 
             # Check if login needed
-            needs_login = await self.page.evaluate("""
-                (() => {
-                    const btns = [...document.querySelectorAll('a, button')];
-                    return btns.some(b => {
-                        const t = (b.textContent || '').trim().toLowerCase();
-                        return t === 'login' || t === 'sign in' || t === 'log in';
-                    }) || !document.querySelector('.user-menu, .user-avatar, .profile-link');
-                })()
-            """)
-
-            if needs_login:
-                async def _ig_logged_in() -> bool:
-                    txt = await self.page.evaluate("(document.body?.innerText || '').toLowerCase()")
-                    return 'add to library' in txt or 'in your library' in txt
-
+            # One check decides, so detection and confirmation cannot drift apart (issue #47).
+            if not await self._ig_logged_in():
                 email = cfg.indiegala_email
                 password = cfg.indiegala_password
                 if email and password:
@@ -1081,7 +1126,8 @@ class GamerPowerClaimer(BaseClaimer):
                     ''')
                     await self.sleep(6)
 
-                    if not await self._confirm_side_login("IndieGala", _ig_logged_in):
+                    if not await self._confirm_side_login("IndieGala", self._ig_logged_in,
+                                                          credentials=(email, password)):
                         return
                     self._log_side_signed_in("IndieGala", email)
 
@@ -1090,7 +1136,7 @@ class GamerPowerClaimer(BaseClaimer):
                     await self.sleep(4)
                 else:
                     logger.warning("[IndieGala] No credentials set (INDIEGALA_EMAIL/PASSWORD). Waiting for VNC...")
-                    if not await self._wait_for_vnc_login(_ig_logged_in):
+                    if not await self._wait_for_vnc_login(self._ig_logged_in, store_key="indiegala"):
                         return
 
             # Try to click claim / add-to-library button
@@ -1142,8 +1188,8 @@ class GamerPowerClaimer(BaseClaimer):
             logger.exception("[IndieGala] Error claiming '%s'", title)
 
 
-async def claim_gamerpower() -> dict:
-    """Entry point for testing and execution."""
+async def claim_side_stores(routed: dict | None = None) -> dict:
+    """Entry point for the sites that have no store module of their own."""
     claimer = GamerPowerClaimer()
-    await claimer.run()
+    await claimer.run(routed)
     return {"store": "GamerPower", "user": None, "games": claimer.notify_games}

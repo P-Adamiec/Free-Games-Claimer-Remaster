@@ -28,12 +28,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 from src.core.config import cfg, settings_warnings
 from src.core.claimer import mask_account
 from src.core.database import init_db
+from src.core.run_state import reset_run_state, waiting_for_you
 from src.core.selection import apply_run_selection
 from src.core.updates import notify_if_update_available
 from src.stores.aliexpress import claim_aliexpress
 from src.stores.epic import claim_epic
 from src.stores.epic_fab import claim_fab
-from src.stores.gamerpower import claim_gamerpower
+from src.stores.gamerpower import claim_side_stores, discover_giveaways
 from src.stores.gog import claim_gog
 from src.stores.prime import claim_prime
 from src.stores.steam import claim_steam
@@ -112,14 +113,27 @@ ALL_CLAIMERS: dict[str, tuple[str, object]] = {
     "gog":        ("GOG",          claim_gog),
     "ubisoft":    ("Ubisoft",      claim_ubisoft),
     "unity":      ("Unity",        claim_unity),
-    "gamerpower": ("GamerPower",   claim_gamerpower),
     "aliexpress": ("AliExpress",   claim_aliexpress),
+}
+
+# Sites with no module of their own: GamerPower claims them, but they are chosen like any store.
+# Each one needs an account there, so none of them runs unless STORES names it.
+SIDE_STORES: tuple[str, ...] = ("itchio", "fanatical", "indiegala", "alienware")
+
+# Stores GamerPower hands its finds to. Naming one of these is reason enough to ask GamerPower.
+GP_TARGETS: tuple[str, ...] = ("steam", "epic", "gog")
+
+# The old switch for each side store, honoured for one more release.
+_LEGACY_SIDE_FLAGS: dict[str, str] = {
+    "itchio": "itchio_enable",
+    "fanatical": "fanatical_enable",
+    "indiegala": "indiegala_enable",
+    "alienware": "alienware_enable",
 }
 
 # What runs when neither the CLI nor STORES names anything. GamerPower goes last so the
 # stores with their own module claim first and its database dedup can do its job.
-DEFAULT_STORES: list[str] = ["steam", "epic", "fab", "prime", "gog", "ubisoft",
-                             "aliexpress", "gamerpower"]
+DEFAULT_STORES: list[str] = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress"]
 
 # Display name (e.g. "Prime Gaming") → canonical store key (e.g. "prime").
 _DISPLAY_TO_KEY: dict[str, str] = {disp: key for key, (disp, _) in ALL_CLAIMERS.items()}
@@ -148,10 +162,20 @@ _ALIASES: dict[str, str] = {
     "ubi":           "ubisoft",
     "unity":         "unity",
     "unity-assets":  "unity",
-    "gamerpower":    "gamerpower",
-    "gp":            "gamerpower",
     "aliexpress":    "aliexpress",
     "ae":            "aliexpress",
+    "itchio":        "itchio",
+    "itch":          "itchio",
+    "itch.io":       "itchio",
+    "fanatical":     "fanatical",
+    "indiegala":     "indiegala",
+    "indie-gala":    "indiegala",
+    "alienware":     "alienware",
+    "alienware-arena": "alienware",
+    "awa":           "alienware",
+    # GamerPower is no longer a store of its own, see _resolve_stores().
+    "gamerpower":    "gamerpower",
+    "gp":            "gamerpower",
 }
 
 _FIXED_TIME_RE = re.compile(r"^\d{2}:\d{2}$")
@@ -215,6 +239,22 @@ def _scheduler_timezone() -> ZoneInfo:
         raise SystemExit(2) from exc
 
 
+def _selectable() -> list[str]:
+    """Every name STORES accepts: a store with a module, and a site GamerPower claims."""
+    return list(ALL_CLAIMERS) + list(SIDE_STORES)
+
+
+def _legacy_side_stores() -> list[str]:
+    """Side stores still switched on the old way, with one line telling you what replaced it."""
+    picked = []
+    for key, field in _LEGACY_SIDE_FLAGS.items():
+        if getattr(cfg, field, False):
+            picked.append(key)
+            logger.warning("%s=true still works, but stores are chosen with STORES=...,%s now.",
+                           field.upper(), key)
+    return picked
+
+
 def _resolve_stores(raw: list[str]) -> list[str]:
     """Resolve a list of user-provided store names to canonical keys."""
     resolved = []
@@ -222,7 +262,15 @@ def _resolve_stores(raw: list[str]) -> list[str]:
         key = _ALIASES.get(name.lower().strip())
         if key is None:
             logger.warning("Unknown store '%s' – ignoring. Valid: %s",
-                           name, ", ".join(ALL_CLAIMERS.keys()))
+                           name, ", ".join(_selectable()))
+            continue
+        if key == "gamerpower":
+            # GamerPower is a source now: its finds go to the store they belong to.
+            logger.warning("'gamerpower' is not a store any more. Its finds go to the store they "
+                           "belong to, so name the stores you want: STORES=steam,epic,itchio")
+            for legacy in _legacy_side_stores():
+                if legacy not in resolved:
+                    resolved.append(legacy)
             continue
         if key not in resolved:
             resolved.append(key)
@@ -234,18 +282,18 @@ def _warn_about_settings() -> None:
     for line in settings_warnings():
         name = line.split(" ", 1)[0].split("=", 1)[0]
         hint = ""
-        if name.endswith("_ENABLE") and _ALIASES.get(name[:-7].lower()) in ALL_CLAIMERS:
+        if name.endswith("_ENABLE") and _ALIASES.get(name[:-7].lower()) in _selectable():
             hint = " Stores are chosen with STORES=..., there is no switch of its own for this one."
         logger.warning("%s%s", line, hint)
 
-    unknown = sorted(cfg.notify_skip_stores - set(ALL_CLAIMERS))
+    unknown = sorted(cfg.notify_skip_stores - set(_selectable()) - {"gamerpower"})
     if unknown:
         logger.warning("NOTIFY_SKIP_STORES names %s, which is not a store, so nothing is silenced there. "
                        "Valid: %s", ", ".join(unknown), ", ".join(ALL_CLAIMERS))
 
 
-def _get_active_claimers() -> list[tuple[str, object]]:
-    """Determine which claimers to run based on CLI args / STORES env var.
+def _selected_stores() -> list[str]:
+    """Which store keys this run was asked for.
 
     Priority:
       1. CLI positional args  (e.g.  ``python main.py steam prime``)
@@ -260,12 +308,17 @@ def _get_active_claimers() -> list[tuple[str, object]]:
     elif cfg.stores:
         selected = _resolve_stores([s for s in cfg.stores.split(",") if s.strip()])
     else:
-        selected = list(DEFAULT_STORES)
+        selected = list(DEFAULT_STORES) + _legacy_side_stores()
 
-    # Published so GamerPower only delegates to stores this run actually starts.
+    # Published so a side store only runs when this run asked for it.
     apply_run_selection(selected)
     logger.debug("Store selection: cli=%s STORES=%r -> %s", cli_stores, cfg.stores, selected)
-    return [(ALL_CLAIMERS[k][0], ALL_CLAIMERS[k][1]) for k in selected if k in ALL_CLAIMERS]
+    return selected
+
+
+def _get_active_claimers(selected: list[str]) -> list[tuple[str, str, object]]:
+    """Key, display name and entry point for every store with a module of its own."""
+    return [(k, ALL_CLAIMERS[k][0], ALL_CLAIMERS[k][1]) for k in selected if k in ALL_CLAIMERS]
 
 
 def _print_banner() -> None:
@@ -298,24 +351,34 @@ def _print_banner() -> None:
 
 async def run_claimers() -> None:
     """Run selected claimers sequentially (they each open their own browser)."""
-    claimers = _get_active_claimers()
+    # Each run starts fresh: a store that was waiting for you hours ago gets another chance.
+    reset_run_state()
+    selected = _selected_stores()
+    claimers = _get_active_claimers(selected)
+    sides = [key for key in selected if key in SIDE_STORES]
 
-    if not claimers:
+    if not claimers and not sides:
         logger.warning("No valid stores selected. Nothing to do.")
         return
 
-    store_names = [name for name, _ in claimers]
-    logger.info("🎮 Starting claiming run… %s", ", ".join(store_names))
+    store_names = [name for _, name, _ in claimers]
+    logger.info("🎮 Starting claiming run… %s", ", ".join(store_names + sides))
 
     # Long-running containers never restart, so this is the only place they'd hear about a release.
     await notify_if_update_available()
 
+    # GamerPower first: it finds giveaways, the stores below claim them. One pass, and only
+    # when something in this run can use it.
+    routed: dict = {}
+    if sides or any(key in GP_TARGETS for key in selected):
+        routed = await discover_giveaways()
+
     aggregated_results = []
 
-    for name, func in claimers:
+    for key, name, func in claimers:
         try:
             logger.debug("▶ Running %s claimer…", name)
-            res = await func()
+            res = await func(routed.get(key)) if key in GP_TARGETS else await func()
             if isinstance(res, dict):
                 logger.debug("%s returned %d game entr(ies): %s", name, len(res.get("games") or []), res.get("games"))
             if isinstance(res, dict) and res.get("games"):
@@ -364,6 +427,15 @@ async def run_claimers() -> None:
         except Exception:
             logger.exception("Failed to run post-claim GOG code redemption")
 
+    # Last: the sites with no module of their own, all in one browser window.
+    if sides and routed:
+        try:
+            res = await claim_side_stores(routed)
+            if isinstance(res, dict) and res.get("games"):
+                aggregated_results.append(res)
+        except Exception:
+            logger.exception("✗ GamerPower side stores crashed")
+
     # Final Summary Notification
     if cfg.notify_summary and aggregated_results:
         from src.core.notifier import format_game_list
@@ -382,6 +454,8 @@ async def run_claimers() -> None:
                 and (keep_owned or "already" not in g["status"].lower())
                 and (keep_owned or "skip" not in g["status"].lower() or "dry run" in g["status"].lower())
                 and (cfg.notify_claim_fails or "fail" not in g["status"].lower())
+                and (cfg.notify_missing_base or "missing_base" not in g["status"].lower())
+                and (cfg.notify_download_only or "download" not in g["status"].lower())
             ]
             
             if not relevant_games:
@@ -393,6 +467,13 @@ async def run_claimers() -> None:
             header = f"**{result['store']}** ({account}):" if account else f"**{result['store']}**:"
             msg_parts.append(f"{header}\n{format_game_list(relevant_games)}")
             
+        # Kept out of the per-store lists: the summary filter drops anything that says "skipped".
+        stuck = waiting_for_you()
+        if stuck:
+            lines = [f"**{name.title()}**: waiting for you, {count} skipped"
+                     for name, count in sorted(stuck.items())]
+            msg_parts.append("🙋 Needed you:\n" + "\n".join(lines))
+
         if msg_parts:
             final_msg = "\n\n".join(msg_parts)
             if cfg.dryrun:

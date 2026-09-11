@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from src.stores.gamerpower import (
-    download_only_status,COVERED_ELSEWHERE, GamerPowerClaimer, classify_target,
-                                   fanatical_game_id, is_wanted, itch_game_id,
-                                   login_help_message, needs_otp, wanted_types)
+from src.stores.gamerpower import (COVERED_ELSEWHERE, GamerPowerClaimer, classify_target,
+                                   download_only_status, fanatical_game_id, is_product_page,
+                                   is_wanted, itch_game_id, login_help_message, needs_otp,
+                                   wanted_types)
 
 
 class TestRoutingByHost:
@@ -103,25 +103,22 @@ class TestCoveredElsewhere:
 class TestProductPageFilter:
     """A giveaway that resolves to a storefront banner is not a claimable page."""
 
-    FILTER = staticmethod(GamerPowerClaimer._product_pages)
-
-    def test_steam_app_and_sub_pages_pass(self):
-        games = [
-            {"title": "A", "final_url": "https://store.steampowered.com/app/1/a/"},
-            {"title": "B", "final_url": "https://store.steampowered.com/sub/2/"},
-        ]
-        assert self.FILTER(games, ("/app/", "/sub/"), "Steam") == games
+    @pytest.mark.parametrize("url", [
+        "https://store.steampowered.com/app/1/a/",
+        "https://store.steampowered.com/sub/2/",
+    ])
+    def test_steam_app_and_sub_pages_pass(self, url):
+        assert is_product_page("steam", url)
 
     def test_steam_landing_pages_are_dropped(self):
-        games = [{"title": "A", "final_url": "https://store.steampowered.com/"}]
-        assert self.FILTER(games, ("/app/", "/sub/"), "Steam") == []
+        assert not is_product_page("steam", "https://store.steampowered.com/")
 
-    def test_epic_product_and_bundle_pages_pass(self):
-        games = [
-            {"title": "A", "final_url": "https://store.epicgames.com/en-US/p/game"},
-            {"title": "B", "final_url": "https://store.epicgames.com/en-US/bundles/pack"},
-        ]
-        assert self.FILTER(games, ("/p/", "/bundles/"), "Epic") == games
+    @pytest.mark.parametrize("url", [
+        "https://store.epicgames.com/en-US/p/game",
+        "https://store.epicgames.com/en-US/bundles/pack",
+    ])
+    def test_epic_product_and_bundle_pages_pass(self, url):
+        assert is_product_page("epic", url)
 
     @pytest.mark.parametrize("url", [
         "https://store.epicgames.com/en-US/browse",
@@ -129,15 +126,10 @@ class TestProductPageFilter:
         "",
     ])
     def test_epic_non_product_pages_are_dropped(self, url):
-        assert self.FILTER([{"title": "A", "final_url": url}], ("/p/", "/bundles/"), "Epic") == []
+        assert not is_product_page("epic", url)
 
-    def test_the_good_ones_survive_a_mixed_batch(self):
-        games = [
-            {"title": "keep", "final_url": "https://store.epicgames.com/en-US/p/game"},
-            {"title": "drop", "final_url": "https://store.epicgames.com/en-US/browse"},
-        ]
-        kept = self.FILTER(games, ("/p/", "/bundles/"), "Epic")
-        assert [g["title"] for g in kept] == ["keep"]
+    def test_a_site_with_no_rule_is_left_alone(self):
+        assert is_product_page("itchio", "https://itch.io/s/anything")
 
 
 class TestTwoFactorDetection:
@@ -214,11 +206,13 @@ class TestSideStoreNavigation:
             assert host not in self.SOURCE, f"the host-only navigation guard is back: {host}"
 
     def test_every_side_store_compares_the_whole_url(self):
-        assert self.SOURCE.count("current_url.startswith(url)") == 4
+        # Itch.io is not among them any more: it always reloads the game page after signing in.
+        assert self.SOURCE.count("current_url.startswith(url)") == 3
 
     def test_a_dry_run_cannot_record_ownership(self):
         # The existed branch used to write to the database before the dry-run guard.
-        owned_branch = self.SOURCE.split("async def _claim_itchio_game", 1)[1].split("needs_login", 1)[0]
+        body = self.SOURCE.split("async def _claim_itchio_game", 1)[1]
+        owned_branch = body.split("_itch_owns_this()", 1)[1].split("_itch_run_claim(", 1)[0]
         assert "if cfg.dryrun:" in owned_branch
         assert owned_branch.index("if cfg.dryrun:") < owned_branch.index("async_session()")
 
@@ -295,20 +289,29 @@ class TestRecoveryCodeHandling:
     BLOCK = SOURCE.split("async def _fill_backup_code", 1)[1].split("async def _clear_challenge", 1)[0]
 
     def test_it_picks_the_first_unused_code(self):
-        assert "next((c for c in codes if c not in used)" in self.BLOCK
+        assert "self._next_unused_code(codes, used_name)" in self.BLOCK
 
     def test_it_records_the_code_it_spent(self):
-        assert "used_file.open(" in self.BLOCK and "print(raw_code, file=fh)" in self.BLOCK
+        assert "self._mark_code_used(code, used_name, codes)" in self.BLOCK
 
-    def test_it_uses_the_same_data_folder_as_gog(self):
-        assert "cfg._data_dir / used_name" in self.BLOCK
+    def test_it_keeps_no_second_copy_of_the_bookkeeping(self):
+        # One implementation lives in BaseClaimer; this file used to hold a second.
+        assert "used_file" not in self.BLOCK
 
     def test_exhausted_codes_do_not_crash_the_run(self):
         assert "Every recovery code has been used already" in self.BLOCK
 
     def test_itch_passes_its_codes_only_when_switched_on(self):
         call = self.SOURCE.split('"Itch.io", self._itch_logged_in', 1)[1][:300]
-        assert "cfg.itchio_otp_codes if cfg.itchio_otp_enable else None" in call
+        assert "backup_codes=cfg.itchio_otp_codes" in call
+
+    def test_itch_hands_over_its_authenticator_secret_too(self):
+        call = self.SOURCE.split('"Itch.io", self._itch_logged_in', 1)[1][:300]
+        assert "otp_key=cfg.itchio_otp_key" in call
+
+    def test_the_secret_is_tried_before_a_code_is_spent(self):
+        block = self.SOURCE.split("async def _confirm_side_login", 1)[1].split("async def _type_otp", 1)[0]
+        assert block.index("_fill_totp(") < block.index("_fill_backup_code(")
 
 
 class TestLoginHelpMessage:
@@ -392,3 +395,58 @@ class TestDownloadOnlyGiveaways:
         block = self.SOURCE.split("async def _claim_itchio_game", 1)[1].split("async def ", 1)[0]
         assert 'elif walked == "download-only"' in block
         assert "skipped:download-only" in block
+
+
+class TestIndieGalaSignInCheck:
+    """It asked for a manual login even when signed in, because it guessed CSS classes (issue #47)."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "gamerpower.py").read_text(encoding="utf-8")
+
+    def test_the_guessed_classes_are_gone(self):
+        # Checked live: IndieGala uses none of these, so the old check could never say "signed in".
+        for guess in (".user-menu", ".user-avatar", ".profile-link"):
+            assert guess not in self.SOURCE
+
+    def test_one_method_decides(self):
+        block = self.SOURCE.split("async def _claim_indiegala_game", 1)[1].split("\n    async def ", 1)[0]
+        assert "_ig_logged_in()" in block
+        assert "needs_login" not in block
+
+    def test_the_check_reads_links_not_page_text(self):
+        block = self.SOURCE.split("async def _ig_logged_in", 1)[1].split("\n    def ", 1)[0]
+        assert "logout" in block
+        assert "add to library" not in block
+
+
+class TestItchOwnershipIsCheckedSignedIn:
+    """A signed-out itch.io page shows no ownership banner, so the session comes first."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "gamerpower.py")         .read_text(encoding="utf-8")
+    BLOCK = SOURCE.split("async def _claim_itchio_game", 1)[1]         .split("async def _claim_indiegala_game", 1)[0]
+
+    def test_the_session_is_ready_before_anything_is_judged(self):
+        # The first giveaway of a run used to be walked through a claim it already owned.
+        assert self.BLOCK.index("_itch_session_ready()") < self.BLOCK.index("_itch_owns_this()")
+
+    def test_ownership_is_still_checked_before_claiming(self):
+        assert self.BLOCK.index("_itch_owns_this()") < self.BLOCK.index("_itch_run_claim(")
+
+    def test_an_owned_game_is_reported_as_owned(self):
+        owned = self.BLOCK.split("_itch_owns_this()", 1)[1][:400]
+        assert "already owned" in owned and '"existed"' in owned
+
+    def test_being_signed_in_is_judged_on_itchio_itself(self):
+        # A creator's subdomain carries no sign-in link, so the old page-text guess said "no login
+        # needed" while signed out, and every check after it read a signed-out page.
+        session = self.SOURCE.split("async def _itch_session_ready", 1)[1].split('\n    async def ', 1)[0]
+        assert 'page.get("https://itch.io/")' in session
+        assert "_itch_logged_in()" in session
+
+    def test_the_session_is_only_established_once(self):
+        session = self.SOURCE.split("async def _itch_session_ready", 1)[1].split('\n    async def ', 1)[0]
+        assert "if self._itch_session_ok:" in session
+        assert "self._itch_session_ok = True" in session
+
+    def test_the_old_guess_is_gone(self):
+        # Fanatical keeps its own check, it reads a prompt that names the site.
+        assert "needs_login" not in self.BLOCK
