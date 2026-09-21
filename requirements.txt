@@ -8,7 +8,7 @@ psutil>=7.2.2
 browserforge>=1.2.4
 
 # Database
-sqlalchemy[asyncio]>=2.0.52
+sqlalchemy[asyncio]>=2.0.54
 aiosqlite>=0.22.1
 
 # Notifications
@@ -20,7 +20,7 @@ tenacity>=9.1.4
 
 # Scheduler
 APScheduler>=3.11.3
-tzdata>=2026.3
+tzdata>=2026.4
 
 # OTP / 2FA
 pyotp>=2.10.0
