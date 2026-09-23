@@ -119,6 +119,25 @@ class TestRealFeed:
         assert len(parse_free_games(_page(REAL_FEED, blocks=3), now=NOW)) == 1
 
 
+class TestTheTypeUbisoftUsesToday:
+    """Seen live on 22.09.2026: the For Honor giveaway arrived with type "Giveaway"."""
+
+    NEW_TYPE = dict(GIVEAWAY, type="Giveaway", title="For Honor Giveaway",
+                    links=[{"type": "External", "param": "https://register.ubisoft.com/for-honor"}])
+
+    def test_the_new_type_is_claimed(self):
+        found = parse_free_games(_page([self.NEW_TYPE]), now=NOW)
+        assert [g["title"] for g in found] == ["For Honor Giveaway"]
+
+    def test_the_spelling_does_not_matter(self):
+        loud = dict(self.NEW_TYPE, type="GIVEAWAY ")
+        assert parse_free_games(_page([loud]), now=NOW)
+
+    def test_a_trial_named_one_is_still_refused(self):
+        trial = dict(self.NEW_TYPE, title="For Honor Trial")
+        assert parse_free_games(_page([trial]), now=NOW) == []
+
+
 class TestPromoWindow:
     def test_expired_giveaway_is_ignored(self):
         assert parse_free_games(_page([GIVEAWAY]), now=datetime(2026, 8, 14, 0, 0)) == []
@@ -224,3 +243,23 @@ class TestNotificationVocabulary:
         titles = re.findall(r'self\._vnc_notice\(\s*"([^"]+)"', self.SOURCE)
         assert titles, "no VNC prompts found, the scan stopped matching"
         assert all(t.startswith("Ubisoft: ") for t in titles), titles
+
+
+class TestWelcomeBack:
+    """A remembered account opens on "Welcome back!" with only Continue, seen live on 23.09."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "ubisoft.py").read_text(encoding="utf-8")
+    SCRIPT = SOURCE.split("WELCOME_BACK_JS = ", 1)[1].split('"""', 2)[1]
+    LOGIN = SOURCE.split("async def _do_login", 1)[1].split("\n    async def ", 1)[0]
+
+    def test_it_is_answered_before_the_form_is_required(self):
+        # Waiting for the e-mail field on that screen used to end in a VNC call for a single click.
+        assert self.LOGIN.index("_continue_remembered_account()") < self.LOGIN.index('find("#AuthEmail"')
+
+    def test_only_continue_is_pressed_and_only_without_a_form(self):
+        assert "#AuthEmail, #AuthPassword" in self.SCRIPT
+        assert "continue" in self.SCRIPT
+        assert "not you" not in self.SCRIPT.lower()
+
+    def test_a_prefilled_address_is_not_typed_twice(self):
+        assert "_email_field_empty()" in self.LOGIN

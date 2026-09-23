@@ -385,9 +385,11 @@ class EpicGamesClaimer(BaseClaimer):
                 except Exception:
                     pass
 
-                # Captcha/challenge can't be auto-solved, stop retrying and hand off to VNC below.
+                # A check is yours to clear, and then the bot sends the filled form itself.
                 if wait_sec >= 4 and await self._human_challenge_present():
                     logger.warning("Captcha / security challenge detected during Epic login.")
+                    if await self._wait_out_challenge("Epic", store_key=self.store_name)                             and await self._press_sign_in():
+                        continue
                     challenge_blocked = True
                     break
 
@@ -397,8 +399,8 @@ class EpicGamesClaimer(BaseClaimer):
             if not mfa_manual and await self._mfa_prompt_present():
                 mfa_manual = True
 
-            # On a manual-code screen, don't navigate away, hand off to VNC below.
-            if mfa_manual:
+            # A code screen or a captcha is yours to finish, so the page is left exactly as it stands.
+            if mfa_manual or challenge_blocked:
                 break
 
             # verify success
@@ -408,9 +410,6 @@ class EpicGamesClaimer(BaseClaimer):
                 self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
                 self.log_signed_in()
                 return True
-
-            if challenge_blocked:
-                break  # retrying won't clear a captcha – go straight to VNC help
 
         # Automated login failed (captcha/2FA/repeated), notify and wait for the user to finish via VNC.
         if mfa_manual:
@@ -547,6 +546,17 @@ class EpicGamesClaimer(BaseClaimer):
             await self.page.evaluate(f"window.location.href = '{URL_LOGIN}'")
         except Exception:
             await self.page.get(URL_LOGIN)
+
+    async def _press_sign_in(self) -> bool:
+        """Send the sign-in form again, for when a human check interrupted one you had filled."""
+        button = await self.page.select("#sign-in", timeout=5) or await self.page.find("Sign in", timeout=4)
+        if not button:
+            logger.debug("No sign-in button came back after the check.")
+            return False
+        logger.info("Human check cleared, finishing the sign-in.")
+        await button.click()
+        await self.sleep(6)
+        return True
 
     async def _do_stealth_login(self) -> None:
         """Fill in email and password using browser-native methods.

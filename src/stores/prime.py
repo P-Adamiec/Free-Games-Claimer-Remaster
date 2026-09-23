@@ -13,6 +13,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, open_first_tab, now_str, filenamify
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
+from src.core.selection import is_store_active
+from src.stores.microsoft import CODE_STORES as MICROSOFT_CODE_STORES
 
 logger = logging.getLogger("fgc.prime")
 
@@ -1207,9 +1209,13 @@ class PrimeGamingClaimer(BaseClaimer):
             else:
                 logger.info("Redeem '%s' manually on %s (code: %s)", title, store, code)
 
-            # For GOG codes, we'll let GOGClaimer redeem them retroactively using the correct profile!
+            # GOG and Microsoft redeem their own codes after the stores run, but only when they run at all.
             if "gog" in str(store).lower():
-                self.notify_games.append({"title": title, "url": f"https://www.gog.com/redeem/{code}", "status": f"code: {code} (GOG, pending auto-redeem)"})
+                note = "GOG, pending auto-redeem" if is_store_active("gog") else "GOG"
+                self.notify_games.append({"title": title, "url": f"https://www.gog.com/redeem/{code}", "status": f"code: {code} ({note})"})
+            elif str(store).strip().lower() in MICROSOFT_CODE_STORES:
+                note = "Microsoft, pending auto-redeem" if is_store_active("microsoft") else "Microsoft"
+                self.notify_games.append({"title": title, "url": url, "status": f"code: {code} ({note})"})
             else:
                 self.notify_games.append({"title": title, "url": url, "status": f"code: {code} ({store})"})
 

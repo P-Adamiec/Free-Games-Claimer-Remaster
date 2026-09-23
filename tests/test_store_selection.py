@@ -14,7 +14,7 @@ import pytest
 MAIN_PY = Path(__file__).resolve().parent.parent / "main.py"
 SOURCE = MAIN_PY.read_text(encoding="utf-8")
 
-EXPECTED_DEFAULT = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress"]
+EXPECTED_DEFAULT = ["steam", "epic", "fab", "prime", "gog", "microsoft", "ubisoft", "aliexpress"]
 
 
 def _default_stores() -> list[str]:
@@ -99,9 +99,9 @@ class TestRunOrder:
     def test_the_side_stores_come_after_the_gog_codes(self):
         assert self.RUN.index("redeem_pending_codes") < self.RUN.index("claim_side_stores(routed)")
 
-    def test_only_three_stores_take_the_finds(self):
+    def test_only_the_mapped_stores_take_the_finds(self):
         match = re.search(r'^GP_TARGETS.*?=\s*\((.*?)\)', SOURCE, re.S | re.M)
-        assert match and re.findall(r'"([a-z]+)"', match.group(1)) == ["steam", "epic", "gog"]
+        assert match and re.findall(r'"([a-z]+)"', match.group(1)) == ["steam", "epic", "gog", "microsoft"]
 
 
 class TestUnknownSitesStayOff:

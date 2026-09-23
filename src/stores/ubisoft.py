@@ -31,8 +31,8 @@ WWW_HOST = "www.ubisoft.com"
 
 STATE_MARKER = "window.__PRELOADED_STATE__ = "
 FEED_PLACEMENT = "freeevents"
-# Giveaways carry the trial type, so type alone never decides, see the filter below.
-GIVEAWAY_TYPES = ("gametrial",)
+# Giveaways carry the trial type, and lately "Giveaway" as well, so type alone never decides.
+GIVEAWAY_TYPES = ("gametrial", "giveaway")
 # A giveaway is never named after a trial-like offer; "free week" also covers "free weekend".
 SKIP_TOKENS = ("trial", "demo", "beta", "free week", "early access", "test server", "playtest")
 # Trials use a sentinel expiry decades out, a real giveaway runs for days.
@@ -67,6 +67,18 @@ function () {
     target.click();
     return JSON.stringify(true);
 }
+"""
+
+# The same screen on the sign-in page: no form fields, only Continue; "Not you?" is never touched.
+WELCOME_BACK_JS = """
+(() => {
+    if (document.querySelector('#AuthEmail, #AuthPassword')) return false;
+    const b = [...document.querySelectorAll('button')]
+        .find(x => /^(continue|kontynuuj|weiter|continuer)$/i.test((x.innerText || '').trim()));
+    if (!b) return false;
+    b.click();
+    return true;
+})()
 """
 
 
@@ -132,7 +144,7 @@ def _giveaway_reason(entry: dict, now: datetime) -> str:
     """Empty when the entry is a claimable giveaway, otherwise why it was rejected."""
     if entry.get("placement") != FEED_PLACEMENT:
         return f"placement={entry.get('placement')}"
-    if entry.get("type") not in GIVEAWAY_TYPES:
+    if str(entry.get("type") or "").strip().lower() not in GIVEAWAY_TYPES:
         return f"type={entry.get('type')}"
 
     url = _claim_link(entry)
@@ -408,6 +420,34 @@ class UbisoftClaimer(BaseClaimer):
             logger.debug("Could not enter the Ubisoft two-step code: %s", exc)
             return False
 
+    async def _continue_remembered_account(self) -> bool:
+        """Press Continue on 'Welcome back!', which Ubisoft shows instead of the form for a remembered account."""
+        try:
+            pressed = bool(await self.page.evaluate(WELCOME_BACK_JS))
+        except Exception as exc:
+            logger.debug("Could not read the Ubisoft welcome back screen: %s", exc)
+            return False
+        if pressed:
+            logger.debug("Ubisoft remembered the account, pressed Continue.")
+            await self.sleep(4)
+        return pressed
+
+    async def _page_has(self, selector: str) -> bool:
+        """True when the element exists; a page caught mid-redirect counts as not having it."""
+        try:
+            return bool(await self.page.evaluate(f"!!document.querySelector({json.dumps(selector)})"))
+        except Exception:
+            return False
+
+    async def _email_field_empty(self) -> bool:
+        """True when the e-mail field is there and still blank, so a prefilled one is not typed twice."""
+        try:
+            return bool(await self.page.evaluate(
+                '(() => { const e = document.querySelector("#AuthEmail"); return !!e && !e.value; })()'
+            ))
+        except Exception:
+            return False
+
     async def _do_login(self) -> str:
         """Fill the Ubisoft Connect login form. Returns 'ok', 'mfa' or 'failed'."""
         state = await self._page_state()
@@ -424,15 +464,21 @@ class UbisoftClaimer(BaseClaimer):
         if await self._human_challenge_present() and not await self._wait_out_challenge("Ubisoft"):
             return "failed"
 
+        remembered = await self._continue_remembered_account()
+        if remembered and not await self._page_has("#AuthPassword"):
+            # Continue on its own brought the session back.
+            return await self._await_login_outcome()
+
         try:
-            email_input = await self.page.find("#AuthEmail", timeout=15)
-            if not email_input:
-                logger.debug("Ubisoft login form did not render.")
-                return "failed"
-            await email_input.click()
-            await self.sleep(0.8)
-            await email_input.send_keys(cfg.ubi_email.strip())
-            await self.sleep(0.5)
+            if not remembered or await self._email_field_empty():
+                email_input = await self.page.find("#AuthEmail", timeout=15)
+                if not email_input:
+                    logger.debug("Ubisoft login form did not render.")
+                    return "failed"
+                await email_input.click()
+                await self.sleep(0.8)
+                await email_input.send_keys(cfg.ubi_email.strip())
+                await self.sleep(0.5)
 
             password_input = await self.page.find("#AuthPassword", timeout=10)
             if not password_input:

@@ -114,6 +114,9 @@ ENV NOVNC_PORT=7080
 EXPOSE 7080
 
 # ── Display settings (virtual screen resolution for the browser) ──
+# DISPLAY belongs here as well as in the entrypoint, so a command you run with
+# "docker exec" later also finds the screen instead of failing to start Chrome.
+ENV DISPLAY=:1
 ENV WIDTH=1280
 ENV HEIGHT=720
 ENV DEPTH=24

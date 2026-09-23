@@ -91,69 +91,36 @@ class GOGClaimer(BaseClaimer):
         await self.sleep(1)
 
         async def _is_logged_in() -> bool:
-            """Check if the user is logged in by looking at the page content.
-            
-            We try multiple methods because GOG's layout changes frequently:
-            1. Look for the account menu button (shows username when logged in)
-            2. Look for a username displayed anywhere on the page
-            3. Check if a "Sign in" link exists (means NOT logged in)
-            4. Check if an avatar image exists (means logged in)
-            """
-            result_raw = await self.page.evaluate(
+            """Ask GOG's account menu who is signed in, the page itself cannot tell you."""
+            # gog.com ships the same markup signed in or out (issue #38), so the page cannot be trusted.
+            raw = await self.page.evaluate(
                 """
-                JSON.stringify((() => {
-                    // Strategy 1: menuAccountButton with textContent
-                    const menuBtn = document.querySelector('[hook-test="menuAccountButton"]');
-                    const menuText = menuBtn ? (menuBtn.textContent || '').trim() : '';
-
-                    // Strategy 2: look for GOG username in various known selectors
-                    const usernameEl = document.querySelector('.menu-username')
-                        || document.querySelector('.menu-user-name')
-                        || document.querySelector('[class*="username"]')
-                        || document.querySelector('[class*="user-name"]')
-                        || document.querySelector('[class*="account"] [class*="name"]');
-                    const usernameText = usernameEl ? (usernameEl.textContent || '').trim() : '';
-
-                    // Strategy 3: check if "Sign in" link exists
-                    let hasSignIn = false;
-                    document.querySelectorAll('a').forEach(a => {
-                        const t = (a.textContent || '').trim().toLowerCase();
-                        if (t === 'sign in' || t === 'log in') hasSignIn = true;
-                    });
-
-                    // Strategy 4: check for avatar/logged-in indicator
-                    const avatar = document.querySelector('.menu-avatar, .menu-user-avatar, [class*="avatar"]');
-
-                    // Determine login state
-                    const user = menuText || usernameText || '';
-                    const loggedIn = (user.length > 0) || (!hasSignIn && !!menuBtn);
-
-                    return {
-                        loggedIn,
-                        user,
-                        debug: {
-                            menuBtnExists: !!menuBtn,
-                            menuText,
-                            usernameText,
-                            hasSignIn,
-                            hasAvatar: !!avatar,
-                        },
-                    };
-                })())
-                """
+                (async () => {
+                    try {
+                        const r = await fetch('https://menu.gog.com/v1/account/basic',
+                                              {credentials: 'include', cache: 'no-store'});
+                        const j = await r.json();
+                        return JSON.stringify({loggedIn: !!j.isLoggedIn, user: j.username || ''});
+                    } catch (e) {
+                        return JSON.stringify({error: String(e).slice(0, 120)});
+                    }
+                })()
+                """,
+                await_promise=True,
             )
             try:
-                result = json.loads(result_raw) if isinstance(result_raw, str) else {}
+                result = json.loads(raw) if isinstance(raw, str) else {}
             except (json.JSONDecodeError, TypeError):
                 result = {}
 
-            debug = result.get("debug", {})
-            logger.debug("Login check: menuBtn=%s, menuText='%s', usernameText='%s', hasSignIn=%s, hasAvatar=%s",
-                         debug.get("menuBtnExists"), debug.get("menuText"),
-                         debug.get("usernameText"), debug.get("hasSignIn"), debug.get("hasAvatar"))
+            if result.get("error"):
+                logger.debug("GOG account menu unreachable from this page: %s", result["error"])
+                return False
+            logger.debug("GOG account menu: loggedIn=%s, user='%s'",
+                         result.get("loggedIn"), result.get("user"))
 
             if result.get("loggedIn"):
-                self.user = result.get("user", "") or "GOG User"
+                self.user = str(result.get("user") or "").strip() or "GOG User"
                 return True
             return False
 

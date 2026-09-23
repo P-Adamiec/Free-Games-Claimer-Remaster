@@ -5,6 +5,7 @@ slow first tab used to end the whole store run with "coroutine raised StopIterat
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -84,3 +85,22 @@ class TestOpenFirstTab:
 
 async def _always_fail(*args, **kwargs):
     raise RuntimeError("browser is gone")
+
+
+class TestOneBrowserPerProfile:
+    """A browser left over from an earlier run must go before the new one opens (issue #38)."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "core" / "claimer.py").read_text(encoding="utf-8")
+    # Everything between the seeded preferences and the first launch attempt.
+    BEFORE_LAUNCH = SOURCE.split("Failed to seed Chrome preferences", 1)[1].split("for attempt in range(1, 4):", 1)[0]
+
+    def test_a_leftover_browser_is_closed_before_the_new_one_starts(self):
+        assert "_sweep_orphan_chrome" in self.BEFORE_LAUNCH
+
+    def test_processes_go_before_lock_files(self):
+        # Seen live: deleting the lock first let a second Chrome open on a profile the old one still held.
+        assert self.BEFORE_LAUNCH.index("_sweep_orphan_chrome") < self.BEFORE_LAUNCH.index("_clear_profile_locks")
+
+    def test_the_first_failure_leaves_evidence(self):
+        # A run that recovers on the third attempt used to print nothing about the first two.
+        assert "State at the first failure" in self.SOURCE

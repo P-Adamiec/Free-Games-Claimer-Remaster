@@ -1,7 +1,7 @@
 # free-games-claimer-remaster
 
 <p align="center">
-  <img alt="logo-free-games-claimer" src="https://user-images.githubusercontent.com/493741/214588518-a4c89998-127e-4a8c-9b1e-ee4a9d075715.png" />
+  <img alt="logo-free-games-claimer" src="https://github.com/user-attachments/assets/6d749140-c2a2-45d4-ac73-70b16e74a757" />
 </p>
 
 > **Not a fork** – a complete ground-up Python remaster inspired by [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer). 
@@ -15,10 +15,11 @@ Automatically claims free games on:
 - <img alt="logo epic-games" src="https://github.com/user-attachments/assets/82e9e9bf-b6ac-4f20-91db-36d2c8429cb6" width="20" align="middle" /> **Epic Games Store** – weekly free games, including the weekly free Android/iOS mobile game (`EG_MOBILE`)
 - <img alt="logo fab" src="https://www.google.com/s2/favicons?domain=fab.com&sz=64" width="20" align="middle" /> **Fab** – Epic's asset marketplace
 - <img alt="logo unity" src="https://www.google.com/s2/favicons?domain=unity.com&sz=64" width="20" align="middle" /> **Unity Asset Store** – the weekly free [Publisher of the Week](https://assetstore.unity.com/publisher-sale) asset, coupon and all (opt-in, add `unity` to `STORES`)
-- <img alt="logo prime-gaming" src="https://github.com/user-attachments/assets/7627a108-20c6-4525-a1d8-5d221ee89d6e" width="20" align="middle" /> **Amazon Prime Gaming** – monthly Prime Gaming catalogue + GOG key redemption
+- <img alt="logo prime-gaming" src="https://github.com/user-attachments/assets/7627a108-20c6-4525-a1d8-5d221ee89d6e" width="20" align="middle" /> **Amazon Prime Gaming** – monthly Prime Gaming catalogue + GOG and Microsoft key redemption
 - <img alt="logo gog" src="https://github.com/user-attachments/assets/49040b50-ee14-4439-8e3c-e93cafd7c3a5" width="20" align="middle" /> **GOG** – periodic free giveaways
-- <img alt="logo ubisoft" src="https://www.ubisoft.com/favicon.ico" width="20" align="middle" /> **Ubisoft** – free game giveaways from [ubisoft.com/games/free](https://www.ubisoft.com/en-us/games/free) (giveaways only, never trials, demos or free weekends)
-- <img alt="logo aliexpress" src="https://www.aliexpress.com/favicon.ico" width="20" align="middle" /> **AliExpress** – automated daily check-in that collects coins, using a real-device mobile fingerprint to stay undetected and reading the balance from the coin API. The coin page sometimes arrives empty; the bot gives it one more approach, then reports it and moves on instead of retrying for half an hour (see [Troubleshooting](#troubleshooting))
+- <img alt="logo microsoft" src="https://www.google.com/s2/favicons?domain=xbox.com&sz=64" width="20" align="middle" /> **Microsoft Store** – Prime Gaming code redemption + paid games while they are free to keep
+- <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/ubisoft/ffffff" /><img alt="logo ubisoft" src="https://cdn.simpleicons.org/ubisoft/000000" width="20" align="middle" /></picture> **Ubisoft** – free game giveaways from [ubisoft.com/games/free](https://www.ubisoft.com/en-us/games/free) (giveaways only, never trials, demos or free weekends)
+- <img alt="logo aliexpress" src="https://www.google.com/s2/favicons?domain=aliexpress.com&sz=32" width="20" align="middle" /> **AliExpress** – automated daily check-in that collects coins, using a real-device mobile fingerprint to stay undetected and reading the balance from the coin API. The coin page sometimes arrives empty; the bot gives it one more approach, then reports it and moves on instead of retrying for half an hour (see [Troubleshooting](#troubleshooting))
 
 **GamerPower API**, asked once at the start of every run, finds giveaways the stores themselves do not advertise, then hands each one to the matching store above. It also reaches these sites, which have no store module of their own and are chosen in `STORES` like any other store (still under development):
 - <img alt="logo fanatical" src="https://www.fanatical.com/favicon.ico" width="20" align="middle" /> **Fanatical** – auto-bypasses cookie banners and hooks Steam accounts to grab weekly PC drops. (almost ready)
@@ -138,6 +139,7 @@ Options are set via environment variables in `.env`:
 | `SCHEDULER_TIMEZONE` | `UTC` | IANA timezone used for fixed daily scheduler times. |
 | `SCHEDULER_FIXED_TIMES` | | Optional comma-separated daily run times in 24-hour `HH:MM` format (`17:00,21:30`). Set `SCHEDULER_HOURS=0` if you want *only* these fixed daily times without interval runs. |
 | `RUN_ON_STARTUP` | `true` | Run once immediately when the container/application starts. |
+| `RUN_ONCE` | `false` | Claim once, then stop the container (exit code 0), for scheduling it from outside with cron or Ofelia. `SCHEDULER_HOURS=0` with no fixed times does the same, since nothing is scheduled. Set `restart: "no"` in `docker-compose.yml` or Docker will start it again straight away. |
 | `VNC_LOGIN_TIMEOUT`| `180` | Seconds the bot waits for **you** at any manual step: signing in, a code from e-mail or SMS, approving 2FA, a captcha, or Unity's checkout form. A window nobody answers ends that one store's manual steps for the rest of the run, and the summary says what it skipped. Raise it if you are not usually sitting at the computer. |
 | `TIMEOUT` | `60` | Advanced: seconds to wait for a page element before giving up. |
 | `EMAIL` | | Default login email used by ALL stores unless a store-specific `*_EMAIL` overrides it. |
@@ -153,13 +155,16 @@ Options are set via environment variables in `.env`:
 | `PG_PASSWORD` | | Prime Gaming password. |
 | `PG_OTP_KEY` | | Prime Gaming authenticator (TOTP) key. |
 | `PG_FORCE_CHECK_COLLECTED` | `0` | Force re-check already marked 'claimed' games. |
-| `PG_REDEEM` | `0` | Try to redeem keys automatically on external stores. |
 | `GOG_EMAIL` | | GOG login email. |
 | `GOG_PASSWORD` | | GOG login password. |
 | `GOG_NEWSLETTER` | `0` | Keep newsletter sub after claiming (1 = keep). |
 | `GOG_FORCE_REDEEM` | `0` | Force re-redeem old GOG codes from Prime Gaming. |
 | `GOG_OTP_KEY` | | GOG authenticator (TOTP) secret, auto-filled. Codes sent by e-mail are entered manually via VNC. |
 | `GOG_OTP_CODES` | | Comma-separated GOG recovery codes, tried after the secret. Used ones are written to `data/used_gog_codes.txt`. |
+| `MS_EMAIL` | | Microsoft account email. |
+| `MS_PASSWORD` | | Microsoft account password. |
+| `MS_FORCE_REDEEM` | `0` | Force another pass over Microsoft codes from the last 60 days. |
+| `MS_OTP_KEY` | | Microsoft authenticator (TOTP) secret, auto-filled. E-mail codes and passkeys are done by you over VNC. |
 | `STEAM_USERNAME` | | Steam username. |
 | `STEAM_PASSWORD` | | Steam password. |
 | `FAB_ACCEPT_EULA` | `true` | Let the bot accept Fab's licence agreement and the EU right-of-withdrawal waiver, both required to claim. Set to `false` to stop before them. Fab reuses `EG_EMAIL` / `EG_PASSWORD` / `EG_OTP_KEY`. |
@@ -175,7 +180,7 @@ Options are set via environment variables in `.env`:
 | `AE_FLAG_RETRIES` | `3` | How many times to wait and re-approach the coin page when the offer is capped. |
 | `AE_FLAG_WAIT` | `480` | Seconds to wait between retries (kept above AliExpress' ~7-min penalty so one wait clears it). |
 | `AE_PAGE_RETRIES` | `4` | How many extra approaches to make when the coin page loads but renders nothing. AliExpress serves it empty most of the time (measured: one usable page in eight looks), so each retry is a real chance at the daily check-in. `0` gives up on the first look. |
-| `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `fab`, `prime`, `gog`, `ubisoft`, `aliexpress`. Add `unity`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
+| `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `fab`, `prime`, `gog`, `microsoft`, `ubisoft`, `aliexpress`. Add `unity`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
 | `RESET_DB_GAMES` | `false` | Retroactively erase any database claims recorded within the last 7 days upon execution. Assists in clearing false positives. |
 | `GP_CLAIM_DLC` | `false` | Also process GamerPower's in-game DLC giveaways. Off by default: most need an account in that specific game, and they are the bulk of the feed. |
 | `FANATICAL_ENABLE`| `false`| Replaced by `STORES=...,fanatical`. Still honoured for now. |
@@ -233,6 +238,7 @@ never the same digits as the first, because a code refused inside its 30-second 
 | Epic (and Fab) | `EG_OTP_KEY` | `EG_OTP_CODES` | `data/used_epic_codes.txt` |
 | GOG | `GOG_OTP_KEY` | `GOG_OTP_CODES` | `data/used_gog_codes.txt` |
 | Itch.io | `ITCHIO_OTP_KEY` | `ITCHIO_OTP_CODES` | `data/used_itchio_codes.txt` |
+| Microsoft | `MS_OTP_KEY` | Microsoft issues one recovery code for the account, not codes for signing in | |
 | Prime Gaming | `PG_OTP_KEY` | Amazon does not issue any | |
 | Ubisoft | `UBI_OTP_KEY` | not supported yet | |
 | Steam, AliExpress, everything else | | | codes are typed by you over VNC |
@@ -307,8 +313,8 @@ independently.
 ### Selective module execution
 
 Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`/`amazon`, `gog`,
-`ubisoft`/`ubi`, `fab`, `unity`, `aliexpress`/`ae`, `itchio`/`itch`, `fanatical`, `indiegala`,
-`alienware`):
+`ubisoft`/`ubi`, `fab`, `unity`, `microsoft`/`ms`/`xbox`, `aliexpress`/`ae`, `itchio`/`itch`, `fanatical`,
+`indiegala`, `alienware`):
 
 ```bash
 # Method 1: Via environment variable (recommended)
@@ -327,8 +333,8 @@ reported at startup rather than being ignored silently.
 > [!NOTE]
 > **What happens in one run, in order.** GamerPower is asked first, once, and only when this run has a
 > store that can use the answer. Then each big store runs: it claims what it finds itself and, at the end
-> of the same browser session, the giveaways GamerPower found for it. Then any GOG keys waiting from Prime
-> Gaming are redeemed. Last come the sites with no module of their own (Itch.io, Fanatical, IndieGala,
+> of the same browser session, the giveaways GamerPower found for it. Then any GOG and Microsoft keys
+> waiting from Prime Gaming are redeemed, each only when its store is in this run. Last come the sites with no module of their own (Itch.io, Fanatical, IndieGala,
 > Alienware Arena), all in one browser window.
 >
 > So `STORES=steam` also claims the Steam giveaways GamerPower lists, and `STORES=prime` sends GamerPower
@@ -348,6 +354,7 @@ free-games-claimer-remaster/
 ├── docker-compose.yml      # Container configuration
 ├── Dockerfile              # Debian bookworm-slim + Chrome/Chromium + TurboVNC + noVNC
 ├── docker-entrypoint.sh    # Starts the virtual display, VNC and the bot
+├── start-vnc.sh            # Starts the virtual screen and noVNC, again if the screen dies
 ├── requirements.txt        # Python dependencies
 ├── CHANGELOG.md            # What changed in every release
 ├── MODIFICATIONS.md        # Codebase overhaul technical reference
@@ -364,6 +371,7 @@ free-games-claimer-remaster/
 │   │   ├── claimer.py      # BaseClaimer: browser launch, login waits, notifications
 │   │   ├── config.py       # Typed configuration loader (.env → Python)
 │   │   ├── database.py     # SQLAlchemy models & SQLite engine
+│   │   ├── display.py      # The virtual screen the browser draws on, and bringing it back
 │   │   ├── notifier.py     # Modular Discord/Apprise webhooks
 │   │   ├── selection.py    # Which stores this run covers (GamerPower reads it)
 │   │   ├── run_state.py    # What this run learned: which store is waiting for you
@@ -377,6 +385,7 @@ free-games-claimer-remaster/
 │       ├── epic_fab.py     # Fab limited-time free assets (shares Epic's session)
 │       ├── unity.py        # Unity Asset Store weekly free asset
 │       ├── ubisoft.py      # Ubisoft giveaways (ubisoft.com/games/free)
+│       ├── microsoft.py    # Microsoft Store: Prime codes and paid games while free
 │       ├── aliexpress.py   # AliExpress check-in & coin collecting
 │       ├── epic_mobile.py  # Epic's weekly free Android/iOS game (detection only)
 │       └── gamerpower.py   # GamerPower API (Fanatical, Itch.io, IndieGala, Alienware)
@@ -444,6 +453,19 @@ services in parallel via async dispatch.
 | Setting seems to be ignored | The bot names every setting it does not read at startup, for example an invented `STEAM_ENABLE`, and every value that cannot mean what it says, for example `DRYRUN=maybe`, which counts as false. Passwords, e-mail addresses and webhook URLs are masked in that message. |
 | A store was skipped, saying it waited for you | It asked you for something in the browser (a sign-in, a code, a captcha) and nobody answered within `VNC_LOGIN_TIMEOUT`. That store stops asking for the rest of the run, so it does not sit on a login screen for hours or keep re-opening it, and the summary lists what it skipped. Raise the timeout, or let the next run pick it up. |
 | Container crashes on start | Check logs: `docker compose logs app --tail=50`. A clean restart purges `.X1-lock` bugs. |
+| Browser will not start and VNC shows nothing | The virtual screen the browser draws on has died, which stops every store and leaves the noVNC page blank behind it. The bot now starts that screen again by itself and carries on. When it cannot, it says so in one line and `data/TurboVNC.log` holds the reason. |
+
+### Running on a NAS (TrueNAS Scale, Unraid, Synology)
+
+The container runs Chrome on a screen of its own and expects to be root inside that container, which is
+what Docker does by default. NAS app templates often change it, so three things are worth checking:
+
+- **Which user the app runs as.** The first line of the log says it: `Running as root(0), data folder is
+  writable`. Anything else and the bot can neither save your sessions nor start the screen, which arrives
+  as two faults that look unrelated.
+- **The memory limit.** Chrome dies the moment memory runs short, and from the outside that looks like a
+  browser which never starts. Give the container 2 GB or more.
+- **The port.** noVNC listens on 7080 inside the container, so map it to a port that is free on the NAS.
 
 ### Sessions, profiles and the data volume
 
@@ -513,8 +535,9 @@ you (`p***@gmail.com`), so either way it is safe to share.
    back, make a second log the same way as above and send **both**, the one from before and the one from
    after. Two logs of the same fault from two clean starts say far more than one.
 5. Look in the `data/` folder for what the bot saw:
-   - `data/screenshots/<store>/`, screenshots taken at every failure,
+   - `data/screenshots/<store>/`, screenshots taken at every failure. A failed code redemption shows the code and the account on screen, so look before you attach one,
    - `data/ae_coin_api.json`, raw AliExpress check-in responses (streak, coins),
+   - `data/TurboVNC.log`, everything the virtual screen printed, including why it refused to start,
    - `data/steamdb_dump.html`, the SteamDB page as the bot parsed it (written only with `DEBUG=true`),
    - `data/*_fail.html`, page snapshots from failed logins/check-ins.
 6. Watch it live if it is still running: open `http://localhost:7080` (noVNC) and take over the browser.
@@ -547,5 +570,5 @@ This remaster is a **completely independent rewrite** in Python, not a fork.
 ---
 
 <p align="center">
-<img alt="logo-fgc-remaster" src="logo.png" width="256" />
+<img alt="logo-fgc-remaster" src="https://github.com/user-attachments/assets/e5b53324-b85a-428b-b76d-addc9ed38a5b" width="256" />
 </p>

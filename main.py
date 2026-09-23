@@ -36,6 +36,7 @@ from src.stores.epic import claim_epic
 from src.stores.epic_fab import claim_fab
 from src.stores.gamerpower import claim_side_stores, discover_giveaways
 from src.stores.gog import claim_gog
+from src.stores.microsoft import claim_microsoft
 from src.stores.prime import claim_prime
 from src.stores.steam import claim_steam
 from src.stores.unity import claim_unity
@@ -56,8 +57,8 @@ class StorePrefixFilter(logging.Filter):
     def filter(self, record):
         if record.name.startswith("fgc."):
             store = record.name.split(".")[-1]
-            if store in ("epic", "steam", "gog", "prime", "aliexpress", "ubisoft", "fab", "unity"):
-                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "aliexpress": "AliExpress", "ubisoft": "Ubisoft", "fab": "Fab", "unity": "Unity"}
+            if store in ("epic", "steam", "gog", "prime", "microsoft", "aliexpress", "ubisoft", "fab", "unity"):
+                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "microsoft": "Microsoft", "aliexpress": "AliExpress", "ubisoft": "Ubisoft", "fab": "Fab", "unity": "Unity"}
                 prefix = escape(f"[{store_map[store]}]")
                 # Prepend to the message template
                 record.msg = f"{prefix} {record.msg}"
@@ -111,6 +112,7 @@ ALL_CLAIMERS: dict[str, tuple[str, object]] = {
     "fab":        ("Fab",          claim_fab),
     "prime":      ("Prime Gaming", claim_prime),
     "gog":        ("GOG",          claim_gog),
+    "microsoft":  ("Microsoft",    claim_microsoft),
     "ubisoft":    ("Ubisoft",      claim_ubisoft),
     "unity":      ("Unity",        claim_unity),
     "aliexpress": ("AliExpress",   claim_aliexpress),
@@ -121,7 +123,7 @@ ALL_CLAIMERS: dict[str, tuple[str, object]] = {
 SIDE_STORES: tuple[str, ...] = ("itchio", "fanatical", "indiegala", "alienware")
 
 # Stores GamerPower hands its finds to. Naming one of these is reason enough to ask GamerPower.
-GP_TARGETS: tuple[str, ...] = ("steam", "epic", "gog")
+GP_TARGETS: tuple[str, ...] = ("steam", "epic", "gog", "microsoft")
 
 # The old switch for each side store, honoured for one more release.
 _LEGACY_SIDE_FLAGS: dict[str, str] = {
@@ -133,7 +135,7 @@ _LEGACY_SIDE_FLAGS: dict[str, str] = {
 
 # What runs when neither the CLI nor STORES names anything. GamerPower goes last so the
 # stores with their own module claim first and its database dedup can do its job.
-DEFAULT_STORES: list[str] = ["steam", "epic", "fab", "prime", "gog", "ubisoft", "aliexpress"]
+DEFAULT_STORES: list[str] = ["steam", "epic", "fab", "prime", "gog", "microsoft", "ubisoft", "aliexpress"]
 
 # Display name (e.g. "Prime Gaming") → canonical store key (e.g. "prime").
 _DISPLAY_TO_KEY: dict[str, str] = {disp: key for key, (disp, _) in ALL_CLAIMERS.items()}
@@ -158,6 +160,10 @@ _ALIASES: dict[str, str] = {
     "primegaming":   "prime",
     "amazon":        "prime",
     "gog":           "gog",
+    "microsoft":     "microsoft",
+    "microsoft-store": "microsoft",
+    "ms":            "microsoft",
+    "xbox":          "microsoft",
     "ubisoft":       "ubisoft",
     "ubi":           "ubisoft",
     "unity":         "unity",
@@ -427,6 +433,26 @@ async def run_claimers() -> None:
         except Exception:
             logger.exception("Failed to run post-claim GOG code redemption")
 
+    # Microsoft codes from Prime Gaming, redeemed here so Prime has already saved this run's codes.
+    if "Microsoft" not in store_names:
+        logger.debug("Skipping pending Microsoft codes as 'microsoft' is not in STORES.")
+    else:
+        try:
+            from src.stores.microsoft import MicrosoftClaimer
+
+            ms_claimer = MicrosoftClaimer()
+            await ms_claimer.redeem_pending_codes()
+            if ms_claimer.notify_games:
+                ms_entry = next((e for e in aggregated_results if e["store"] == "Microsoft"), None)
+                if ms_entry:
+                    ms_entry["games"].extend(ms_claimer.notify_games)
+                else:
+                    aggregated_results.append(
+                        {"store": "Microsoft", "user": ms_claimer.user, "games": ms_claimer.notify_games}
+                    )
+        except Exception:
+            logger.exception("Failed to run post-claim Microsoft code redemption")
+
     # Last: the sites with no module of their own, all in one browser window.
     if sides and routed:
         try:
@@ -552,9 +578,28 @@ async def main() -> None:
         await run_claimers()
         return
 
-    # Otherwise start the scheduler
     fixed_times = _parse_fixed_times(cfg.scheduler_fixed_times)
     fixed_timezone = _scheduler_timezone() if fixed_times else None
+    nothing_scheduled = cfg.scheduler_hours <= 0 and not fixed_times
+
+    # One pass, then stop, so an outside scheduler (cron, Ofelia) can drive the container.
+    # Nothing scheduled at all means the same thing, which is what SCHEDULER_HOURS=0 looks like.
+    if cfg.run_once or nothing_scheduled:
+        if cfg.run_once:
+            logger.info("RUN_ONCE is set: one claiming run, then the container stops.")
+        else:
+            logger.info("Nothing is scheduled (SCHEDULER_HOURS=%s, no fixed times): one claiming run, "
+                        "then the container stops. Set SCHEDULER_HOURS or SCHEDULER_FIXED_TIMES to keep "
+                        "it running.", cfg.scheduler_hours)
+        if not cfg.run_on_startup:
+            logger.warning("RUN_ON_STARTUP=false leaves nothing to do at all, stopping without a run.")
+            return
+        await run_claimers()
+        logger.info("Run complete, stopping. Docker restarts the container unless the compose file "
+                    'says restart: "no", which is what an outside scheduler needs.')
+        return
+
+    # Otherwise start the scheduler
 
     scheduler = AsyncIOScheduler(job_defaults=_CLAIM_JOB_OPTIONS)
     if cfg.scheduler_hours > 0:

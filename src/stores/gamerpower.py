@@ -34,6 +34,8 @@ _STORE_HOSTS = (
     ("steam", "store.steampowered.com"),
     ("epic", "epicgames.com"),
     ("gog", "gog.com"),
+    ("microsoft", "xbox.com"),
+    ("microsoft", "microsoft.com"),
     ("fanatical", "fanatical.com"),
     ("alienware", "alienwarearena.com"),
     ("itchio", "itch.io"),

@@ -196,6 +196,8 @@ class Config:
     scheduler_timezone: str = os.getenv("SCHEDULER_TIMEZONE", "UTC").strip() or "UTC"
     scheduler_fixed_times: str = os.getenv("SCHEDULER_FIXED_TIMES", "")
     run_on_startup: bool = _bool("RUN_ON_STARTUP", default=True)
+    # One pass, then the container stops, for people who schedule it from outside (cron, Ofelia).
+    run_once: bool = _bool("RUN_ONCE", default=False)
 
     # --- DB Reset ---
     reset_db_games: bool = _bool("RESET_DB_GAMES", default=False)
@@ -254,7 +256,6 @@ class Config:
     pg_password: str | None = os.getenv("PG_PASSWORD") or os.getenv("PASSWORD")
     pg_otp_key: str | None = _secret("PG_OTP_KEY", "PG_OTPKEY")
     pg_force_check_collected: bool = _bool("PG_FORCE_CHECK_COLLECTED")
-    pg_redeem: bool = _bool("PG_REDEEM")
 
     # --- GOG ---
     gog_email: str | None = os.getenv("GOG_EMAIL") or os.getenv("EMAIL")
@@ -263,6 +264,12 @@ class Config:
     gog_force_redeem: bool = _bool("GOG_FORCE_REDEEM")
     gog_otp_key: str | None = _secret("GOG_OTP_KEY")
     gog_otp_codes: list[str] = [c.strip() for c in os.getenv("GOG_OTP_CODES", "").split(",") if c.strip()]
+
+    # --- Microsoft Store / Xbox ---
+    ms_email: str | None = os.getenv("MS_EMAIL") or os.getenv("EMAIL")
+    ms_password: str | None = os.getenv("MS_PASSWORD") or os.getenv("PASSWORD")
+    ms_otp_key: str | None = _secret("MS_OTP_KEY")
+    ms_force_redeem: bool = _bool("MS_FORCE_REDEEM")
 
     # --- Steam ---
     steam_username: str | None = os.getenv("STEAM_USERNAME")

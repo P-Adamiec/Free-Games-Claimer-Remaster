@@ -3,6 +3,28 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.10] - 2026-09-23
+
+### Added
+- **Microsoft Store and Xbox** – `src/stores/microsoft.py` redeems the Microsoft codes Prime Gaming hands out and claims paid games while they are free to keep, never free to play or Game Pass titles. It signs in by itself, two-step verification included (`MS_OTP_KEY`). It runs by default and opens a browser only when there is something to take.
+- **One pass and the bot stops ([#51](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/51))** – `RUN_ONCE=true`, or `SCHEDULER_HOURS=0` with no fixed times, claims everything once and exits, so cron, Ofelia or a NAS task decides when it runs. Set `restart: "no"` in your compose file, or Docker starts it again.
+
+### Changed
+- **The log says who the container runs as** – the first line names the user and whether the data folder is writable, TurboVNC and noVNC print their own errors, and a failed Chrome start also reports the screen, user and free memory.
+- **`PG_REDEEM` is gone** – nothing read it. Codes from Prime are redeemed whenever GOG or Microsoft is in `STORES`.
+- **Dependency updates** – `sqlalchemy` to `>=2.0.54` and `tzdata` to `>=2026.4` (Dependabot [#55](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/pull/55)).
+
+### Fixed
+- **One game title can no longer sink the whole notification** – `format_game_list()` in `src/core/notifier.py` shows `<` `>` as ‹ › and escapes a stray `_` or `*`, because Telegram dropped a whole message over a title like `Doom <Remastered>`.
+- **Prime promises an automatic redeem only when one will happen** – GOG and Microsoft codes say `pending auto-redeem` only when that store runs in the same session, otherwise the bare code, which you redeem yourself.
+- **A captcha you never had no longer stops the sign-in** – `_human_challenge_present()` counted Epic's hidden hCaptcha frame, so Epic and Fab asked you to solve a check that was not there. Only a visible one counts now, and after you clear a real one the bot sends the form itself.
+- **Ubisoft giveaways under a new name ([#57](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/57))** – `src/stores/ubisoft.py` also accepts the `giveaway` type the feed switched to, which had made it skip For Honor. Trials, demos and free weekends stay out.
+- **Ubisoft's "Welcome back!" screen no longer calls you** – when Ubisoft remembers the account, its sign-in page shows only a Continue button, and `_do_login()` in `src/stores/ubisoft.py` waited for an e-mail field instead. It presses Continue now and fills in only what Ubisoft still asks for.
+- **Two browsers no longer share one profile ([#38](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/38))** – a Chrome left over from an earlier run is closed before the new one starts, not after a launch has already failed.
+- **A dead screen no longer takes the browser and VNC with it ([#52](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/52))** – the bot checks TurboVNC's screen before opening a window and restarts it with the new `start-vnc.sh`, instead of every store failing with "Failed to connect to browser". If that fails it says why once, with details in `data/TurboVNC.log`.
+- **Telegram showed `**` instead of bold text ([#50](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/50))** – `send_apprise()` in `src/core/notifier.py` now tells Apprise the message is markdown, so Telegram shows bold and e-mail gets HTML. `ntfy://` addresses get `format=markdown` unless you set a format yourself.
+- **GOG signed you in as "account" ([#38](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/38))** – `_is_logged_in()` in `src/stores/gog.py` took the menu button's text as proof of a session. It now asks GOG's account service, which returns your username or nothing.
+
 ## [1.9] - 2026-09-11
 
 ### Added
