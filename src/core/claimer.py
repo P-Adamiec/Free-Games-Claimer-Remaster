@@ -406,6 +406,12 @@ class BaseClaimer:
         """Close the browser and kill its whole process tree (issue #19)."""
         if not self.browser:
             return
+        if self.page:
+            try:
+                await self.page.send(uc.cdp.browser.close())
+                await asyncio.sleep(1)
+            except Exception:
+                pass
         pid = getattr(self.browser, "_process_pid", None) \
             or getattr(getattr(self.browser, "_process", None), "pid", None)
         try:
@@ -799,14 +805,14 @@ class BaseClaimer:
                         const at = document.elementFromPoint(cx, cy);
                         return !!at && (at === el || el.contains(at) || at.contains(el));
                     };
-                    const rx = /hcaptcha|arkoselabs|funcaptcha|arkose|px-captcha|geetest|turnstile|recaptcha\/(api2|enterprise)\/anchor/i;
+                    const rx = /hcaptcha|arkoselabs|funcaptcha|arkose|px-captcha|geetest|turnstile|recaptcha\/(api2|enterprise)\/anchor|datadome|captcha-delivery/i;
                     const frames = [...document.querySelectorAll('iframe')];
                     if (frames.some(f => rx.test((f.getAttribute('src') || '') + ' ' + (f.getAttribute('title') || '')) && seen(f))) return true;
-                    const widgets = [...document.querySelectorAll('.cf-turnstile, #h_captcha, #talon_frame_login_prod, #FunCaptcha, [id*="arkose" i]')];
+                    const widgets = [...document.querySelectorAll('.cf-turnstile, #h_captcha, #talon_frame_login_prod, #FunCaptcha, [id*="arkose" i], #datadome')];
                     if (widgets.some(seen)) return true;
                     const b = (document.body ? (document.body.innerText || '') : '').toLowerCase();
-                    if (b.includes('verify you are human') || b.includes('checking your browser') || b.includes('complete a security check')) return true;
-                    if (b.includes("check that you're a real person") || b.includes('check that you are a real person')) return true;
+                    if (b.includes('verify you are human') || b.includes('checking your browser') || b.includes('complete a security check') || b.includes('needs to review the security of your connection')) return true;
+                    if (b.includes("check that you're a real person") || b.includes('check that you are a real person') || b.includes('geo.captcha-delivery.com')) return true;
                     return false;
                 })()
             """))

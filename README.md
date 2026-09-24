@@ -205,6 +205,7 @@ Options are set via environment variables in `.env`:
 | `NOTIFY` | | Apprise URL(s) for Telegram, Slack, ntfy, etc. Multiple services can be separated by commas. |
 | `NOTIFY_TEST` | `false` | Send a test notification on startup to verify your setup works. |
 | `NOTIFY_SUMMARY` | `true` | Set to false to disable game claim summaries. (Applies to all services) |
+| `NOTIFY_EMPTY_SUMMARY` | `true` | Send a notification even when no games were claimed today. |
 | `NOTIFY_ERRORS` | `true` | Set to false to disable fatal error alerts. (Applies to all services) |
 | `NOTIFY_CLAIM_FAILS`| `false` | Set to true to also report games that could not be claimed (e.g. a free DLC without the base game) in alerts and the run summary. (Applies to all services) |
 | `NOTIFY_ALREADY_CLAIMED`| `false` | Set to true to also list games you already own and check-ins already collected today. By default the summary shows only what actually changed in that run. |

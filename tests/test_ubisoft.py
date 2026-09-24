@@ -100,6 +100,12 @@ class TestRealFeed:
             "ends": "2026-08-13T08:00:00",
         }]
 
+    def test_finds_explicit_giveaway_type(self):
+        giveaway_entry = dict(GIVEAWAY, type="Giveaway", title="For Honor Giveaway", links=[{"param": "https://register.ubisoft.com/for-honor"}])
+        games = parse_free_games(_page([giveaway_entry]), now=NOW)
+        assert len(games) == 1
+        assert games[0]["slug"] == "for-honor"
+
     @pytest.mark.parametrize("entry,why", [
         (FREE_WEEKEND, "free weekend"),
         (DEMO, "demo"),
