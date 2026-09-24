@@ -226,6 +226,10 @@ class MicrosoftClaimer(BaseClaimer):
     # Prices differ per country, and the account's own country is read from the store window below.
     market = "US"
 
+    async def start_browser(self, *, force_headful: bool = True, extra_args: list[str] | None = None) -> uc.Browser:
+        """Microsoft requires headful mode to avoid ERR_HTTP2_PROTOCOL_ERROR on account pages."""
+        return await super().start_browser(force_headful=force_headful, extra_args=extra_args)
+
     # ------------------------------------------------------------------
     # Entry points
     # ------------------------------------------------------------------
