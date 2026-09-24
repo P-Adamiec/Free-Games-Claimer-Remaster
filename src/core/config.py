@@ -217,6 +217,7 @@ class Config:
     discord_webhook: str | None = os.getenv("DISCORD_WEBHOOK")
     notify_url: str | None = os.getenv("NOTIFY")  # apprise URL fallback
     notify_summary: bool = _bool("NOTIFY_SUMMARY", default=True)
+    notify_empty_summary: bool = _bool("NOTIFY_EMPTY_SUMMARY", default=True)
     notify_errors: bool = _bool("NOTIFY_ERRORS", default=True)
     notify_claim_fails: bool = _bool("NOTIFY_CLAIM_FAILS", default=False)
     notify_already_claimed: bool = _bool("NOTIFY_ALREADY_CLAIMED", default=False)

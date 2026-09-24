@@ -248,6 +248,12 @@ class UbisoftClaimer(BaseClaimer):
 
             if not await self._ensure_logged_in():
                 logger.error("Aborting Ubisoft claim flow due to login failure.")
+                for game in games:
+                    self.notify_games.append({
+                        "title": game.get("title", "Ubisoft Game"),
+                        "url": game.get("url", URL_FREE),
+                        "status": "failed:login-required",
+                    })
                 return
 
             for game in games:
@@ -449,7 +455,7 @@ class UbisoftClaimer(BaseClaimer):
             return False
 
     async def _do_login(self) -> str:
-        """Fill the Ubisoft Connect login form. Returns 'ok', 'mfa' or 'failed'."""
+        """Fill the Ubisoft Connect login form or confirm Welcome Back screen. Returns 'ok', 'mfa' or 'failed'."""
         state = await self._page_state()
         login_url = state.get("loginFrame") or ""
         # The login form lives in a cross-origin iframe, so open its own URL as a normal page.
@@ -490,15 +496,15 @@ class UbisoftClaimer(BaseClaimer):
             await self.sleep(0.5)
 
             # Only tick "Keep me logged" when it is off, clicking a ticked box signs us out next run.
-            if not await self.page.evaluate('!!document.querySelector("#RememberMe")?.checked'):
-                remember = await self.page.find("#RememberMe", timeout=3)
+            if not await self.page.evaluate('!!document.querySelector("#RememberMe, input[type=\'checkbox\']")?.checked'):
+                remember = await self.page.find("#RememberMe, input[type='checkbox']", timeout=3)
                 if remember:
                     await remember.click()
                     await self.sleep(0.5)
 
             # Only a DOM click reaches this Angular handler, and the buttons carry no type attribute.
             if not await self.page.evaluate(
-                "(() => { const b = document.querySelector('button.btn-primary'); if (!b) return false; b.click(); return true; })()"
+                "(() => { const b = document.querySelector('button.btn-primary, button[type=\"submit\"]'); if (!b) return false; b.click(); return true; })()"
             ):
                 logger.debug("Ubisoft LOG IN button (button.btn-primary) not found.")
                 return "failed"
@@ -538,6 +544,7 @@ class UbisoftClaimer(BaseClaimer):
         logger.debug("Login watch ended after %ds at %s", waited, (await self._current_url())[:120])
         await self.page.get(URL_ACCOUNT)
         await self.sleep(4)
+        await self._dismiss_cookie_banner()
         if await self._is_logged_in():
             logger.debug("Login outcome: ok")
             return "ok"
