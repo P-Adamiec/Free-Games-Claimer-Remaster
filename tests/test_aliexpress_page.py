@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from src.stores.aliexpress import page_is_dead, today_from_payloads
+from src.stores.aliexpress import mobile_host, page_is_dead, today_from_payloads
 
 
 def sign_list(nodes) -> dict:
@@ -86,3 +86,17 @@ class TestTodayFromApi:
     def test_the_dead_page_case_yields_no_answer(self):
         # No coin API responses were captured at all when the page never rendered.
         assert today_from_payloads([])["claimed"] is None
+
+
+class TestMobileHost:
+    """The global coin page sends Italian accounts to it.aliexpress.com's home: AE_SITE picks the country site."""
+
+    def test_empty_keeps_the_global_site(self):
+        assert mobile_host("") == "m.aliexpress.com"
+
+    def test_a_country_code_picks_its_site(self):
+        assert mobile_host("it") == "m.it.aliexpress.com"
+        assert mobile_host(" PL ") == "m.pl.aliexpress.com"
+
+    def test_anything_else_falls_back_to_global(self):
+        assert mobile_host("evil.example.com/") == "m.aliexpress.com"

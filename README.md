@@ -195,6 +195,7 @@ Options are set via environment variables in `.env`:
 | `AE_FLAG_RETRIES` | `3` | How many times to wait and re-approach the coin page when the offer is capped. |
 | `AE_FLAG_WAIT` | `480` | Seconds to wait between retries (kept above AliExpress' ~7-min penalty so one wait clears it). |
 | `AE_PAGE_RETRIES` | `4` | How many extra approaches to make when the coin page loads but renders nothing. AliExpress serves it empty most of the time (measured: one usable page in eight looks), so each retry is a real chance at the daily check-in. `0` gives up on the first look. |
+| `AE_SITE` | | Country site for the coin page, e.g. `it` loads `m.it.aliexpress.com`. Set it when the check-in lands on your country's home page (`?gatewayAdapt=glo2ita` and similar) instead of the coin page. Empty uses the global `m.aliexpress.com`. |
 | `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `prime`, `gog`, `microsoft`, `ubisoft`, `aliexpress`. Add `fab`, `unity`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
 | `RESET_DB_GAMES` | `false` | Retroactively erase any database claims recorded within the last 7 days upon execution. Assists in clearing false positives. |
 | `GP_CLAIM_DLC` | `false` | Also process GamerPower's in-game DLC giveaways. Off by default: most need an account in that specific game, and they are the bulk of the feed. |

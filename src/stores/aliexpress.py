@@ -23,9 +23,17 @@ from src.core.config import cfg
 logger = logging.getLogger("fgc.aliexpress")
 
 URL_LOGIN = "https://www.aliexpress.com/p/ug-login-page/login.html?fromMsite=true"
-URL_COINS = "https://m.aliexpress.com/p/coin-index/index.html"
 URL_HOME = "https://www.aliexpress.com/"
-URL_MHOME = "https://m.aliexpress.com/"
+
+
+def mobile_host(site: str) -> str:
+    """m.<site>.aliexpress.com for a country code like "it", the global m.aliexpress.com otherwise."""
+    site = (site or "").strip().lower()
+    return f"m.{site}.aliexpress.com" if re.fullmatch(r"[a-z]{2,3}", site) else "m.aliexpress.com"
+
+
+URL_COINS = f"https://{mobile_host(cfg.ae_site)}/p/coin-index/index.html"
+URL_MHOME = f"https://{mobile_host(cfg.ae_site)}/"
 
 # Coin balance comes from this mtop API (the DOM shows only animated digits).
 COIN_API_PREFIX = "https://acs.aliexpress.com/h5/mtop.aliexpress.coin.execute/"
@@ -849,7 +857,7 @@ class AliExpressClaimer(BaseClaimer):
 
                     // A visible Collect / check-in button also implies an authenticated coin page
                     const collectBtn = [...document.querySelectorAll('button, div[role="button"], span, a')].some(el =>
-                        /^(collect|odbierz|check[- ]?in|zamelduj)/i.test((el.textContent || '').trim()) && visible(el)
+                        /^(collect|odbierz|raccogli|check[- ]?in|zamelduj)/i.test((el.textContent || '').trim()) && visible(el)
                     );
                     if (collectBtn) return true;
 
@@ -1219,7 +1227,7 @@ class AliExpressClaimer(BaseClaimer):
                     const els = [...document.querySelectorAll('button, div[role="button"], span, a, div')];
                     // Match only real check-in button labels like "Collect", "Collect 70",
                     // "Odbierz monety" – NOT promo texts like "Odbierz kupon 5$".
-                    const collectRe = /^(collect|odbierz|claim|check[- ]?in|zamelduj si[eę])(\s+\+?\d+)?(\s+(coins?|monet\w*))?$/i;
+                    const collectRe = /^(collect|odbierz|raccogli|claim|check[- ]?in|zamelduj si[eę])(\s+\+?\d+)?(\s+(coins?|monet\w*))?$/i;
                     const earnRe = /^(earn more coins|zdob[aą]d[źz] wi[eę]cej)/i;
 
                     let btnText = null;

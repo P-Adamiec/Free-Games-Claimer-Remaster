@@ -348,6 +348,9 @@ class Config:
     # AliExpress serves the coin page empty most of the time (measured: 1 usable page in 8 looks
     # over four minutes), so each extra approach is a real chance. 0 gives up on the first look.
     ae_page_retries: int = _int("AE_PAGE_RETRIES", 4)
+    # Country site for the mobile coin page (e.g. "it" -> m.it.aliexpress.com). The global page
+    # redirects some countries to their desktop home, where there is no check-in. Empty = global.
+    ae_site: str = (os.getenv("AE_SITE") or "").strip().lower()
 
     # --- Unknown/Other Indirect Stores ---
     # Opening a site the bot does not know is not supported yet, so this stays off either way.

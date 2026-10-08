@@ -266,3 +266,15 @@ class TestNoConsentIsGivenForYou:
     def test_only_the_licence_box_is_ever_ticked(self):
         assert 'input[type="checkbox"]' not in self.SOURCE
         assert self.SOURCE.count("querySelector('input#agree')") == 2
+
+
+class TestSelectorsAreNotTextSearches:
+    """nodriver's find() searches text, so find("#sign-in") missed the button and find("Sign in")
+    clicked "Sign in with Apple". CSS lookups must go through select()."""
+
+    def test_no_css_selector_is_passed_to_find(self):
+        import re
+        from pathlib import Path
+        source = (Path(__file__).resolve().parent.parent / "src" / "stores" / "epic.py").read_text(encoding="utf-8")
+        assert not re.findall(r"""\.find\(\s*["'](?:#|label\[)""", source)
+        assert 'find("Sign in"' not in source

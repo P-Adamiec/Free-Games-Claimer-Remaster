@@ -572,7 +572,7 @@ class EpicGamesClaimer(BaseClaimer):
 
     async def _press_sign_in(self) -> bool:
         """Send the sign-in form again, for when a human check interrupted one you had filled."""
-        button = await self.page.select("#sign-in", timeout=5) or await self.page.find("Sign in", timeout=4)
+        button = await self.page.select("#sign-in", timeout=5)
         if not button:
             logger.debug("No sign-in button came back after the check.")
             return False
@@ -590,7 +590,7 @@ class EpicGamesClaimer(BaseClaimer):
         email = cfg.eg_email.strip() if cfg.eg_email else ""
         password = cfg.eg_password.strip() if cfg.eg_password else ""
 
-        email_input = await self.page.find("#email", timeout=10)
+        email_input = await self.page.select("#email", timeout=10)
         if email_input:
             # Click FIRST to trigger Chrome's internal credential manager autofill, then wait for it
             await email_input.click()
@@ -609,13 +609,13 @@ class EpicGamesClaimer(BaseClaimer):
             else:
                 logger.debug("Email autofill succeeded.")
 
-            continue_btn = await self.page.find("#continue", timeout=5)
+            continue_btn = await self.page.select("#continue", timeout=5)
             if continue_btn:
                 await continue_btn.click()
                 logger.debug("Clicked continue, waiting for CSS slide animation...")
                 await self.sleep(3.0)  # Wait for CSS slide transition completely
 
-        password_input = await self.page.find("#password", timeout=10)
+        password_input = await self.page.select("#password", timeout=10)
         if password_input:
             await password_input.click()
             await self.sleep(1.0)
@@ -636,14 +636,14 @@ class EpicGamesClaimer(BaseClaimer):
         try:
             is_checked = await self.page.evaluate('document.querySelector("#rememberMe")?.checked')
             if not is_checked:
-                remember_label = await self.page.find("label[for='rememberMe']", timeout=2)
+                remember_label = await self.page.select("label[for='rememberMe']", timeout=2)
                 if remember_label:
                     await remember_label.click()
                     await self.sleep(0.5)
         except Exception:
             pass
             
-        sign_in_btn = await self.page.find("#sign-in", timeout=5)
+        sign_in_btn = await self.page.select("#sign-in", timeout=5)
         if sign_in_btn:
             await sign_in_btn.click()
             await self.sleep(3)
