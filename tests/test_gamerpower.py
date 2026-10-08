@@ -4,6 +4,7 @@ The instructions fallback used to be dead code because `run()` never carried the
 field, so every giveaway whose URL hid its destination landed in "unknown".
 """
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import pytest
 
 from src.stores.gamerpower import (COVERED_ELSEWHERE, FAN_GIVEAWAY_JS, FAN_MARK_MAIN_JS, FAN_MARK_PAY_JS,
                                    FAN_NEWSLETTER_JS, FAN_ORDER_JS, FAN_ORDERS_JS, FAN_REVEAL_JS, FAN_UNSUBSCRIBE_JS,
-                                   classify_target, download_only_status, fanatical_game_id,
+                                   GamerPowerClaimer, classify_target, download_only_status, fanatical_game_id,
                                    fanatical_item_is_steam, fanatical_page, fanatical_price, fanatical_receipt_authorised,
                                    fanatical_receipt_order,
                                    counts_as_done, fanatical_next_step, fanatical_should_unsubscribe,
@@ -325,6 +326,26 @@ class TestRecoveryCodeHandling:
         call = self.SOURCE.split('"Itch.io", self._itch_logged_in', 1)[1][:300]
         assert "otp_key=cfg.itchio_otp_key" in call
 
+    def test_fanatical_hands_over_its_authenticator_secret(self):
+        call = self.SOURCE.split('"Fanatical", self._fanatical_signed_in', 1)[1][:300]
+        assert "otp_key=cfg.fanatical_otp_key" in call and "backup_codes" not in call
+
+    @pytest.mark.parametrize("label,pressed", [
+        ("Authenticate", True), ("Verify", True), ("Sign in", True),
+        ("Sign in with Apple", False), ("Change account", False),
+    ])
+    def test_the_code_is_sent_with_the_button_the_site_shows(self, label, pressed):
+        # Fanatical's code screen only has "Authenticate"; without it the code was typed and never sent (#75).
+        block = self.SOURCE.split("async def _type_otp", 1)[1].split("async def _code_screen_still_up", 1)[0]
+        button = re.search(r"const words = /(.+?)/i;", block).group(1)
+        assert bool(re.search(button, label, re.I)) is pressed
+
+    def test_the_code_box_s_own_form_is_searched_first(self):
+        # Searched page-wide, Fanatical's header "Sign in" came first and closed the code screen (#75).
+        block = self.SOURCE.split("async def _type_otp", 1)[1].split("async def _code_screen_still_up", 1)[0]
+        assert block.index("own.find(named)") < block.index("buttons(document).find(named)")
+        assert ".closest('form')" in block
+
     def test_the_secret_is_tried_before_a_code_is_spent(self):
         block = self.SOURCE.split("async def _confirm_side_login", 1)[1].split("async def _type_otp", 1)[0]
         assert block.index("_fill_totp(") < block.index("_fill_backup_code(")
@@ -472,6 +493,36 @@ class TestIndieGalaSignInCheck:
         assert "add to library" not in block
 
 
+class TestItchSessionAfterCloudflare:
+    """#59: right after Cloudflare's page clears itch.io is still loading, so one look read a signed-in session as out."""
+
+    class _Stub:
+        def __init__(self, answers):
+            self.answers, self.calls, self.slept = list(answers), 0, 0
+
+        async def _itch_logged_in(self):
+            self.calls += 1
+            return self.answers.pop(0) if self.answers else False
+
+        async def sleep(self, seconds):
+            self.slept += seconds
+
+    def test_a_session_that_shows_up_while_the_page_loads_counts(self):
+        stub = self._Stub([False, False, True])
+        assert asyncio.run(GamerPowerClaimer._itch_logged_in_after_load(stub)) is True
+        assert stub.calls == 3 and stub.slept == 4
+
+    def test_a_signed_out_page_gives_up_after_the_limit(self):
+        stub = self._Stub([])
+        assert asyncio.run(GamerPowerClaimer._itch_logged_in_after_load(stub, seconds=12)) is False
+        assert stub.calls == 7 and stub.slept == 12
+
+    def test_the_session_check_waits_for_the_page_before_asking_you(self):
+        source = (Path(__file__).resolve().parent.parent / "src" / "stores" / "gamerpower.py").read_text(encoding="utf-8")
+        ready = source.split("async def _itch_session_ready", 1)[1].split("\n    async def ", 1)[0]
+        assert ready.index("_itch_logged_in_after_load()") < ready.index("_wait_for_vnc_login(")
+
+
 class TestItchOwnershipIsCheckedSignedIn:
     """A signed-out itch.io page shows no ownership banner, so the session comes first."""
 
@@ -494,7 +545,7 @@ class TestItchOwnershipIsCheckedSignedIn:
         # needed" while signed out, and every check after it read a signed-out page.
         session = self.SOURCE.split("async def _itch_session_ready", 1)[1].split('\n    async def ', 1)[0]
         assert 'page.get("https://itch.io/")' in session
-        assert "_itch_logged_in()" in session
+        assert "_itch_logged_in_after_load()" in session
 
     def test_the_session_is_only_established_once(self):
         session = self.SOURCE.split("async def _itch_session_ready", 1)[1].split('\n    async def ', 1)[0]
@@ -518,7 +569,7 @@ class TestSideStorePrompts:
 
     def test_cloudflare_is_let_through_before_the_session_is_judged(self):
         ready = self.SOURCE.split("async def _itch_session_ready", 1)[1].split("\n    async def ", 1)[0]
-        assert ready.index("_human_challenge_present()") < ready.index("if await self._itch_logged_in()")
+        assert ready.index("_human_challenge_present()") < ready.index("if await self._itch_logged_in_after_load()")
         assert "_wait_out_challenge(" in ready
 
 

@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **The container runs with a read-only filesystem ([#58](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/58))** – with `read_only: true` and `/tmp` as tmpfs, `docker-entrypoint.sh` no longer writes a user into `/etc` and keeps its home folder in `/tmp`, also with `PUID`. The README shows a hardened compose.
 - **The Fanatical newsletter is taken back out** – when a claim signs you up for Fanatical's newsletter, `_claim_fanatical_game()` in `src/stores/gamerpower.py` unsubscribes you again afterwards; a newsletter you already had stays. Set `FANATICAL_NEWSLETTER=true` to keep it, like `GOG_NEWSLETTER`.
+- **Fanatical fills in its two-factor code ([#75](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/75))** – set `FANATICAL_OTP_KEY` to the key Fanatical shows beside the QR code, and `src/stores/gamerpower.py` types the code and presses "Authenticate" instead of waiting for you over VNC. Without it nothing changes.
 - **A way to support the project** – the README has a Buy Me a Coffee button under "Support the project", and `.github/FUNDING.yml` puts a Sponsor button on the repository page. The bot stays free for everyone; support helps cover its costs and the time that goes into it.
 
 ### Fixed
@@ -17,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **AliExpress accounts on a country site work ([#73](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/73), PR [#74](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/pull/74) by @privatepenguinzero)** – `src/stores/aliexpress.py` notices when the coin page redirects to a country site such as it.aliexpress.com, remembers it in the browser profile and uses that country's mobile coin page next time. "Raccogli" now counts as the check-in button. No setting needed.
 - **AliExpress knows you are signed in, in any language ([#73](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/73))** – `_is_logged_in()` in `src/stores/aliexpress.py` now reads the check-in calendar the coin page loads for your account, so a page in Italian or any other language no longer sends the bot to the login page. The page's words stay as a fallback.
 - **A hardened container starts again after a hard stop ([#58](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/58))** – with `PUID` and `cap_drop: ALL`, `docker-entrypoint.sh` could not delete a profile lock Chrome left behind and the container restarted forever. It now leaves that lock to the bot, which clears it itself.
+- **Itch.io no longer asks you to sign in right after Cloudflare's check ([#59](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/59))** – `_itch_session_ready()` in `src/stores/gamerpower.py` looked for your session the moment the check cleared, while itch.io was still loading, and sent a needless "login needs you". It now asks again for a few seconds first.
 
 ## [1.11] - 2026-10-05
 

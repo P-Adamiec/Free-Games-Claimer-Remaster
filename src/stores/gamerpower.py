@@ -796,6 +796,20 @@ class GamerPowerClaimer(BaseClaimer):
             logger.debug("[Itch.io] Sign-in check failed: %s", e)
             return False
 
+    async def _itch_logged_in_after_load(self, seconds: int = 12) -> bool:
+        """Signed in, asked again until itch.io has finished loading; a page still loading has no logout link yet."""
+        waited = 0
+        while True:
+            if await self._itch_logged_in():
+                if waited:
+                    logger.debug("[Itch.io] Signed in once the page finished loading (%ss).", waited)
+                return True
+            if waited >= seconds:
+                logger.debug("[Itch.io] Still no sign-in after %ss of loading.", waited)
+                return False
+            await self.sleep(2)
+            waited += 2
+
     async def _ig_logged_in(self) -> bool:
         """Signed in when IndieGala offers a way out and none in. Verified live signed out."""
         try:
@@ -931,17 +945,29 @@ class GamerPowerClaimer(BaseClaimer):
                 return False
             await field.click()
             await self.sleep(0.4)
+            # A refused code can stay in the box, and the next one would be typed after it.
+            await field.clear_input()
             await field.send_keys(code)
             await self.sleep(0.6)
-            await self.page.evaluate("""
+            pressed = await self.page.evaluate("""
                 (() => {
                     const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-                    const b = [...document.querySelectorAll('button, input[type="submit"]')].filter(vis)
-                        .find(x => /^(log ?in|verify|continue|submit|sign ?in)$/i
-                            .test(((x.innerText || x.value || '')).trim()));
+                    const words = /^(log ?in|verify|continue|submit|sign ?in|authenticate)$/i;
+                    const named = x => words.test(((x.innerText || x.value || '')).trim());
+                    const buttons = root => [...root.querySelectorAll('button, input[type="submit"]')].filter(vis);
+                    // The code box's own form first: Fanatical's header has a "Sign in" button that closes the code screen.
+                    const form = (document.querySelector('[data-otp-field]') || document.body).closest('form');
+                    const own = form ? buttons(form) : [];
+                    const b = own.find(named) || own.find(x => x.type === 'submit') || buttons(document).find(named);
                     if (b) b.click();
+                    return b ? ((b.innerText || b.value || '').trim().slice(0, 30)) : '';
                 })()
             """)
+            # nodriver hands back a RemoteObject, not '', when nothing was found.
+            if isinstance(pressed, str) and pressed:
+                logger.debug("[%s] Code sent with the '%s' button.", label, pressed)
+            else:
+                logger.debug("[%s] Code typed, but no submit button was found.", label)
             await self.sleep(6)
             return True
         except Exception as e:
@@ -1404,9 +1430,9 @@ class GamerPowerClaimer(BaseClaimer):
                 if email and password:
                     logger.info("[Fanatical] Logging in as %s…", mask_account(email))
                     await self._fanatical_login(email, password)
-                    # Two-factor codes are typed by you over VNC: Fanatical hands out no
-                    # recovery codes, so there is nothing worth keeping in .env.
+                    # Fanatical issues no recovery codes, so only the authenticator secret gets the bot past its code screen.
                     if not await self._confirm_side_login("Fanatical", self._fanatical_signed_in,
+                                                          otp_key=cfg.fanatical_otp_key,
                                                           credentials=(email, password)):
                         return
                     self._log_side_signed_in("Fanatical", email)
@@ -1632,7 +1658,8 @@ class GamerPowerClaimer(BaseClaimer):
             logger.debug("[Itch.io] Waiting for the Cloudflare check to pass before judging the session.")
             if not await self._wait_out_challenge("Itch.io", store_key="itchio"):
                 return False
-        if await self._itch_logged_in():
+        # Right after the check clears itch.io is still loading, so one look read a signed-in session as out (#59).
+        if await self._itch_logged_in_after_load():
             self._itch_session_ok = True
             return True
 

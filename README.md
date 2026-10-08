@@ -186,6 +186,7 @@ Options are set via environment variables in `.env`:
 | `GP_CLAIM_DLC` | `false` | Also process GamerPower's in-game DLC giveaways. Off by default: most need an account in that specific game, and they are the bulk of the feed. |
 | `FANATICAL_EMAIL` | | Fanatical account email. |
 | `FANATICAL_PASSWORD`| | Fanatical account password. |
+| `FANATICAL_OTP_KEY` | | Fanatical authenticator (TOTP) secret, auto-filled. Fanatical offers no other kind of two-factor. |
 | `FANATICAL_NEWSLETTER` | `false` | Keep the Fanatical newsletter a claim signed you up for (a giveaway that asks for it, or the pre-ticked box at checkout); `true` = keep. A subscription you had before stays. |
 | `ITCHIO_EMAIL` | | Itch.io account email. |
 | `ITCHIO_PASSWORD` | | Itch.io account password. |
@@ -226,6 +227,7 @@ Set either, both, or neither. Filling one in is all it takes to switch it on. Ev
 | Store | Authenticator secret | Recovery codes | Spent codes |
 |---|---|---|---|
 | Epic (and Fab) | `EG_OTP_KEY` | `EG_OTP_CODES` | `data/used_epic_codes.txt` |
+| Fanatical | `FANATICAL_OTP_KEY` | Fanatical does not issue any | |
 | GOG | `GOG_OTP_KEY` | `GOG_OTP_CODES` | `data/used_gog_codes.txt` |
 | IndieGala | not supported | not supported | the login captcha is ticked by you over VNC |
 | Itch.io | `ITCHIO_OTP_KEY` | `ITCHIO_OTP_CODES` | `data/used_itchio_codes.txt` |

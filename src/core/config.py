@@ -325,6 +325,7 @@ class Config:
     # Switched on by naming it in STORES, like every side store.
     fanatical_email: str | None = os.getenv("FANATICAL_EMAIL") or os.getenv("EMAIL")
     fanatical_password: str | None = os.getenv("FANATICAL_PASSWORD") or os.getenv("PASSWORD")
+    fanatical_otp_key: str | None = _secret("FANATICAL_OTP_KEY")
     # Keep the newsletter a claim signed you up for (false = unsubscribe, like GOG_NEWSLETTER).
     fanatical_newsletter: bool = _bool("FANATICAL_NEWSLETTER")
 

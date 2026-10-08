@@ -202,7 +202,8 @@ class TestAuthenticatorSecrets:
     """Every store spells it the same way now, and the old spelling still works."""
 
     NEW = {"EG_OTP_KEY": "eg_otp_key", "PG_OTP_KEY": "pg_otp_key", "GOG_OTP_KEY": "gog_otp_key",
-           "UBI_OTP_KEY": "ubi_otp_key", "ITCHIO_OTP_KEY": "itchio_otp_key"}
+           "UBI_OTP_KEY": "ubi_otp_key", "ITCHIO_OTP_KEY": "itchio_otp_key",
+           "FANATICAL_OTP_KEY": "fanatical_otp_key"}
 
     @pytest.mark.parametrize("name,field", sorted(NEW.items()))
     def test_the_new_name_is_read(self, monkeypatch, name, field):
