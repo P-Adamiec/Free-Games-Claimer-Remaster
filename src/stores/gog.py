@@ -5,11 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-import pyotp
-import nodriver as uc
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, now_str
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -61,7 +59,6 @@ class GOGClaimer(BaseClaimer):
 
     async def _ensure_logged_in(self) -> bool:
         """Check if we are logged in to GOG. If not, try automatic login or wait for VNC."""
-        import json
         await self.sleep(3)  # Give GOG time to fully render the page
         
         # GOG shows a cookie consent popup (CookieBot) that blocks the page.
@@ -164,7 +161,6 @@ class GOGClaimer(BaseClaimer):
             await self.page.find("#login_username", timeout=15)
             await self.page.find("#login_login", timeout=5)
             
-            import json
             js_email = json.dumps(email)
             js_password = json.dumps(password)
 
@@ -470,7 +466,6 @@ class GOGClaimer(BaseClaimer):
         if old_games:
             logger.debug("Checking for pending GOG codes: %d total external codes in DB", len(old_games))
         
-        import json
         # Filter the results to only include GOG codes (not Legacy Games, Epic, etc.)
         gog_games = []
         for g in old_games:

@@ -32,7 +32,8 @@ if [ -z "${VNC_PASSWORD:-}" ]; then
 else
 	pw="-rfbauth $HOME/.vnc/passwd"
 	pwt="with password"
-	mkdir -p "$HOME/.vnc/"
+	# Under /tmp (a read-only container's home) TurboVNC accepts this folder only with mode 700.
+	mkdir -p "$HOME/.vnc/" && chmod 700 "$HOME/.vnc"
 	# TurboVNC refuses a password file that anyone else can read (issue #67).
 	if ! echo "$VNC_PASSWORD" | /opt/TurboVNC/bin/vncpasswd -f >"$HOME/.vnc/passwd" || ! chmod 600 "$HOME/.vnc/passwd"; then
 		echo "Could not write the VNC password file in $HOME/.vnc, check who this container runs as."

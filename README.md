@@ -4,7 +4,7 @@
   <img alt="logo-free-games-claimer" src="https://github.com/user-attachments/assets/6d749140-c2a2-45d4-ac73-70b16e74a757" />
 </p>
 
-> **Not a fork** – a complete ground-up Python remaster inspired by [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer). 
+> **Not a fork** – a complete ground-up Python remaster inspired by [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer).
 >
 > ℹ️ **Are you coming from the original Node.js version?**  
 > For a comprehensive, file-by-file breakdown of what changed, dropped features, stealth automation upgrades, and architectural differences, **please read [MODIFICATIONS.md](./MODIFICATIONS.md).**
@@ -19,38 +19,26 @@ Automatically claims free games on:
 - <img alt="logo gog" src="https://github.com/user-attachments/assets/49040b50-ee14-4439-8e3c-e93cafd7c3a5" width="20" align="middle" /> **GOG** – periodic free giveaways
 - <img alt="logo microsoft" src="https://www.google.com/s2/favicons?domain=xbox.com&sz=64" width="20" align="middle" /> **Microsoft Store** – Prime Gaming code redemption + paid games while they are free to keep
 - <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/ubisoft/ffffff" /><img alt="logo ubisoft" src="https://cdn.simpleicons.org/ubisoft/000000" width="20" align="middle" /></picture> **Ubisoft** – free game giveaways from [ubisoft.com/games/free](https://www.ubisoft.com/en-us/games/free) (giveaways only, never trials, demos or free weekends)
-- <img alt="logo aliexpress" src="https://www.google.com/s2/favicons?domain=aliexpress.com&sz=32" width="20" align="middle" /> **AliExpress** – automated daily check-in that collects coins, using a real-device mobile fingerprint to stay undetected and reading the balance from the coin API. The coin page often arrives empty; the bot walks back to it up to `AE_PAGE_RETRIES` times (four by default), then reports it and moves on (see [Troubleshooting](#troubleshooting))
+- <img alt="logo aliexpress" src="https://www.google.com/s2/favicons?domain=aliexpress.com&sz=32" width="20" align="middle" /> **AliExpress** – automated daily check-in that collects coins, using a real-device mobile fingerprint to stay undetected and reading the balance from the coin API. Accounts that live on a country site (for example it.aliexpress.com) are recognised automatically. The coin page often arrives empty; the bot walks back to it up to `AE_PAGE_RETRIES` times (four by default), then reports it and moves on (see [Troubleshooting](#troubleshooting))
 
 **GamerPower API**, asked once at the start of every run, finds giveaways the stores themselves do not advertise, then hands each one to the matching store above. It also reaches these sites, which have no store module of their own and are chosen in `STORES` like any other store:
-- <img alt="logo fanatical" src="https://www.fanatical.com/favicon.ico" width="20" align="middle" /> **Fanatical** – free games, confirmed in your Fanatical orders; the Steam key is then activated on your Steam account when `steam` is in `STORES` (add `fanatical` to `STORES`, see the warning below)
+- <img alt="logo fanatical" src="https://www.fanatical.com/favicon.ico" width="20" align="middle" /> **Fanatical** – free games, claimed through Fanatical's free checkout and confirmed in your Fanatical orders; the Steam key is then activated on your Steam account when `steam` is in `STORES` (add `fanatical` to `STORES`, see the warning below)
 - <img alt="logo itchio" src="https://itch.io/favicon.ico" width="20" align="middle" /> **Itch.io** – DRM-free indie giveaways, claimed to your library and verified there (add `itchio` to `STORES`)
 - <img alt="logo indiegala" src="https://www.indiegala.com/favicon.ico" width="20" align="middle" /> **IndieGala** – free DRM-free games, claimed to your library and verified there (add `indiegala` to `STORES`, see the note below)
 - <img alt="logo alienware" src="https://www.alienwarearena.com/favicon.ico" width="20" align="middle" /> **Alienware Arena** – notify only: key giveaways cost ARP points and solve a captcha, so the bot tells you about them and you claim them yourself (add `alienware` to `STORES`)
 
 > [!NOTE]
-> **IndieGala is new, and your feedback helps.** Its login page always shows a captcha, so the bot types
-> your e-mail and password and asks you over VNC to tick the box. IndieGala then keeps you signed in for
-> 14 days, and the bot is built to hold on to that sign-in for all of them, so this happens at most once
-> every two weeks and only when there is an IndieGala giveaway. Two-factor sign-in is not supported for
-> IndieGala. Please tell us in the issues how it works for you, and bear with this store while it settles in.
+> **IndieGala is new, and your feedback helps.** Its login page always shows a captcha, so the bot types your e-mail and password and asks you over VNC to tick the box. IndieGala then keeps you signed in for 14 days, and the bot is built to hold on to that sign-in for all of them, so this happens at most once every two weeks and only when there is an IndieGala giveaway. Two-factor sign-in is not supported for IndieGala. Please tell us in the issues how it works for you, and bear with this store while it settles in.
 
 > [!WARNING]
-> **Fanatical has not been tested on a real giveaway yet.** Signing in, reading your Fanatical orders and
-> Steam's key page were checked live, but no Fanatical giveaway has come up since, so claiming one,
-> revealing its key and activating it on Steam have never run end to end. If the bot meets a Fanatical
-> giveaway on your account, please tell us in the issues how it went and attach the log from that run
-> (`DEBUG=true` helps most). Your feedback is what turns this into a store we can call finished.
+> **Before you add `fanatical` to `STORES`, connect your Steam account on Fanatical once:** sign in at fanatical.com and link Steam under [Linked accounts](https://www.fanatical.com/en/account/linked-accounts) (a limited Steam account does not count). Some giveaways require it and the bot does not do it for you; when one finds Steam unlinked, the summary says so, and once you link it the next run claims it.
+>
+> **Fanatical has claimed one real giveaway so far, and your feedback helps.** That run went end to end: the newsletter step, Fanatical's free checkout, the key, and its activation on Steam. A giveaway that asks for the newsletter is handled by the bot (it subscribes you, then unsubscribes you again afterwards unless `FANATICAL_NEWSLETTER=true`). A Steam wishlist or a partner link step is asked of you over VNC; those have not been tried on a real giveaway yet, nor has a giveaway that sold out. If the bot meets one on your account, please tell us in the issues how it went and attach the log from that run (`DEBUG=true` helps most).
 
 > [!TIP]
-> **There is more free stuff out there than the storefronts show you.** Epic advertises two games a week
-> on its front page, but GamerPower regularly lists half a dozen more that are free right now on the very
-> same account, and other stores are no different. You get those for free: `STORES=steam` claims the Steam
-> giveaways GamerPower lists, in the same browser session, and leaves the Epic ones alone. The extra sites
-> (Fanatical, Itch.io, IndieGala, Alienware Arena) each need an account, so they run only when you name
-> them: `STORES=steam,itchio`.
+> **There is more free stuff out there than the storefronts show you.** Epic advertises two games a week on its front page, but GamerPower regularly lists half a dozen more that are free right now on the very same account, and other stores are no different. You get those for free: `STORES=steam` claims the Steam giveaways GamerPower lists, in the same browser session, and leaves the Epic ones alone. The extra sites (Fanatical, Itch.io, IndieGala, Alienware Arena) each need an account, so they run only when you name them: `STORES=steam,itchio`.
 
-Runs as a Docker container with a built-in scheduler (every 12 hours by default, with optional fixed
-daily run times). Login via **VNC in browser** or automated credentials.
+Runs as a Docker container with a built-in scheduler (every 12 hours by default, with optional fixed daily run times). Login via **VNC in browser** or automated credentials.
 
 ---
 
@@ -106,6 +94,8 @@ DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 # STORES=steam,prime,gog
 ```
 
+> 💡 **Password with a `$` in it?** Wrap it in single quotes, for example `EG_PASSWORD='abc$def'`. Docker Compose treats `$name` in unquoted and double-quoted values as a variable and would cut your password short.
+
 ### 2. Run container
 
 ```bash
@@ -118,17 +108,13 @@ docker compose up -d
 
 Open **http://localhost:7080** in your browser to access the VNC session.
 
-Each store will wait for you to login manually on the first run if you don't supply credentials.
-After that, session cookies are natively restored using persistent browser profiles!
+Each store will wait for you to login manually on the first run if you don't supply credentials. After that, session cookies are natively restored using persistent browser profiles!
 
-It waits `VNC_LOGIN_TIMEOUT` seconds for you, three minutes by default. If nobody answers, that one
-store is left alone for the rest of the run and the summary says so, so a bot running while you sleep
-does not sit on a login screen for hours. The next run tries again.
+It waits `VNC_LOGIN_TIMEOUT` seconds for you, three minutes by default. If nobody answers, that one store is left alone for the rest of the run and the summary says so, so a bot running while you sleep does not sit on a login screen for hours. The next run tries again.
 
 ### 4. Monitor
 
-To see what the bot is doing in real-time regardless of your current terminal folder, inspect the
-container directly:
+To see what the bot is doing in real-time regardless of your current terminal folder, inspect the container directly:
 ```bash
 docker logs -f fgc-remaster
 ```
@@ -200,6 +186,7 @@ Options are set via environment variables in `.env`:
 | `GP_CLAIM_DLC` | `false` | Also process GamerPower's in-game DLC giveaways. Off by default: most need an account in that specific game, and they are the bulk of the feed. |
 | `FANATICAL_EMAIL` | | Fanatical account email. |
 | `FANATICAL_PASSWORD`| | Fanatical account password. |
+| `FANATICAL_NEWSLETTER` | `false` | Keep the Fanatical newsletter a claim signed you up for (a giveaway that asks for it, or the pre-ticked box at checkout); `true` = keep. A subscription you had before stays. |
 | `ITCHIO_EMAIL` | | Itch.io account email. |
 | `ITCHIO_PASSWORD` | | Itch.io account password. |
 | `ITCHIO_OTP_KEY` | | Itch.io authenticator (TOTP) secret, auto-filled. |
@@ -227,22 +214,14 @@ Options are set via environment variables in `.env`:
 
 ### Two-factor sign-in
 
-Nothing here is required. By default the bot stops at a code screen and asks you to finish it in the
-browser over VNC, waiting `VNC_LOGIN_TIMEOUT` seconds for you.
+Nothing here is required. By default the bot stops at a code screen and asks you to finish it in the browser over VNC, waiting `VNC_LOGIN_TIMEOUT` seconds for you.
 
 If you want it to get through 2FA on its own there are two ways, and they are not equivalent:
 
-- **An authenticator secret** (`*_OTP_KEY`) is the key behind the QR code you scanned into your phone,
-  offered as "manual entry key" during setup. The bot becomes another authenticator app and never runs
-  out of codes. What it costs: your password and your second factor then sit in the same `.env` on the
-  same machine, so whoever reads that file has both.
-- **Recovery codes** (`*_OTP_CODES`) are one-shot. The bot spends one per sign-in and writes it to
-  `data/used_*_codes.txt`, so a stolen file costs a limited number of logins instead of permanent
-  access, and you can see which ones were used. They do run out, and then it is back to VNC.
+- **An authenticator secret** (`*_OTP_KEY`) is the key behind the QR code you scanned into your phone, offered as "manual entry key" during setup. The bot becomes another authenticator app and never runs out of codes. What it costs: your password and your second factor then sit in the same `.env` on the same machine, so whoever reads that file has both.
+- **Recovery codes** (`*_OTP_CODES`) are one-shot. The bot spends one per sign-in and writes it to `data/used_*_codes.txt`, so a stolen file costs a limited number of logins instead of permanent access, and you can see which ones were used. They do run out, and then it is back to VNC.
 
-Set either, both, or neither. Filling one in is all it takes to switch it on. Every store follows the
-same order: **two codes from the secret, then one recovery code, then you over VNC.** The second code is
-never the same digits as the first, because a code refused inside its 30-second window stays refused.
+Set either, both, or neither. Filling one in is all it takes to switch it on. Every store follows the same order: **two codes from the secret, then one recovery code, then you over VNC.** The second code is never the same digits as the first, because a code refused inside its 30-second window stays refused.
 
 | Store | Authenticator secret | Recovery codes | Spent codes |
 |---|---|---|---|
@@ -255,40 +234,26 @@ never the same digits as the first, because a code refused inside its 30-second 
 | Ubisoft | `UBI_OTP_KEY` | not supported yet | |
 | Steam, AliExpress, everything else | | | codes are typed by you over VNC |
 
-Either way this is usually a one-time event per store: on the code screen the bot ticks the store's
-"remember this browser" box, so it stops being asked on that profile until the profile is deleted.
+Either way this is usually a one-time event per store: on the code screen the bot ticks the store's "remember this browser" box, so it stops being asked on that profile until the profile is deleted.
 
 ## Unity, one-time setup
 
-Unity is opt-in (`STORES=...,unity`) and its checkout refuses the free coupon until your Unity account
-carries a complete billing address. That is the one thing the bot cannot invent for you, so on the first
-claim it opens the checkout, pings you the same way it does for a login, and waits as long as
-`VNC_LOGIN_TIMEOUT` says, three minutes by default:
+Unity is opt-in (`STORES=...,unity`) and its checkout refuses the free coupon until your Unity account carries a complete billing address. That is the one thing the bot cannot invent for you, so on the first claim it opens the checkout, pings you the same way it does for a login, and waits as long as `VNC_LOGIN_TIMEOUT` says, three minutes by default:
 
-1. Open the VNC session and fill in what it names as missing: first name, last name, address, postal
-code and city.
-2. Answer **"Are you exempt from paying consumption tax?"** with **No**, unless you genuinely have a
-tax number. With one on the account, the bot leaves that section alone.
+1. Open the VNC session and fill in what it names as missing: first name, last name, address, postal code and city.
+2. Answer **"Are you exempt from paying consumption tax?"** with **No**, unless you genuinely have a tax number. With one on the account, the bot leaves that section alone.
 3. Leave the page as it is, the bot applies the coupon and finishes the claim in the same session.
 
-Unity keeps this on your account, so every later week runs unattended. Missing the window is not a
-failure: the asset is reported as `skipped:setup`, the rest of the run carries on, and the next run tries
-again (each giveaway lasts a week).
+Unity keeps this on your account, so every later week runs unattended. Missing the window is not a failure: the asset is reported as `skipped:setup`, the rest of the run carries on, and the next run tries again (each giveaway lasts a week).
 
 > [!NOTE]
-> **The claim is written for Unity's checkout in English**, which is what the bot's browser profile asks
-> for. It finds the coupon box, the total and the confirm button by their English labels. If your account
-> forces another language onto the checkout, the bot cannot read the amount, so it refuses to confirm the
-> order and reports the asset as not claimed. It never pays in that state: the only thing it ever confirms
-> is a total of exactly zero. Set the Asset Store language back to English and the claim works again.
+> **The claim is written for Unity's checkout in English**, which is what the bot's browser profile asks for. It finds the coupon box, the total and the confirm button by their English labels. If your account forces another language onto the checkout, the bot cannot read the amount, so it refuses to confirm the order and reports the asset as not claimed. It never pays in that state: the only thing it ever confirms is a total of exactly zero. Set the Asset Store language back to English and the claim works again.
 
 ---
 
 ### Scheduler
 
-The application supports three scheduling modes: running on a recurring interval
-(`SCHEDULER_HOURS`), running at specific daily clock times (`SCHEDULER_FIXED_TIMES`), or combining
-both.
+The application supports three scheduling modes: running on a recurring interval (`SCHEDULER_HOURS`), running at specific daily clock times (`SCHEDULER_FIXED_TIMES`), or combining both.
 
 ### Scheduling Modes & Interaction
 
@@ -300,9 +265,7 @@ both.
    - `SCHEDULER_HOURS` accepts any positive number (e.g. `1`, `12`, `24`, `48`, `72`).
    - The timer counts exactly `SCHEDULER_HOURS` from when the container/application started.
 
-2. **Fixed Daily Times Mode**: Runs *only* at specific wall-clock times every day (ideal for timing
-drop windows like 17:00 Epic Games releases). To use only fixed daily times without interval runs,
-set `SCHEDULER_HOURS=0`.
+2. **Fixed Daily Times Mode**: Runs *only* at specific wall-clock times every day (ideal for timing drop windows like 17:00 Epic Games releases). To use only fixed daily times without interval runs, set `SCHEDULER_HOURS=0`.
    ```ini
    SCHEDULER_HOURS=0
    SCHEDULER_TIMEZONE=Europe/Berlin
@@ -311,8 +274,7 @@ set `SCHEDULER_HOURS=0`.
    - `SCHEDULER_FIXED_TIMES` accepts comma-separated 24-hour `HH:MM` strings.
    - `SCHEDULER_TIMEZONE` specifies the IANA timezone used for matching these times (`UTC`, `Europe/Berlin`, `America/New_York`), automatically accounting for Daylight Saving Time transitions.
 
-3. **Combined Mode**: Runs *both* every `SCHEDULER_HOURS` **and** at each `SCHEDULER_FIXED_TIMES`
-independently.
+3. **Combined Mode**: Runs *both* every `SCHEDULER_HOURS` **and** at each `SCHEDULER_FIXED_TIMES` independently.
    ```ini
    SCHEDULER_HOURS=24
    SCHEDULER_TIMEZONE=Europe/Berlin
@@ -324,9 +286,7 @@ independently.
 
 ### Selective module execution
 
-Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`/`amazon`, `gog`,
-`ubisoft`/`ubi`, `fab`, `unity`, `microsoft`/`ms`/`xbox`, `aliexpress`/`ae`, `itchio`/`itch`, `fanatical`,
-`indiegala`, `alienware`):
+Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`/`amazon`, `gog`, `ubisoft`/`ubi`, `fab`, `unity`, `microsoft`/`ms`/`xbox`, `aliexpress`/`ae`, `itchio`/`itch`, `fanatical`, `indiegala`, `alienware`):
 
 ```bash
 # Method 1: Via environment variable (recommended)
@@ -339,23 +299,14 @@ STORES=epic,gog docker compose up -d
 docker compose run --rm app python main.py steam gog --once
 ```
 
-To skip a store, simply exclude it from the `STORES` list. Any unrecognized settings are now
-reported at startup rather than being ignored silently.
+To skip a store, simply exclude it from the `STORES` list. Any unrecognized settings are now reported at startup rather than being ignored silently.
 
 > [!NOTE]
-> **What happens in one run, in order.** GamerPower is asked first, once, and only when this run has a
-> store that can use the answer. Then each big store runs: it claims what it finds itself and, at the end
-> of the same browser session, the giveaways GamerPower found for it. Then any GOG and Microsoft keys
-> waiting from Prime Gaming are redeemed, each only when its store is in this run. Then come the sites
-> with no module of their own (Itch.io, Fanatical, IndieGala, Alienware Arena), all in one browser window.
-> Last, any Steam key a Fanatical giveaway handed out is activated on your Steam account, when Steam is in
-> this run.
+> **What happens in one run, in order.** GamerPower is asked first, once, and only when this run has a store that can use the answer. Then each big store runs: it claims what it finds itself and, at the end of the same browser session, the giveaways GamerPower found for it. Then any GOG and Microsoft keys waiting from Prime Gaming are redeemed, each only when its store is in this run. Then come the sites with no module of their own (Itch.io, Fanatical, IndieGala, Alienware Arena), all in one browser window. Last, any Steam key a Fanatical giveaway handed out is activated on your Steam account, when Steam is in this run.
 >
-> So `STORES=steam` also claims the Steam giveaways GamerPower lists, and `STORES=prime` sends GamerPower
-> no request at all, because nothing in that run could use it.
+> So `STORES=steam` also claims the Steam giveaways GamerPower lists, and `STORES=prime` sends GamerPower no request at all, because nothing in that run could use it.
 >
-> Without `steam` in `STORES`, a Fanatical key stays in your Fanatical library and the summary says so.
-> IndieGala adds its games to your IndieGala library.
+> Without `steam` in `STORES`, a Fanatical key stays in your Fanatical library and the summary says so. IndieGala adds its games to your IndieGala library.
 
 
 ---
@@ -408,43 +359,22 @@ free-games-claimer-remaster/
 
 ### How it works
 
-1. **Scheduler** (`main.py`) supports recurring interval timers (`SCHEDULER_HOURS`), fixed daily
-drop windows (`SCHEDULER_FIXED_TIMES`), combined execution, and initial startup checks
-(`RUN_ON_STARTUP`).
-2. Each store module **starts its own browser** with an isolated profile, securely recalling session
-cookies (`--restore-last-session`). A first tab that arrives late no longer takes the store down,
-and each profile is marked as cleanly closed before every start. Two exceptions save a login: Fab
-rides Epic's profile, and a GamerPower find is claimed inside the session the store already opened,
-rather than in a second browser of its own.
+1. **Scheduler** (`main.py`) supports recurring interval timers (`SCHEDULER_HOURS`), fixed daily drop windows (`SCHEDULER_FIXED_TIMES`), combined execution, and initial startup checks (`RUN_ON_STARTUP`).
+2. Each store module **starts its own browser** with an isolated profile, securely recalling session cookies (`--restore-last-session`). A first tab that arrives late no longer takes the store down, and each profile is marked as cleanly closed before every start. Two exceptions save a login: Fab rides Epic's profile, and a GamerPower find is claimed inside the session the store already opened, rather than in a second browser of its own.
 3. **Login detection** checks the page DOM (not just cookies/DB).
-4. **Fingerprint** is the one nodriver's patched Chrome produces by itself, because a hand-written
-desktop spoof did not match the real container and started summoning captchas (see CHANGELOG 1.4).
-Only AliExpress overrides it, injecting one coherent real-device Android fingerprint
-(`browserforge`) over the Chrome DevTools Protocol.
-5. **Game discovery** prefers each store's own data over scraping the page: Epic's promotions API,
-Ubisoft's embedded news feed, Fab's free-content blade, the GamerPower API, and SteamDB for Steam.
-6. **Store selection** (`STORES`) is published to the run, so a GamerPower find is only claimed when
-this run includes the store it belongs to.
-7. **A claim counts only when the store agrees.** After the checkout the bot reads the product page
-or the account's own list back (Epic, Fab, Unity, Itch.io, IndieGala, Fanatical) and reports `claimed` only then,
-otherwise it says so instead of guessing. `fgc.db` (SQLite) remembers the outcome so runs do not
-trip over each other.
-8. **Clean Notifications** dispatch to you dynamically based on the toggles configured in the `.env`
-settings, and a daily update check tells you when a newer release is out (`NOTIFY_UPDATES`).
-9. **Two-factor sign-in follows one rule everywhere.** With an authenticator secret set
-(`*_OTP_KEY`) the bot sends two codes, the second one different from the first because a refused
-code stays refused inside its 30-second window. Then a recovery code from `*_OTP_CODES` if you gave
-it any, and only then the screen is left to you over VNC.
-10. **Your settings are read back to you at startup.** Anything in `.env` the bot does not
-understand is named in the log instead of being ignored, and account names are masked
-(`p***@gmail.com`) so a log is safe to share.
+4. **Fingerprint** is the one nodriver's patched Chrome produces by itself, because a hand-written desktop spoof did not match the real container and started summoning captchas (see CHANGELOG 1.4). Only AliExpress overrides it, injecting one coherent real-device Android fingerprint (`browserforge`) over the Chrome DevTools Protocol.
+5. **Game discovery** prefers each store's own data over scraping the page: Epic's promotions API, Ubisoft's embedded news feed, Fab's free-content blade, the GamerPower API, and SteamDB for Steam.
+6. **Store selection** (`STORES`) is published to the run, so a GamerPower find is only claimed when this run includes the store it belongs to.
+7. **A claim counts only when the store agrees.** After the checkout the bot reads the product page or the account's own list back (Epic, Fab, Unity, Itch.io, IndieGala, Fanatical) and reports `claimed` only then, otherwise it says so instead of guessing. `fgc.db` (SQLite) remembers the outcome so runs do not trip over each other.
+8. **Clean Notifications** dispatch to you dynamically based on the toggles configured in the `.env` settings, and a daily update check tells you when a newer release is out (`NOTIFY_UPDATES`).
+9. **Two-factor sign-in follows one rule everywhere.** With an authenticator secret set (`*_OTP_KEY`) the bot sends two codes, the second one different from the first because a refused code stays refused inside its 30-second window. Then a recovery code from `*_OTP_CODES` if you gave it any, and only then the screen is left to you over VNC.
+10. **Your settings are read back to you at startup.** Anything in `.env` the bot does not understand is named in the log instead of being ignored, and account names are masked (`p***@gmail.com`) so a log is safe to share.
 
 ---
 
 ## Notifications
 
-Both Discord and Apprise can be configured simultaneously, notifications are sent to ALL configured
-services in parallel via async dispatch.
+Both Discord and Apprise can be configured simultaneously, notifications are sent to ALL configured services in parallel via async dispatch.
 
 - **Discord**: Set `DISCORD_WEBHOOK` in `.env`.
 - **Apprise (Telegram, Slack, Email, ntfy, etc.)**: Set `NOTIFY` in `.env`. You can provide multiple URLs separated by commas (e.g. `NOTIFY=ntfy://topic, tgram://token/id`).
@@ -471,27 +401,37 @@ services in parallel via async dispatch.
 
 ### Running on a NAS (TrueNAS Scale, Unraid, Synology)
 
-The container runs Chrome on a screen of its own and expects to be root inside that container, which is
-what Docker does by default. NAS app templates often change it, so three things are worth checking:
+The container runs Chrome on a screen of its own and expects to be root inside that container, which is what Docker does by default. NAS app templates often change it, so three things are worth checking:
 
-- **Which user the app runs as.** The first line of the log says it: `Running as root(0), data folder is
-  writable`. If the template sets a user for the container itself, the bot can neither save your sessions
-  nor start the screen, which arrives as two faults that look unrelated. To run as your own user, leave the
-  container as root and set `PUID` and `PGID` instead (on TrueNAS the apps user is usually `568`).
-- **The memory limit.** Chrome dies the moment memory runs short, and from the outside that looks like a
-  browser which never starts. Give the container 2 GB or more.
+- **Which user the app runs as.** The first line of the log says it: `Running as root(0), data folder is writable`. If the template sets a user for the container itself, the bot can neither save your sessions nor start the screen, which arrives as two faults that look unrelated. To run as your own user, leave the container as root and set `PUID` and `PGID` instead (on TrueNAS the apps user is usually `568`).
+- **The memory limit.** Chrome dies the moment memory runs short, and from the outside that looks like a browser which never starts. Give the container 2 GB or more.
 - **The port.** noVNC listens on 7080 inside the container, so map it to a port that is free on the NAS.
+
+### Hardening the container
+
+The bot also runs with a read-only filesystem, as your own user and with every capability dropped except the three it needs at start to switch to that user. Add this to the `app` service in `docker-compose.yml` and set `PUID` and `PGID` in `.env`:
+
+```yaml
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges=true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+```
+
+Only the `fgc_data` volume and `/tmp`, which lives in memory, are written to, so your sign-ins survive restarts as before. Without `PUID` you can leave out `cap_add` as well.
 
 ### Sessions, profiles and the data volume
 
-The bot keeps three things outside the container: one browser profile per store, which holds your
-logins, `fgc.db`, which records what has already been claimed, and `used_*_codes.txt`, the list of
-recovery codes already spent. All of it lives in the `fgc_data` volume. **The program itself is not in
-there**, it comes with the image, so deleting the volume never updates anything. It only makes you sign
-in again.
+The bot keeps three things outside the container: one browser profile per store, which holds your logins, `fgc.db`, which records what has already been claimed, and `used_*_codes.txt`, the list of recovery codes already spent. All of it lives in the `fgc_data` volume. **The program itself is not in there**, it comes with the image, so deleting the volume never updates anything. It only makes you sign in again.
 
-Itch.io, Fanatical, IndieGala and Alienware Arena share one profile called `base`, because one browser
-claims them all in a row. Fab rides Epic's profile for the same reason.
+Itch.io, Fanatical, IndieGala and Alienware Arena share one profile called `base`, because one browser claims them all in a row. Fab rides Epic's profile for the same reason.
 
 See what is stored:
 
@@ -499,10 +439,7 @@ See what is stored:
 docker compose run --rm --entrypoint bash app -c "ls /fgc/data/browser"
 ```
 
-Reset one store, Epic in this example, when that store keeps failing in a way that looks like
-leftover state: it will not sign in although the session should be valid, or its browser will not
-start at all. There is nothing that wears out, so this is a repair, not maintenance, and it is not
-worth doing on a schedule:
+Reset one store, Epic in this example, when that store keeps failing in a way that looks like leftover state: it will not sign in although the session should be valid, or its browser will not start at all. There is nothing that wears out, so this is a repair, not maintenance, and it is not worth doing on a schedule:
 
 ```bash
 docker compose down
@@ -519,38 +456,24 @@ docker compose down -v
 docker compose up -d
 ```
 
-Keep this one for when you are truly stuck. You lose every saved login and the record of what was
-already claimed, so the bot walks back through titles it had marked as done. Epic deserves a warning of
-its own: it judges how established a browser profile looks, so a brand new profile is exactly when it
-starts asking for captchas. Keep that profile if you can.
+Keep this one for when you are truly stuck. You lose every saved login and the record of what was already claimed, so the bot walks back through titles it had marked as done. Epic deserves a warning of its own: it judges how established a browser profile looks, so a brand new profile is exactly when it starts asking for captchas. Keep that profile if you can.
 
 ### Something is not working, what to send us
 
-The log already carries the bot's diagnostic detail, because `DEBUG` is on by default. With `DEBUG=false`
-it shows only what you act on: which store is running, who is signed in, what was found and claimed, plus
-every warning and error.
+The log already carries the bot's diagnostic detail, because `DEBUG` is on by default. With `DEBUG=false` it shows only what you act on: which store is running, who is signed in, what was found and claimed, plus every warning and error.
 
 1. **Check you are on the newest code first**, the fix may already exist. `docker logs fgc-remaster
 | head -20` prints the version in the banner. To try the development build, set `FGC_TAG=dev` in
 `.env`, then `docker compose pull` and `docker compose up -d`.
-2. If your `.env` has `DEBUG=false`, remove that line and restart (`docker compose up -d`), then reproduce
-the problem.
-3. Collect the log. Go to the folder that holds your `docker-compose.yml` and run `docker logs
-fgc-remaster --tail 500 > fgc.log.txt`. **The file appears in that folder, next to
-`docker-compose.yml`**, and you drag it into the GitHub comment box. Pasting the terminal output of
-the command itself sends us nothing, the log is inside the file. Prefer pasting? Run `docker logs
-fgc-remaster --tail 100` and put the output between triple backticks. Account names are masked for
-you (`p***@gmail.com`), so either way it is safe to share.
+2. If your `.env` has `DEBUG=false`, remove that line and restart (`docker compose up -d`), then reproduce the problem.
+3. Collect the log. Go to the folder that holds your `docker-compose.yml` and run `docker logs fgc-remaster --tail 500 > fgc.log.txt`. **The file appears in that folder, next to `docker-compose.yml`**, and you drag it into the GitHub comment box. Pasting the terminal output of the command itself sends us nothing, the log is inside the file. Prefer pasting? Run `docker logs fgc-remaster --tail 100` and put the output between triple backticks. Account names are masked for you (`p***@gmail.com`), so either way it is safe to share.
 4. **Keep that file, then try it clean.** Leftover state explains a surprising share of these:
    ```bash
    docker compose down -v     # stops the bot and throws away logins and claim history
    docker compose pull        # takes the newest image
    docker compose up -d       # starts fresh, sign in again through VNC
    ```
-   This is step two, never step one: `-v` deletes the volume, so every store asks you to sign in again
-   and the bot re-checks titles it had already claimed. If the problem is gone, that was it. If it comes
-   back, make a second log the same way as above and send **both**, the one from before and the one from
-   after. Two logs of the same fault from two clean starts say far more than one.
+   This is step two, never step one: `-v` deletes the volume, so every store asks you to sign in again and the bot re-checks titles it had already claimed. If the problem is gone, that was it. If it comes back, make a second log the same way as above and send **both**, the one from before and the one from after. Two logs of the same fault from two clean starts say far more than one.
 5. Look in the `data/` folder for what the bot saw:
    - `data/screenshots/<store>/`, screenshots taken at every failure. A failed code redemption shows the code and the account on screen, so look before you attach one,
    - `data/ae_coin_api.json`, raw AliExpress check-in responses (streak, coins),
@@ -559,18 +482,23 @@ you (`p***@gmail.com`), so either way it is safe to share.
    - `data/*_fail.html`, page snapshots from failed logins/check-ins.
 6. Watch it live if it is still running: open `http://localhost:7080` (noVNC) and take over the browser.
 
-A good bug report is: what you expected, what happened, the `DEBUG=true` log around the failure, and the
-matching screenshot. `DEBUG=true` covers what the bot itself did; only add `DEBUG_LIBS=true` if you are
-asked for the raw network or browser traffic, because that turns one run into tens of thousands of lines.
-Please switch `DEBUG_LIBS` off again once the problem is solved.
+A good bug report is: what you expected, what happened, the `DEBUG=true` log around the failure, and the matching screenshot. `DEBUG=true` covers what the bot itself did; only add `DEBUG_LIBS=true` if you are asked for the raw network or browser traffic, because that turns one run into tens of thousands of lines. Please switch `DEBUG_LIBS` off again once the problem is solved.
+
+---
+
+## Support the project
+
+This bot started as one of my personal automations for everyday tasks, and it is free for everyone to use. I put a lot of my own time into developing it, with the support of paid AI tools. If you like the project, your support helps cover those costs and the time it takes to keep it going.
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/padamiec"><img alt="Support the project on Buy Me a Coffee" src=".github/support-button.svg" height="50" /></a>
+</p>
 
 ---
 
 ## Credits
 
-Inspired by [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer) – the original
-Node.js project.
-This remaster is a **completely independent rewrite** in Python, not a fork.
+Inspired by [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer) – the original Node.js project. This remaster is a **completely independent rewrite** in Python, not a fork.
 
 ---
 

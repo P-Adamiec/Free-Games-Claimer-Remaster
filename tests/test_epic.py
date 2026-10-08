@@ -4,6 +4,7 @@ Walking Epic's checkout only proves what that page displayed, so a claim counts
 only once the product page itself reports the game as owned.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -266,3 +267,20 @@ class TestNoConsentIsGivenForYou:
     def test_only_the_licence_box_is_ever_ticked(self):
         assert 'input[type="checkbox"]' not in self.SOURCE
         assert self.SOURCE.count("querySelector('input#agree')") == 2
+
+
+class TestTheEpicSignInPage:
+    """Issue #72 (PR #74 by @privatepenguinzero): the sign-in page is read with CSS lookups, never a text guess."""
+
+    STORES = Path(__file__).resolve().parent.parent / "src" / "stores"
+
+    @pytest.mark.parametrize("name", ["epic.py", "epic_fab.py"])
+    def test_css_selectors_go_to_select_not_find(self, name):
+        # find() is a text search; select() is the CSS lookup these fields need.
+        source = (self.STORES / name).read_text(encoding="utf-8")
+        assert not re.findall(r"""\.find\(\s*["'](#|\[|[a-z]+\[|[a-z]+#)""", source)
+
+    def test_no_text_fallback_can_reach_sign_in_with_apple(self):
+        source = (self.STORES / "epic.py").read_text(encoding="utf-8")
+        press = source.split("async def _press_sign_in", 1)[1].split("\n    async def ", 1)[0]
+        assert 'find("Sign in"' not in press and 'select("#sign-in"' in press

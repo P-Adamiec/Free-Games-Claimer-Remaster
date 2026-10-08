@@ -129,7 +129,8 @@ class TestRunningAsYourOwnUser:
         # A container a template already started as someone else cannot change user, so it says so.
         branch = ENTRYPOINT.split('if [ -n "${PUID:-}" ]; then', 1)[1].split("\nfi\n", 1)[0]
         assert 'if [ "$run_uid" != "0" ]' in branch
-        assert "setpriv --reuid=\"$PUID\" --regid=\"$PGID\" --init-groups" in branch
+        assert 'setpriv --reuid="$PUID" --regid="$PGID" "$groups"' in branch
+        assert "--init-groups" in branch and "--clear-groups" in branch
 
     def test_the_data_folder_is_handed_over_only_when_needed(self):
         # Browser profiles are thousands of files, so chown only runs while something is not theirs.
@@ -150,9 +151,31 @@ class TestRunningAsYourOwnUser:
         assert "CHOWN, SETUID and SETGID" in branch and "cap_add" in branch
 
 
+class TestAReadOnlyContainer:
+    """Issue #58: read_only: true leaves only volumes and tmpfs writable; groupadd then stopped the start."""
+
+    BRANCH = ENTRYPOINT.split('if [ -n "${PUID:-}" ]; then', 1)[1].split("\nfi\n", 1)[0]
+
+    def test_no_user_is_written_into_a_read_only_etc(self):
+        guard = self.BRANCH.index("if [ -w /etc/passwd ] && [ -w /etc/group ]; then")
+        assert guard < self.BRANCH.index("groupadd") < self.BRANCH.index("useradd")
+
+    def test_the_home_folder_falls_back_to_tmp(self):
+        assert 'if mkdir -p /fgc/home 2>/dev/null; then' in self.BRANCH
+        assert "export HOME=/tmp/fgc-home" in self.BRANCH
+
+    def test_a_user_without_a_passwd_entry_still_switches(self):
+        assert 'if getent passwd "$PUID" >/dev/null; then groups=--init-groups; else groups=--clear-groups; fi' in self.BRANCH
+
+
 class TestTheVncPassword:
     """Issue #67: TurboVNC refuses a password file others can read, and the container looped."""
 
     def test_the_file_is_private(self):
         block = START_VNC.split('pw="-rfbauth', 1)[1].split("\nfi\n", 1)[0]
         assert 'chmod 600 "$HOME/.vnc/passwd"' in block
+
+    def test_the_folder_is_private_too(self):
+        # vncserver rejects a .vnc folder under /tmp unless its mode is exactly 700.
+        block = START_VNC.split('pw="-rfbauth', 1)[1].split("\nfi\n", 1)[0]
+        assert 'chmod 700 "$HOME/.vnc"' in block

@@ -2,9 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project does not follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): every release raises the number after the dot (1.10, 1.11), and a development build carries the same number with a `d` suffix (`v1.11d`).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project does not follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): every release raises the number after the dot (1.10, 1.11), and a development build carries the same number with a `d` suffix (`v1.11d`). The version being worked on stays at the top without a date until it is released.
 
-## [Unreleased]
+## [1.12] - 2026-10-08
+
+### Added
+- **The container runs with a read-only filesystem ([#58](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/58))** – with `read_only: true` and `/tmp` as tmpfs, `docker-entrypoint.sh` no longer writes a user into `/etc` and keeps its home folder in `/tmp`, also with `PUID`. The README shows a hardened compose.
+- **The Fanatical newsletter is taken back out** – when a claim signs you up for Fanatical's newsletter, `_claim_fanatical_game()` in `src/stores/gamerpower.py` unsubscribes you again afterwards; a newsletter you already had stays. Set `FANATICAL_NEWSLETTER=true` to keep it, like `GOG_NEWSLETTER`.
+- **A way to support the project** – the README has a Buy Me a Coffee button under "Support the project", and `.github/FUNDING.yml` puts a Sponsor button on the repository page. The bot stays free for everyone; support helps cover its costs and the time that goes into it.
+
+### Fixed
+- **Fanatical giveaways are claimed to the end ([#71](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/71))** – `_claim_fanatical_game()` in `src/stores/gamerpower.py` no longer takes a valid session for a logged-out one and finishes the free checkout; the key of the completed order is activated on Steam. Link Steam on Fanatical once: a giveaway that needs it shows as `failed:steam-not-linked`.
+- **Epic sign-in no longer ends on "Sign in with Apple" ([#72](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/72), PR [#74](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/pull/74) by @privatepenguinzero)** – `_press_sign_in()` in `src/stores/epic.py` lost its text search for "Sign in", which could pick the Apple link. Epic's and Fab's sign-in page lookups (`epic.py`, `epic_fab.py`) now use exact CSS selectors.
+- **AliExpress accounts on a country site work ([#73](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/73), PR [#74](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/pull/74) by @privatepenguinzero)** – `src/stores/aliexpress.py` notices when the coin page redirects to a country site such as it.aliexpress.com, remembers it in the browser profile and uses that country's mobile coin page next time. "Raccogli" now counts as the check-in button. No setting needed.
+- **AliExpress knows you are signed in, in any language ([#73](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/73))** – `_is_logged_in()` in `src/stores/aliexpress.py` now reads the check-in calendar the coin page loads for your account, so a page in Italian or any other language no longer sends the bot to the login page. The page's words stay as a fallback.
+- **A hardened container starts again after a hard stop ([#58](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/58))** – with `PUID` and `cap_drop: ALL`, `docker-entrypoint.sh` could not delete a profile lock Chrome left behind and the container restarted forever. It now leaves that lock to the bot, which clears it itself.
 
 ## [1.11] - 2026-10-05
 
@@ -335,7 +347,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - ❌ `unrealengine.js` – Out of scope
 - ❌ `steam-games.js` – Only scraped profiles, never claimed games
 
-[unreleased]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.11...dev
+[1.12]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.11...v1.12
 [1.11]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.10...v1.11
 [1.10]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.9...v1.10
 [1.9]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.8...v1.9

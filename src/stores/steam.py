@@ -6,10 +6,9 @@ import json
 import logging
 import re
 
-import nodriver as uc
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, now_str, filenamify
+from src.core.claimer import BaseClaimer, filenamify
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -142,9 +141,7 @@ class SteamClaimer(BaseClaimer):
             if cfg.notify_errors:
                 await self.notify(f"steam failed: {exc}")
         finally:
-            # Send notification with newly claimed games
-            has_new = [g for g in self.notify_games if g["status"] == "claimed"]
-            # We defer notification sending to main.py
+            # Notifications are sent from main.py.
             await self.close_browser()
 
     # ------------------------------------------------------------------

@@ -9,9 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from src.stores.gamerpower import (COVERED_ELSEWHERE, FAN_ORDERS_JS, FAN_REVEAL_JS, GamerPowerClaimer,
+from src.stores.gamerpower import (COVERED_ELSEWHERE, FAN_GIVEAWAY_JS, FAN_MARK_MAIN_JS, FAN_MARK_PAY_JS,
+                                   FAN_NEWSLETTER_JS, FAN_ORDER_JS, FAN_ORDERS_JS, FAN_REVEAL_JS, FAN_UNSUBSCRIBE_JS,
                                    classify_target, download_only_status, fanatical_game_id,
-                                   fanatical_item_is_steam, find_fanatical_item, is_product_page,
+                                   fanatical_item_is_steam, fanatical_page, fanatical_price, fanatical_receipt_authorised,
+                                   fanatical_receipt_order,
+                                   counts_as_done, fanatical_next_step, fanatical_should_unsubscribe,
+                                   find_fanatical_item, is_product_page,
                                    is_wanted, itch_game_id, login_help_message, needs_otp,
                                    steam_key_in, wanted_types)
 
@@ -247,9 +251,18 @@ class TestFanaticalClaimHonesty:
         assert self.BLOCK.count("claimed = True") == 0
 
     def test_the_claim_is_confirmed_against_the_account(self):
-        # The orders API decides; the page's words are only the fallback when it cannot be read.
-        assert "find_fanatical_item(" in self.BLOCK
-        assert "_fanatical_claim_left_page()" in self.BLOCK and "stillOffered" in self.SOURCE
+        # A COMPLETE order decides; a game sitting in the cart once counted as claimed (#71).
+        assert "_fanatical_complete_order(" in self.BLOCK
+        assert "_fanatical_claim_left_page" not in self.SOURCE and "stillOffered" not in self.SOURCE
+
+    def test_sign_in_is_judged_by_the_header_only(self):
+        # Every giveaway lists "Create or Sign in to a Fanatical account" as a step, signed in or not (#71).
+        assert "Create or Sign in to a Fanatical account" not in self.BLOCK
+        assert "if not await self._fanatical_signed_in():" in self.BLOCK
+
+    def test_the_claim_goes_through_the_checkout(self):
+        claim = self.BLOCK.index('FAN_MARK_MAIN_JS, "Claim button"')
+        assert self.BLOCK.index("_fanatical_finish_steps(") < claim < self.BLOCK.index("_fanatical_checkout(")
 
     def test_an_unconfirmed_claim_is_reported_as_such(self):
         assert 'failed:unconfirmed' in self.BLOCK
@@ -582,14 +595,28 @@ class TestFanaticalAccount:
 
 
     ORDERS = [
-        {"_id": "o1", "items": [{"_id": "i1", "name": "Some Paid Game", "slug": "some-paid-game", "iid": 1}]},
-        {"_id": "o2", "items": [{"_id": "i2", "name": "Free Game: The Giveaway", "slug": "free-game-the-giveaway",
-                                 "serialId": 7, "iid": 2, "drm": ["steam"]}]},
+        {"_id": "o1", "status": "COMPLETE",
+         "items": [{"_id": "i1", "name": "Some Paid Game", "slug": "some-paid-game", "iid": 1}]},
+        {"_id": "o2", "status": "COMPLETE",
+         "items": [{"_id": "i2", "name": "Free Game: The Giveaway", "slug": "free-game-the-giveaway",
+                    "serialId": 7, "iid": 2, "drm": {"steam": True, "epic": False}}]},
     ]
 
     def test_the_giveaway_item_is_found_by_its_slug(self):
         found = find_fanatical_item(self.ORDERS, "free-game-the-giveaway", "anything")
-        assert found["oid"] == "o2" and found["item"]["_id"] == "i2"
+        assert found["oid"] == "o2" and found["item"]["_id"] == "i2" and found["status"] == "COMPLETE"
+
+    def test_a_top_level_item_reveals_without_a_bundle_id(self):
+        assert find_fanatical_item(self.ORDERS, "free-game-the-giveaway", "x")["bid"] is None
+
+    def test_an_unfinished_checkout_is_found_but_not_complete(self):
+        # /user/orders also lists INITIALISED orders, the cart that never got checked out (#71).
+        orders = [{"_id": "o9", "status": "INITIALISED", "items": [dict(self.ORDERS[1]["items"][0])]}]
+        assert find_fanatical_item(orders, "free-game-the-giveaway", "x")["status"] == "INITIALISED"
+
+    def test_a_complete_order_wins_over_an_earlier_unfinished_one(self):
+        orders = [{"_id": "o9", "status": "INITIALISED", "items": [dict(self.ORDERS[1]["items"][0])]}] + self.ORDERS
+        assert find_fanatical_item(orders, "free-game-the-giveaway", "x")["oid"] == "o2"
 
     def test_or_by_its_name_when_the_slug_differs(self):
         found = find_fanatical_item(self.ORDERS, "other-slug", "Free Game - The Giveaway!")
@@ -618,22 +645,259 @@ class TestFanaticalAccount:
         ({"name": "A game"}, True),
         ({"drm": ["epicgames"]}, False),
         ({"drm": ["gog"]}, False),
+        # Order items name every platform with true or false; "steam": false once counted as Steam (#71).
+        ({"drm": {"steam": False, "epic": True}}, False),
+        ({"drm": {"steam": True, "gog": False}}, True),
     ])
     def test_a_key_goes_to_steam_only_when_nothing_says_otherwise(self, item, steam):
         assert fanatical_item_is_steam(item) is steam
 
-    def test_both_calls_use_the_sites_own_token(self):
-        for js in (FAN_ORDERS_JS, FAN_REVEAL_JS):
+    def test_every_call_uses_the_sites_own_token_and_headers(self):
+        # The site's api client sends these on every request (api/index.js generateHeaders).
+        for js in (FAN_ORDERS_JS, FAN_ORDER_JS, FAN_REVEAL_JS, FAN_UNSUBSCRIBE_JS, FAN_NEWSLETTER_JS):
             assert "localStorage.getItem('bsauth')" in js and "authorization: auth.token" in js
+            for header in ("h.anonid", "'x-fan-fp'", "'X-Fan-Client-Version'"):
+                assert header in js
         assert "/api/user/orders/redeem" in FAN_REVEAL_JS and "atok" in FAN_REVEAL_JS
 
     def test_a_key_is_revealed_only_after_the_bots_own_claim(self):
         block = TestFanaticalClaimHonesty.BLOCK
         owned = block.split("if owned:", 1)[1].split("if cfg.dryrun:", 1)[0]
         assert "_fanatical_reveal_key" not in owned
-        assert block.index("_fanatical_reveal_key") > block.index("if claimed:")
+        assert block.index("_fanatical_reveal_key") > block.index("_fanatical_complete_order(")
 
-    def test_a_key_waiting_for_steam_keeps_its_claimed_row(self):
+    def test_the_order_list_alone_is_found_by_name(self):
+        # Read live 8.10: /user/orders lists items as {name, bundles} only, no slug, ids or platform.
+        orders = [{"_id": "o3", "status": "COMPLETE", "items": [{"name": "Spooky Cats", "bundles": []}]}]
+        assert find_fanatical_item(orders, "spooky-cats", "Spooky Cats")["oid"] == "o3"
+
+    def test_the_reveal_and_the_platform_come_from_the_order_itself(self):
+        # Revealing with the list item sent no ids and got a 400 (#71); /user/orders/<id> has them.
+        source = TestFanaticalClaimHonesty.SOURCE
+        complete = source.split("async def _fanatical_complete_order", 1)[1].split("\n    async def ", 1)[0]
+        assert "_fanatical_order_item(" in complete
+        assert "FAN_ORDER_JS" in source.split("async def _fanatical_order_item", 1)[1].split("\n    async def ", 1)[0]
+
+    def test_the_bots_own_order_takes_its_only_item_whatever_the_name(self):
+        order = {"_id": "o4", "status": "COMPLETE", "items": [{"_id": "i4", "name": "Spooky Cats: Deluxe"}]}
+        assert find_fanatical_item([order], "other-slug", "Spooky Cats") is None
+        assert find_fanatical_item([order], "other-slug", "Spooky Cats", sole_item=True)["oid"] == "o4"
+        order["items"].append({"_id": "i5", "name": "Something Else"})
+        assert find_fanatical_item([order], "other-slug", "Spooky Cats", sole_item=True) is None
+
+    def test_the_reveal_sends_atok_the_way_the_site_does(self):
+        # The site's store holds the raw "bsatok" string, so the whole string goes, empty when missing.
+        assert "const atok = localStorage.getItem('bsatok') || '';" in FAN_REVEAL_JS
+
+    def test_fanaticals_error_text_is_masked_in_the_log(self):
+        # Release review: the reveal's error body may quote the account e-mail.
+        source = TestFanaticalClaimHonesty.SOURCE
+        reveal = source.split("async def _fanatical_reveal_key", 1)[1].split("\n    async def ", 1)[0]
+        assert r'r"\1***@", detail)' in reveal and "detail[:120]" in reveal
+
+    def test_existed_never_overwrites_a_row(self):
+        # Release review: a later "existed" wiped Steam's outcome for the key (claimed and activated, failed:key-*).
         source = TestFanaticalClaimHonesty.SOURCE
         remember = source.split("async def _remember_fanatical", 1)[1].split("\n    async def ", 1)[0]
-        assert 'status == "existed" and str(obj.status or "").startswith("claimed")' in remember
+        assert 'if created or status != "existed":' in remember
+
+    @pytest.mark.parametrize("store,status,done", [
+        ("epic", "claimed", True),
+        ("epic", "existed", True),
+        ("fanatical", "claimed and activated", True),
+        ("fanatical", "failed:key-region", True),
+        ("fanatical", "failed:missing_base", True),
+        ("epic", "failed:unconfirmed", False),
+        ("itchio", "not-free", False),
+        ("steam", "", False),
+    ])
+    def test_a_game_steam_took_the_key_for_is_not_chased_again(self, store, status, done):
+        # Release review: "claimed and activated" was not counted, so the giveaway was routed again every run.
+        assert counts_as_done(store, status) is done
+
+
+class TestFanaticalCheckout:
+    """A giveaway is a free order: cart, checkout, receipt. The bot never pays and never takes the upsell."""
+
+    SOURCE = TestFanaticalClaimHonesty.SOURCE
+    BLOCK = TestFanaticalClaimHonesty.BLOCK
+    CHECKOUT = SOURCE.split("async def _fanatical_checkout", 1)[1].split("\n    async def ", 1)[0]
+    STEPS = SOURCE.split("async def _fanatical_finish_steps", 1)[1].split("\n    async def ", 1)[0]
+
+    @pytest.mark.parametrize("text,price", [
+        ("€0.00", 0.0), ("$0.00", 0.0), ("0,00 zł", 0.0), ("£4.00", 4.0),
+        ("$1,299.99", 1299.99), ("1.299,99 €", 1299.99), ("¥1,299", 1299.0),
+        ("", None), (None, None), ("Free", None),
+    ])
+    def test_prices_are_read_in_every_format(self, text, price):
+        assert fanatical_price(text) == price
+
+    @pytest.mark.parametrize("path,page,expected", [
+        ("/en/cart", "cart", True),
+        ("/en/cart?upsell=true", "cart", True),
+        ("/en/game/cartel-tycoon", "cart", False),
+        ("/en/receipt?authResult=AUTHORISED", "receipt", True),
+        ("/en/game/receipt-of-doom", "receipt", False),
+        ("", "cart", False),
+        ("https://www.fanatical.com/en/receipt?authResult=AUTHORISED", "receipt", True),
+        ("https://www.fanatical.com/en/cart?upsell=true", "cart", True),
+        # A receipt on any other host proves nothing.
+        ("https://evil.example/en/receipt?authResult=AUTHORISED", "receipt", False),
+        ("https://www.fanatical.com.evil.example/en/cart", "cart", False),
+    ])
+    def test_the_cart_is_told_apart_from_a_game_named_like_it(self, path, page, expected):
+        assert fanatical_page(path, page) is expected
+
+    @pytest.mark.parametrize("path,order", [
+        ("/en/receipt?utm_nooverride=1&authResult=AUTHORISED&merchantReference=6a0b1c2d3e4f5a6b7c8d9e0f", "6a0b1c2d3e4f5a6b7c8d9e0f"),
+        ("/en/receipt?authResult=AUTHORISED&merchantReference=", ""),
+        ("/en/receipt?merchantReference=../user", ""),
+        ("/en/cart", ""),
+    ])
+    def test_the_receipt_names_the_order(self, path, order):
+        assert fanatical_receipt_order(path) == order
+
+    def test_nothing_is_clicked_before_a_free_total_is_seen(self):
+        gate = self.CHECKOUT.index("if not free_seen or paid:")
+        assert gate < self.CHECKOUT.index("FAN_MARK_PAY_JS") and gate < self.CHECKOUT.index("FAN_MARK_PROCEED_JS")
+        assert 'return "not-free", ""' in self.CHECKOUT
+        # A total that cannot be read is not free either.
+        assert "if total is None:" in self.CHECKOUT
+
+    def test_only_the_checkout_button_is_pressed_on_the_upsell(self):
+        # The upsell page offers "4 Mystery Games" with an ADD button; only #api-button goes on.
+        assert "button#api-button" in FAN_MARK_PAY_JS and "ADD" not in FAN_MARK_PAY_JS
+
+    def test_only_the_giveaways_own_button_is_pressed(self):
+        # ProductAddToCartButton also sits on every paid add-to-cart on the page.
+        assert ".GiveawaySteps__steps__action button" in FAN_MARK_MAIN_JS
+        assert "ProductAddToCartButton" not in FAN_MARK_MAIN_JS
+
+    def test_a_claim_that_never_reaches_the_cart_does_not_ask_you(self):
+        # A refused claim used to wait minutes and then tell you the game was in your cart.
+        assert 'if not await self._fanatical_click(FAN_MARK_MAIN_JS, "Claim button"):' in self.BLOCK
+        no_cart = self.BLOCK.split('if outcome in ("not-free", "no-cart"):', 1)[1].split("return", 1)[0]
+        assert "_wait_for_vnc_login" not in no_cart
+        assert self.BLOCK.index('if outcome in ("not-free", "no-cart"):') < self.BLOCK.index('if outcome == "stuck":')
+
+    def test_steps_are_read_from_the_markup(self):
+        assert "iconContainer--" in FAN_GIVEAWAY_JS and ".done" in FAN_GIVEAWAY_JS and "sold-out" in FAN_GIVEAWAY_JS
+
+    def test_the_newsletter_is_ticked_once_and_the_rest_is_left_to_you(self):
+        # The site's button toggles the consent, a second click would take it back.
+        assert 'if action == "newsletter":' in self.STEPS and "if not ticked:" in self.STEPS
+        assert "_wait_for_vnc_login(" in self.STEPS
+
+    def test_steam_is_connected_beforehand_not_over_vnc(self):
+        # The README asks for Steam to be connected on Fanatical first, so the bot reports it instead of waiting.
+        steam = self.STEPS.split('if action == "steam":', 1)[1].split('return "steam"', 1)[0]
+        assert "_wait_for_vnc_login" not in steam and "FAN_LINKED_ACCOUNTS_URL" in steam
+        assert self.STEPS.index('return "steam"') < self.STEPS.index("_wait_for_vnc_login(")
+
+    @pytest.mark.parametrize("steps,expected", [
+        ([], ("wait", -1)),
+        ([{"type": "signin", "done": True}, {"type": "newsletter", "done": True}], ("ready", -1)),
+        ([{"type": "signin", "done": True}, {"type": "newsletter", "done": False}], ("newsletter", 1)),
+        ([{"type": "signin", "done": True}, {"type": "wishlistOnSteam", "done": False}], ("human", 1)),
+        # Release review: Steam unlinked behind another step still blocks at once, before anything is ticked or asked.
+        ([{"type": "signin", "done": True}, {"type": "wishlistOnSteam", "done": False},
+          {"type": "steamConnect", "done": False}], ("steam", 2)),
+        ([{"type": "newsletter", "done": False}, {"type": "steamConnect", "done": False}], ("steam", 1)),
+        ([{"type": "steamConnect", "done": True}, {"type": "newsletter", "done": False}], ("newsletter", 1)),
+    ])
+    def test_the_next_step_is_decided_in_one_place(self, steps, expected):
+        assert fanatical_next_step(steps) == expected
+
+    def test_over_vnc_the_bot_waits_for_the_step_it_asked_for(self):
+        # Waiting for every step would never end while a step the bot cannot do is still open.
+        assert "asked_step_done" in self.STEPS and "_wait_for_vnc_login(asked_step_done" in self.STEPS
+        assert '"failed:steam-not-linked"' in self.BLOCK.split('if steps == "steam":', 1)[1].split("return", 1)[0]
+
+    def test_a_sold_out_giveaway_is_no_news(self):
+        sold = self.BLOCK.split('if steps == "sold-out":', 1)[1].split("return", 1)[0]
+        assert "self.notify_games.remove(notify_game)" in sold
+
+
+class TestFanaticalNewsletter:
+    """Unless FANATICAL_NEWSLETTER=true, only a subscription the bot's own claim made is taken back."""
+
+    BLOCK = TestFanaticalClaimHonesty.BLOCK
+
+    def test_the_calls_are_the_sites_own(self):
+        assert "/api/crm/frontunsubscribe" in FAN_UNSUBSCRIBE_JS and "method: 'POST'" in FAN_UNSUBSCRIBE_JS
+        # The account read is the one the site makes on every page load.
+        assert "/api/user/refresh-auth" in FAN_NEWSLETTER_JS and "email_newsletter_pending" in FAN_NEWSLETTER_JS
+
+    @pytest.mark.parametrize("before,after,expected", [
+        (False, True, True),
+        (True, True, False),     # you had it before the claim
+        (False, False, False),   # the claim signed you up for nothing
+        (None, True, False),     # unknown before: leave it alone
+        (False, None, False),    # unknown after: leave it alone
+    ])
+    def test_it_unsubscribes_only_what_the_claim_added(self, before, after, expected):
+        assert fanatical_should_unsubscribe(before, after) is expected
+
+    def test_the_account_is_read_before_any_step_and_after_the_claim(self):
+        # Read live 8.10: an old consent stays in the browser, so a step is no proof; the account before and after is.
+        assert self.BLOCK.index("had_newsletter = None if cfg.fanatical_newsletter else") < self.BLOCK.index(
+            "_fanatical_finish_steps(")
+        # Release review: a claim that reached the checkout signs you up even when it is not confirmed after.
+        after = self.BLOCK.split("was not confirmed as claimed", 1)[1]
+        assert "fanatical_should_unsubscribe(" in after and "_fanatical_unsubscribe(" in after
+        assert self.BLOCK.index("_fanatical_reveal_key(") < self.BLOCK.index("_fanatical_unsubscribe(")
+
+    def test_the_decision_is_in_the_debug_log_and_a_blind_spot_is_a_warning(self):
+        assert "Newsletter for '%s': before %s, after %s" in self.BLOCK
+        assert "Could not check your newsletter after" in self.BLOCK
+
+    def test_no_call_goes_out_without_the_sites_token(self):
+        # The site's own client sends no Authorization header at all without a token.
+        for js in (FAN_ORDERS_JS, FAN_ORDER_JS, FAN_REVEAL_JS, FAN_UNSUBSCRIBE_JS, FAN_NEWSLETTER_JS):
+            assert js.index("if (!auth.token) return") < js.index("fetch(")
+
+    def test_it_works_like_gog_newsletter(self):
+        # Release review: false (the default) unsubscribes, true keeps it, the same way as GOG_NEWSLETTER.
+        source = (Path(__file__).resolve().parent.parent / "src" / "core" / "config.py").read_text(encoding="utf-8")
+        assert 'fanatical_newsletter: bool = _bool("FANATICAL_NEWSLETTER")' in source
+        assert "had_newsletter = None if cfg.fanatical_newsletter else" in self.BLOCK
+        assert "if not cfg.fanatical_newsletter:" in self.BLOCK
+
+
+class TestFanaticalOutcomes:
+    """How each end of the flow is reported."""
+
+    BLOCK = TestFanaticalClaimHonesty.BLOCK
+
+    def test_a_receipt_counts_when_the_account_cannot_confirm_it_but_only_an_authorised_one(self):
+        assert 'if found or (outcome == "receipt" and orders is None and authorised):' in self.BLOCK
+
+    @pytest.mark.parametrize("path,ok", [
+        ("/en/receipt?utm_nooverride=1&authResult=AUTHORISED&merchantReference=6a0b1c2d3e4f5a6b7c8d9e0f", True),
+        ("/en/receipt?authResult=authorised", True),
+        ("/en/receipt?authResult=REFUSED&merchantReference=6a0b1c2d3e4f5a6b7c8d9e0f", False),
+        ("/en/receipt?authResult=CANCELLED", False),
+        ("/en/receipt?merchantReference=6a0b1c2d3e4f5a6b7c8d9e0f", False),
+        ("", False),
+    ])
+    def test_only_a_receipt_that_says_authorised_counts_alone(self, path, ok):
+        # Fanatical shows a receipt page for refused and cancelled orders too (redux/ducks/checkout.js).
+        assert fanatical_receipt_authorised(path) is ok
+
+    def test_a_complete_order_from_the_list_is_kept_when_its_own_page_will_not_load(self):
+        source = TestFanaticalClaimHonesty.SOURCE
+        complete = source.split("async def _fanatical_complete_order", 1)[1].split("\n    async def ", 1)[0]
+        assert "if listed_complete:" in complete and "if misses >= 2:" in complete
+
+    def test_only_an_item_with_its_ids_is_revealed(self):
+        assert 'bool(found["item"].get("_id"))' in self.BLOCK
+
+    def test_a_page_without_steps_is_its_own_failure(self):
+        assert 'if steps == "no-steps":' in self.BLOCK and '"failed:no-steps"' in self.BLOCK
+
+    def test_a_dry_run_knows_a_sold_out_giveaway(self):
+        dry = self.BLOCK.split("if cfg.dryrun:", 1)[1].split("return", 2)
+        assert 'giveaway["soldOut"]' in dry[0] and "self.notify_games.remove(notify_game)" in dry[0]
+
+    def test_a_checkout_you_finish_is_checked_against_the_account(self):
+        assert 'elif outcome == "stuck" and orders is not None:' in self.BLOCK

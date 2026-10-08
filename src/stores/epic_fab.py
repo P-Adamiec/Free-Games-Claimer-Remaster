@@ -10,7 +10,6 @@ import json
 import logging
 
 import nodriver as uc
-import pyotp
 
 from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
 from src.core.config import cfg
@@ -347,7 +346,7 @@ class FabClaimer(BaseClaimer):
             return await self._await_login_outcome()
 
         try:
-            email_input = await self.page.find("#email", timeout=15)
+            email_input = await self.page.select("#email", timeout=15)
             if not email_input:
                 logger.debug("Epic login form did not render.")
                 return "failed"
@@ -357,13 +356,13 @@ class FabClaimer(BaseClaimer):
             await self.sleep(0.5)
 
             # Epic serves two shapes of this form: email first, or both fields at once.
-            password_input = await self.page.find("#password", timeout=5)
+            password_input = await self.page.select("#password", timeout=5)
             if not password_input:
-                continue_btn = await self.page.find("#continue", timeout=5)
+                continue_btn = await self.page.select("#continue", timeout=5)
                 if continue_btn:
                     await continue_btn.click()
                     await self.sleep(3)
-                password_input = await self.page.find("#password", timeout=10)
+                password_input = await self.page.select("#password", timeout=10)
             if not password_input:
                 logger.debug("Epic password field did not render.")
                 return "failed"
@@ -475,7 +474,7 @@ class FabClaimer(BaseClaimer):
         if not cfg.eg_otp_key:
             return False
         try:
-            field = await self.page.find('input[name="code-input-0"]', timeout=5)
+            field = await self.page.select('input[name="code-input-0"]', timeout=5)
             if not field:
                 return False
             logger.debug("Entering the Epic two-step code from EG_OTP_KEY.")
@@ -484,7 +483,7 @@ class FabClaimer(BaseClaimer):
             self._last_totp = await self._fresh_totp(cfg.eg_otp_key, self._last_totp)
             await field.send_keys(self._last_totp)
             await self.sleep(1)
-            submit = await self.page.find('button[type="submit"]', timeout=5)
+            submit = await self.page.select('button[type="submit"]', timeout=5)
             if submit:
                 await submit.click()
                 await self.sleep(4)

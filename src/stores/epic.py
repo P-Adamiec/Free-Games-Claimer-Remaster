@@ -9,10 +9,9 @@ from datetime import datetime, timezone
 
 import httpx
 import nodriver as uc
-import pyotp
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, CHALLENGE_JS, OTP_KEY_ATTEMPTS, now_str
+from src.core.claimer import BaseClaimer, CHALLENGE_JS, OTP_KEY_ATTEMPTS
 from src.core.config import cfg
 from src.core.run_state import needs_you, waits_for_nobody
 from src.core.database import async_session, get_or_create
@@ -490,7 +489,7 @@ class EpicGamesClaimer(BaseClaimer):
     async def _fill_code(self, code: str) -> bool:
         """Type a code into Epic's six boxes and submit. Verified live: they take all six at once."""
         try:
-            first_box = await self.page.find('input[name="code-input-0"]', timeout=5)
+            first_box = await self.page.select('input[name="code-input-0"]', timeout=5)
             if not first_box:
                 return False
             await first_box.clear_input()
@@ -499,7 +498,7 @@ class EpicGamesClaimer(BaseClaimer):
             await self.sleep(1)
             # Epic ticks "Remember device" by default; this only helps when it did not.
             await self._remember_this_browser()
-            submit = await self.page.find('button[type="submit"]', timeout=5)
+            submit = await self.page.select('button[type="submit"]', timeout=5)
             if submit:
                 await submit.click()
                 await self.sleep(3)
@@ -572,7 +571,8 @@ class EpicGamesClaimer(BaseClaimer):
 
     async def _press_sign_in(self) -> bool:
         """Send the sign-in form again, for when a human check interrupted one you had filled."""
-        button = await self.page.select("#sign-in", timeout=5) or await self.page.find("Sign in", timeout=4)
+        # No text fallback: "Sign in" also matches "Sign in with Apple" (#72).
+        button = await self.page.select("#sign-in", timeout=5)
         if not button:
             logger.debug("No sign-in button came back after the check.")
             return False
@@ -590,7 +590,7 @@ class EpicGamesClaimer(BaseClaimer):
         email = cfg.eg_email.strip() if cfg.eg_email else ""
         password = cfg.eg_password.strip() if cfg.eg_password else ""
 
-        email_input = await self.page.find("#email", timeout=10)
+        email_input = await self.page.select("#email", timeout=10)
         if email_input:
             # Click FIRST to trigger Chrome's internal credential manager autofill, then wait for it
             await email_input.click()
@@ -609,13 +609,13 @@ class EpicGamesClaimer(BaseClaimer):
             else:
                 logger.debug("Email autofill succeeded.")
 
-            continue_btn = await self.page.find("#continue", timeout=5)
+            continue_btn = await self.page.select("#continue", timeout=5)
             if continue_btn:
                 await continue_btn.click()
                 logger.debug("Clicked continue, waiting for CSS slide animation...")
                 await self.sleep(3.0)  # Wait for CSS slide transition completely
 
-        password_input = await self.page.find("#password", timeout=10)
+        password_input = await self.page.select("#password", timeout=10)
         if password_input:
             await password_input.click()
             await self.sleep(1.0)
@@ -636,14 +636,14 @@ class EpicGamesClaimer(BaseClaimer):
         try:
             is_checked = await self.page.evaluate('document.querySelector("#rememberMe")?.checked')
             if not is_checked:
-                remember_label = await self.page.find("label[for='rememberMe']", timeout=2)
+                remember_label = await self.page.select("label[for='rememberMe']", timeout=2)
                 if remember_label:
                     await remember_label.click()
                     await self.sleep(0.5)
         except Exception:
             pass
             
-        sign_in_btn = await self.page.find("#sign-in", timeout=5)
+        sign_in_btn = await self.page.select("#sign-in", timeout=5)
         if sign_in_btn:
             await sign_in_btn.click()
             await self.sleep(3)
@@ -1491,8 +1491,6 @@ class EpicGamesClaimer(BaseClaimer):
                 )
             )
             logger.debug("Created isolated world in purchase iframe, ctx=%s", ctx_id)
-
-            text_content = await self._eval_in_frame(ctx_id, "document.body?.innerText || ''")
 
             # Check for "unavailable in your region" using innerText to ignore hidden script tags
             unavailable = await self._eval_in_frame(ctx_id, """

@@ -14,7 +14,8 @@ case "$BROWSER" in /*) ;; *) BROWSER="/fgc/$BROWSER" ;; esac
 
 # Remove Chrome's profile lock files to prevent "profile in use" errors
 # after the container was stopped ungracefully (e.g. power loss, docker kill)
-rm -f "$BROWSER"/*/SingletonLock "$BROWSER"/SingletonLock
+# Best effort: with cap_drop root may not delete the user's files, and the bot clears these locks itself.
+rm -f "$BROWSER"/*/SingletonLock "$BROWSER"/SingletonLock 2>/dev/null || true
 
 # Tell Chrome/nodriver which virtual display to use
 export DISPLAY="${DISPLAY:-:1}"
@@ -43,14 +44,22 @@ if [ -n "${PUID:-}" ]; then
 		echo "PUID needs the CHOWN, SETUID and SETGID capabilities, which this container was started without" \
 			"(cap_drop). Add them back with cap_add, until then the container keeps running as root."
 	else
-		getent group "$PGID" >/dev/null || groupadd -o -g "$PGID" fgc
-		getent passwd "$PUID" >/dev/null || useradd -o -u "$PUID" -g "$PGID" -d /fgc/home -M -s /usr/sbin/nologin fgc
-		export HOME=/fgc/home
+		# read_only: true leaves /etc unwritable, and the numbers alone are enough to switch.
+		if [ -w /etc/passwd ] && [ -w /etc/group ]; then
+			getent group "$PGID" >/dev/null || groupadd -o -g "$PGID" fgc
+			getent passwd "$PUID" >/dev/null || useradd -o -u "$PUID" -g "$PGID" -d /fgc/home -M -s /usr/sbin/nologin fgc
+		fi
+		# Same for /fgc, so the home folder goes to /tmp, the one place a read-only container can write.
+		if mkdir -p /fgc/home 2>/dev/null; then
+			export HOME=/fgc/home
+		else
+			export HOME=/tmp/fgc-home
+		fi
 		mkdir -p "$HOME" /fgc/data /tmp/.X11-unix
 		chmod 1777 /tmp/.X11-unix
 		chown "$PUID:$PGID" "$HOME"
 		# A screen lock left by an earlier root start would keep this user's screen from starting.
-		rm -f /tmp/.X*-lock /tmp/.tX*-lock /tmp/.X11-unix/X*
+		rm -f /tmp/.X*-lock /tmp/.tX*-lock /tmp/.X11-unix/X* 2>/dev/null || true
 		# Only when something still belongs to someone else: browser profiles are thousands of files.
 		for dir in /fgc/data "$BROWSER"; do
 			if [ -e "$dir" ] && [ -n "$(find "$dir" \( ! -user "$PUID" -o ! -group "$PGID" \) -print -quit 2>/dev/null)" ]; then
@@ -58,7 +67,9 @@ if [ -n "${PUID:-}" ]; then
 				chown -R "$PUID:$PGID" "$dir"
 			fi
 		done
-		run_as=(setpriv --reuid="$PUID" --regid="$PGID" --init-groups)
+		# --init-groups looks the user up by name, which a user with no passwd entry does not have.
+		if getent passwd "$PUID" >/dev/null; then groups=--init-groups; else groups=--clear-groups; fi
+		run_as=(setpriv --reuid="$PUID" --regid="$PGID" "$groups")
 		run_uid="$PUID"
 	fi
 fi

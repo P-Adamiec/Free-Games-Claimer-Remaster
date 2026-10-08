@@ -17,6 +17,10 @@ updates:
     commit-message:
       prefix: deps
       include: scope
+    # apprise 2.x changes its API; requirements.txt keeps it below 2.0 on purpose (PR #68).
+    ignore:
+      - dependency-name: apprise
+        versions: [">=2.0.0"]
     groups:
       # No update-types filter: a >= requirement bump has no minor/patch classification,
       # so filtering here left every one of them in a pull request of its own.

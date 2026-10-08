@@ -7,10 +7,9 @@ according to user configuration.
 """
 import json
 import re
-import asyncio
 import httpx
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import nodriver as uc
 
@@ -112,7 +111,10 @@ OTP_STATE_JS = r"""
 FAN_SIGNED_OUT_JS = """
     (() => {
         const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-        return [...document.querySelectorAll('button, a')].filter(vis)
+        let token = '';
+        try { token = JSON.parse(localStorage.getItem('bsauth') || '{}').token || ''; } catch (e) {}
+        // A header that has not rendered yet shows no Sign in button either, so the site's token must be there too.
+        return !token || [...document.querySelectorAll('button, a')].filter(vis)
             .some(b => /^sign in$/i.test((b.textContent || '').trim()));
     })()
 """
@@ -257,13 +259,23 @@ def fanatical_game_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
-# Fanatical's account API takes the token its own site keeps in localStorage ("bsauth"), read live 4.10.
+# The site's token ("bsauth") plus the headers its own api client sends on every call (api/index.js); no token, no call.
+_FAN_HEADERS = """
+        const auth = JSON.parse(localStorage.getItem('bsauth') || '{}');
+        if (!auth.token) return JSON.stringify({status: 0});
+        const h = {authorization: auth.token, accept: 'application/json'};
+        try {
+            const a = JSON.parse(localStorage.getItem('bsanonymous') || '{}');
+            if (a.id) h.anonid = String(a.id);
+        } catch (e) {}
+        if (window.fingerprint) h['x-fan-fp'] = String(window.fingerprint);
+        if (window.version) h['X-Fan-Client-Version'] = String(window.version);
+"""
+
 FAN_ORDERS_JS = """
     (async () => {
-        try {
-            const auth = JSON.parse(localStorage.getItem('bsauth') || '{}');
-            if (!auth.token) return JSON.stringify({status: 0});
-            const r = await fetch('/api/user/orders', {headers: {authorization: auth.token, accept: 'application/json'}});
+        try {""" + _FAN_HEADERS + """
+            const r = await fetch('/api/user/orders', {headers: h});
             return JSON.stringify({status: r.status, orders: r.ok ? await r.json() : null});
         } catch (e) {
             return JSON.stringify({status: -1, error: String(e).slice(0, 120)});
@@ -271,40 +283,199 @@ FAN_ORDERS_JS = """
     })()
 """
 
-# The call Fanatical's own "Reveal key" button makes, sent for one order item only.
-FAN_REVEAL_JS = """
+# The order list carries only names; the ids a reveal needs and the platform come from the order itself.
+FAN_ORDER_JS = """
     (async () => {
-        try {
-            const auth = JSON.parse(localStorage.getItem('bsauth') || '{}');
-            let atok = '';
-            try { atok = JSON.parse(localStorage.getItem('bsatok') || '{}').value || ''; } catch (e) {}
-            const r = await fetch('/api/user/orders/redeem', {method: 'POST',
-                headers: {authorization: auth.token, 'content-type': 'application/json', accept: 'application/json'},
-                body: JSON.stringify({...__PAYLOAD__, atok})});
-            return JSON.stringify({status: r.status, data: r.ok ? await r.json() : null});
+        try {""" + _FAN_HEADERS + """
+            const r = await fetch('/api/user/orders/' + encodeURIComponent(__OID__), {headers: h});
+            return JSON.stringify({status: r.status, order: r.ok ? await r.json() : null});
         } catch (e) {
             return JSON.stringify({status: -1, error: String(e).slice(0, 120)});
         }
     })()
 """
 
+# The call Fanatical's own "Reveal key" button makes (key-reveal-service.js), for one order item only.
+FAN_REVEAL_JS = """
+    (async () => {
+        try {""" + _FAN_HEADERS + """
+            if (auth.email_confirmed === false) return JSON.stringify({status: 0, reason: 'email-unconfirmed'});
+            h['content-type'] = 'application/json';
+            // The site's store holds the raw "bsatok" string and sends it whole, not its inner value.
+            const atok = localStorage.getItem('bsatok') || '';
+            const r = await fetch('/api/user/orders/redeem', {method: 'POST', headers: h,
+                body: JSON.stringify({...__PAYLOAD__, atok})});
+            const text = await r.text();
+            let data = null;
+            try { data = JSON.parse(text); } catch (e) {}
+            return JSON.stringify({status: r.status, data, error: r.ok ? '' : text.slice(0, 200)});
+        } catch (e) {
+            return JSON.stringify({status: -1, error: String(e).slice(0, 120)});
+        }
+    })()
+"""
+
+# Your newsletter state as the site reads it on every page load (redux/ducks/initial-load.js refreshAuth).
+FAN_NEWSLETTER_JS = """
+    (async () => {
+        try {""" + _FAN_HEADERS + """
+            const r = await fetch('/api/user/refresh-auth', {headers: h});
+            if (!r.ok) return JSON.stringify({status: r.status});
+            const u = await r.json();
+            return JSON.stringify({status: r.status, subscribed: !!(u.email_newsletter || u.email_newsletter_pending)});
+        } catch (e) {
+            return JSON.stringify({status: -1, error: String(e).slice(0, 120)});
+        }
+    })()
+"""
+
+# What the account page's "unsubscribe from all marketing emails" button sends (redux/ducks/email-subscribe.js).
+FAN_UNSUBSCRIBE_JS = """
+    (async () => {
+        try {""" + _FAN_HEADERS + """
+            h['content-type'] = 'application/json';
+            const r = await fetch('/api/crm/frontunsubscribe', {method: 'POST', headers: h, body: '{}'});
+            return JSON.stringify({status: r.status});
+        } catch (e) {
+            return JSON.stringify({status: -1, error: String(e).slice(0, 120)});
+        }
+    })()
+"""
+
+# The giveaway's steps by their markup (iconContainer--<type> and a .done tick), not their English wording.
+FAN_GIVEAWAY_JS = """
+    (() => {
+        const steps = [...document.querySelectorAll('.GiveawaySteps__step')].map(s => {
+            const icon = s.querySelector('[class*="GiveawaySteps__step__iconContainer--"]');
+            const type = icon ? (icon.className.match(/iconContainer--(\\S+)/) || [])[1] || '' : '';
+            return {type, done: !!s.querySelector('.GiveawaySteps__step__status .done'),
+                    text: (s.innerText || '').replace(/\\s+/g, ' ').trim()};
+        });
+        const soldOut = !!document.querySelector('.product-giveaway-newsletter-required.sold-out');
+        return JSON.stringify({steps, soldOut});
+    })()
+"""
+
+# The cart's total as shown and which checkout control it offers: the upsell link or the pay button itself.
+FAN_CHECKOUT_STATE_JS = """
+    (() => {
+        const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+        const total = [...document.querySelectorAll('.checkout-total .summary-number')].find(vis);
+        const pay = [...document.querySelectorAll('button#api-button')].find(vis);
+        const proceed = [...document.querySelectorAll('a')].filter(vis)
+            .some(x => /^proceed to checkout$/i.test((x.innerText || '').trim()));
+        return JSON.stringify({
+            path: location.href,  // the full address, so fanatical_page() can check the host
+            total: total ? (total.innerText || '').trim() : null,
+            pay: pay ? (pay.innerText || '').replace(/\\s+/g, ' ').trim() : '',
+            payDisabled: !!(pay && pay.disabled),
+            proceed,
+        });
+    })()
+"""
+
+# Each marks the one visible control for nodriver's click: the giveaway button, the cart's upsell link, the pay button.
+_FAN_MARK = """
+    (() => {
+        document.querySelectorAll('[data-fgc-fan]').forEach(e => e.removeAttribute('data-fgc-fan'));
+        const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+        const el = __FIND__;
+        if (!el || el.disabled) return false;
+        el.setAttribute('data-fgc-fan', '1');
+        return true;
+    })()
+"""
+# The same button class sits on every add-to-cart, so only the one in the giveaway's steps box counts.
+FAN_MARK_MAIN_JS = _FAN_MARK.replace(
+    "__FIND__", "[...document.querySelectorAll('.GiveawaySteps__steps__action button')].find(vis)")
+FAN_MARK_PROCEED_JS = _FAN_MARK.replace(
+    "__FIND__", "[...document.querySelectorAll('a')].filter(vis)"
+    ".find(x => /^proceed to checkout$/i.test((x.innerText || '').trim()))")
+# "Proceed To Checkout" without an upsell, "Skip and Proceed To Checkout" after it; never the upsell's own ADD.
+FAN_MARK_PAY_JS = _FAN_MARK.replace(
+    "__FIND__", "[...document.querySelectorAll('button#api-button')].find(vis)")
+
+# Where you connect Steam to Fanatical once; the bot never does it for you.
+FAN_LINKED_ACCOUNTS_URL = "https://www.fanatical.com/en/account/linked-accounts"
+
 STEAM_KEY_RE = re.compile(r"^[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$")
 OTHER_DRM = ("epic", "gog", "uplay", "ubisoft", "origin", "ea app", "battle.net", "microsoft", "xbox", "rockstar")
 
 
-def find_fanatical_item(orders, slug: str, title: str) -> dict | None:
-    """This giveaway's order item as {"oid", "bid", "item"}, matched by slug or name, never by position."""
+def find_fanatical_item(orders, slug: str, title: str, sole_item: bool = False) -> dict | None:
+    """This giveaway's order item as {"oid", "bid", "status", "item"}, a COMPLETE order first, never by position.
+
+    `sole_item` takes a one-item order whatever its name: only for the order the bot's own checkout just made.
+    """
     want = BaseClaimer._normalize_title(title)
+    first = None
     for order in orders if isinstance(orders, list) else []:
         if not isinstance(order, dict):
             continue
-        for item in order.get("items") or []:
-            if not isinstance(item, dict):
-                continue
+        items = [item for item in order.get("items") or [] if isinstance(item, dict)]
+        for item in items:
             text = json.dumps(item).lower()
-            if (slug and f'"{slug.lower()}"' in text) or (want and BaseClaimer._normalize_title(item.get("name") or "") == want):
-                return {"oid": order.get("_id"), "bid": item.get("bid"), "item": item}
-    return None
+            named = want and BaseClaimer._normalize_title(item.get("name") or "") == want
+            if (slug and f'"{slug.lower()}"' in text) or named or (sole_item and len(items) == 1):
+                # Top-level items reveal with bid null; bundles are left to your library.
+                found = {"oid": order.get("_id"), "bid": None, "status": str(order.get("status") or ""), "item": item}
+                if found["status"] == "COMPLETE":
+                    return found
+                first = first or found
+    return first
+
+
+def fanatical_next_step(steps: list) -> tuple[str, int]:
+    """What the giveaway's steps need next: ready, steam, newsletter, human or wait, with that step's position."""
+    if not steps:
+        return "wait", -1
+    # An unlinked Steam account blocks the claim wherever it sits, so nothing else is ticked or asked first.
+    for i, step in enumerate(steps):
+        if step.get("type") == "steamConnect" and not step.get("done"):
+            return "steam", i
+    for i, step in enumerate(steps):
+        if not step.get("done"):
+            return ("newsletter" if step.get("type") == "newsletter" else "human"), i
+    return "ready", -1
+
+
+def fanatical_should_unsubscribe(before: bool | None, after: bool | None) -> bool:
+    """Unsubscribe only when you were not subscribed before the claim and are now; unknown means no."""
+    return before is False and after is True
+
+
+def fanatical_receipt_order(path: str) -> str:
+    """The order id Fanatical puts on its receipt page (merchantReference), empty when there is none."""
+    query = parse_qs(urlparse(str(path or "")).query)
+    ref = (query.get("merchantReference") or [""])[0]
+    return ref if re.fullmatch(r"[0-9a-f]{24}", ref) else ""
+
+
+def fanatical_receipt_authorised(path: str) -> bool:
+    """True when the receipt says the order went through; a refused or cancelled one gets a receipt page too."""
+    result = (parse_qs(urlparse(str(path or "")).query).get("authResult") or [""])[0]
+    return result.upper() in ("AUTHORISED", "AUTHORIZED")
+
+
+def fanatical_page(url: str, page: str) -> bool:
+    """True when `url` is Fanatical's `page` itself ("cart", "receipt"), not a product whose slug starts with it."""
+    url = str(url or "")
+    # A full address must be Fanatical's own: a receipt elsewhere proves nothing.
+    if "://" in url and not url_has_allowed_host(url, "fanatical.com", allow_subdomains=True):
+        return False
+    return bool(re.search(rf"/{page}/?$", urlparse(url).path))
+
+
+def fanatical_price(text) -> float | None:
+    """A price as Fanatical prints it ("€0.00", "0,00 zł", "$1,299.99"), None when there is no number."""
+    match = re.search(r"\d[\d.,\s]*", str(text or ""))
+    if not match:
+        return None
+    number = re.sub(r"\s", "", match.group(0)).rstrip(".,")
+    cents = re.match(r"^(.*?)[.,](\d{2})$", number)
+    if cents:
+        return float(f"{re.sub(r'[.,]', '', cents.group(1)) or 0}.{cents.group(2)}")
+    return float(re.sub(r"[.,]", "", number))
 
 
 def steam_key_in(value) -> str:
@@ -320,9 +491,15 @@ def steam_key_in(value) -> str:
 
 
 def fanatical_item_is_steam(item: dict) -> bool:
-    """A key is sent to Steam only when the item names Steam or no other platform."""
+    """A key is sent to Steam only when the item says Steam, or names no platform at all."""
+    drm = (item or {}).get("drm")
+    # Order items list every platform with true or false, so "steam": false must not count.
+    if isinstance(drm, dict):
+        return bool(drm.get("steam"))
+    if isinstance(drm, list):
+        return "steam" in [str(d).lower() for d in drm]
     text = json.dumps(item or {}).lower()
-    return "steam" in text or not any(drm in text for drm in OTHER_DRM)
+    return "steam" in text or not any(other in text for other in OTHER_DRM)
 
 
 # An owned itch.io game carries a purchase banner; a page you do not own carries none.
@@ -403,14 +580,21 @@ def _clean_title(title: str) -> str:
     return title.strip()
 
 
+def counts_as_done(store: str, status: str) -> bool:
+    """True for a row whose game needs nothing more: claimed or existed, also once Steam took a Fanatical key."""
+    status = str(status or "")
+    # Steam writes its key outcome over a Fanatical row ("claimed and activated", "failed:key-region").
+    return status == "existed" or status.startswith("claimed") or str(store or "") == "fanatical"
+
+
 async def _claimed_titles() -> set:
     """Every title already claimed anywhere, so the same game is not chased twice."""
     titles = set()
     async with async_session() as session:
-        stmt = select(ClaimedGame).where(ClaimedGame.status.in_(["claimed", "existed"]))
-        result = await session.execute(stmt)
+        result = await session.execute(select(ClaimedGame))
         for db_game in result.scalars().all():
-            titles.add(BaseClaimer._normalize_title(db_game.title))
+            if counts_as_done(db_game.store, db_game.status):
+                titles.add(BaseClaimer._normalize_title(db_game.title))
     return titles
 
 
@@ -516,6 +700,7 @@ class GamerPowerClaimer(BaseClaimer):
         # Itch.io signs in once per run, not once per giveaway.
         self._itch_session_ok = False
         self._ig_session_noted = False
+        self._fan_session_noted = False
 
     async def run(self, routed: dict | None = None) -> None:
         """Claim the giveaways that land on sites with no store module of their own."""
@@ -823,11 +1008,7 @@ class GamerPowerClaimer(BaseClaimer):
         return await self._wait_out_challenge(label, store_key=side_store_key(label))
 
     async def _fanatical_signed_in(self) -> bool:
-        """Signed in when no Sign in control is left on the page.
-
-        Verified both ways: the button shows on /, /orders and /account while signed out and
-        on none of them once signed in, where those pages show the account overview instead.
-        """
+        """Signed in when the site's own token is there and no Sign in control is left on the page."""
         try:
             return not bool(await self.page.evaluate(FAN_SIGNED_OUT_JS))
         except Exception as e:
@@ -868,16 +1049,28 @@ class GamerPowerClaimer(BaseClaimer):
         logger.debug("[Fanatical] %d order(s) on the account.", len(answer["orders"]))
         return answer["orders"]
 
+    async def _fanatical_order_item(self, oid: str, game_id: str, title: str, ours: bool = False) -> dict | None:
+        """The item read from its own order, with the ids and platform the order list leaves out."""
+        try:
+            raw = await self.page.evaluate(FAN_ORDER_JS.replace("__OID__", json.dumps(str(oid or ""))),
+                                           await_promise=True)
+            answer = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as e:
+            logger.debug("[Fanatical] Could not read the order for '%s': %s", title, e)
+            return None
+        detail = find_fanatical_item([answer.get("order")], game_id, title, sole_item=ours)
+        logger.debug("[Fanatical] Order for '%s' answered %s, item found: %s %s", title, answer.get("status"),
+                     bool(detail), detail["status"] if detail else "")
+        return detail
+
     async def _fanatical_reveal_key(self, found: dict, title: str) -> str:
         """This one item's key, revealed the way Fanatical's own button does; empty when it cannot."""
         key = steam_key_in(found["item"])
         if key:
             return key
         item = found["item"]
-        payload = {"oid": found.get("oid"), "pid": item.get("_id"), "serialId": item.get("serialId"),
-                   "iid": item.get("iid")}
-        if found.get("bid"):
-            payload["bid"] = found["bid"]
+        payload = {"oid": found.get("oid"), "bid": found.get("bid"), "pid": item.get("_id"),
+                   "serialId": item.get("serialId"), "iid": item.get("iid")}
         try:
             raw = await self.page.evaluate(FAN_REVEAL_JS.replace("__PAYLOAD__", json.dumps(payload)),
                                            await_promise=True)
@@ -885,38 +1078,223 @@ class GamerPowerClaimer(BaseClaimer):
         except Exception as e:
             logger.debug("[Fanatical] Could not reveal the key for '%s': %s", title, e)
             return ""
-        key = steam_key_in(answer.get("data"))
-        logger.debug("[Fanatical] Key reveal for '%s' answered %s, Steam key found: %s",
-                     title, answer.get("status"), bool(key))
+        data = answer.get("data")
+        key = steam_key_in(data)
+        # Fanatical's error text may quote the account, so its e-mail is masked like every other one in the log.
+        detail = answer.get("reason") or answer.get("error") or ""
+        detail = re.sub(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@", r"\1***@", detail)
+        logger.debug("[Fanatical] Key reveal for '%s' answered %s %s, Steam key found: %s",
+                     title, answer.get("status"), detail[:120], bool(key))
+        if answer.get("reason") == "email-unconfirmed":
+            logger.info("[Fanatical] Confirm your e-mail address on Fanatical to reveal the key for '%s'.", title)
+        elif isinstance(data, dict) and data.get("key") == "email":
+            logger.info("[Fanatical] Fanatical e-mailed you a code to reveal the key for '%s'.", title)
         return key
 
-    async def _fanatical_page_says_claimed(self) -> bool:
-        """Fallback when the orders API cannot be read: the giveaway page's own words."""
-        body = await self.page.evaluate("(document.body?.innerText || '').toLowerCase()")
-        return "already claimed" in str(body) or "you have claimed" in str(body)
+    async def _fanatical_path(self) -> str:
+        """The open page's full address; checks on it must keep the host check."""
+        try:
+            return str(await self.page.evaluate("location.href") or "")
+        except Exception as e:
+            logger.debug("[Fanatical] Could not read the page address: %s", e)
+            return ""
 
-    async def _fanatical_claim_left_page(self) -> bool:
-        """Fallback when the orders API cannot be read: the claim button is gone or the page says so."""
-        return bool(await self.page.evaluate("""
-            (() => {
-                const body = (document.body?.innerText || '').toLowerCase();
-                const stillOffered = [...document.querySelectorAll('button, a')].some(b => {
-                    const t = (b.textContent || '').trim().toLowerCase();
-                    return t === 'claim this game' || t === 'claim game';
-                });
-                const says = /already claimed|you have claimed|successfully claimed|in your library/.test(body);
-                return says || !stillOffered;
-            })()
-        """))
+    async def _fanatical_on_receipt(self) -> bool:
+        """True once the browser shows Fanatical's receipt, the end of every checkout."""
+        return fanatical_page(await self._fanatical_path(), "receipt")
+
+    async def _fanatical_giveaway(self) -> dict:
+        """The giveaway's steps as [{"type", "done", "text"}] and whether its keys ran out."""
+        try:
+            state = json.loads(await self.page.evaluate(FAN_GIVEAWAY_JS) or "{}")
+        except Exception as e:
+            logger.debug("[Fanatical] Could not read the giveaway steps: %s", e)
+            state = {}
+        return {"steps": state.get("steps") or [], "soldOut": bool(state.get("soldOut"))}
+
+    async def _fanatical_steps_done(self) -> bool:
+        """True once every giveaway step carries its tick."""
+        steps = (await self._fanatical_giveaway())["steps"]
+        return bool(steps) and all(step.get("done") for step in steps)
+
+    async def _fanatical_click(self, mark_js: str, what: str) -> bool:
+        """nodriver's click on the one control `mark_js` tags, False when the page offers none."""
+        try:
+            if not await self.page.evaluate(mark_js):
+                logger.debug("[Fanatical] No %s on the page.", what)
+                return False
+            button = await self.page.select("[data-fgc-fan]", timeout=8)
+            await button.scroll_into_view()
+            await self.sleep(0.8)
+            await button.click()
+            logger.debug("[Fanatical] Clicked %s.", what)
+            return True
+        except Exception as e:
+            logger.debug("[Fanatical] Could not click %s: %s", what, e)
+            return False
+
+    async def _fanatical_finish_steps(self, title: str) -> str:
+        """Tick the giveaway's steps, the newsletter here, the rest by you: ready, sold-out, steam, no-steps, steps."""
+        ticked = seen = False
+        for _ in range(10):
+            state = await self._fanatical_giveaway()
+            if state["soldOut"]:
+                return "sold-out"
+            steps = state["steps"]
+            seen = seen or bool(steps)
+            logger.debug("[Fanatical] Steps for '%s': %s", title, [(s.get("type"), s.get("done")) for s in steps])
+            action, at = fanatical_next_step(steps)
+            if action == "ready":
+                return "ready"
+            if action == "wait":
+                # The steps render a moment after the page.
+                await self.sleep(2)
+                continue
+            if action == "steam":
+                # Connecting Steam is a one-time account setting done before, not something to wait for mid-claim.
+                logger.warning("[Fanatical] '%s' needs your Steam account connected on Fanatical, at %s "
+                               "(a limited Steam account does not count). Once it is linked, the next run claims it.",
+                               title, FAN_LINKED_ACCOUNTS_URL)
+                return "steam"
+            if action == "newsletter":
+                # The site's button toggles the consent, so a second click would take it back.
+                if not ticked:
+                    logger.info("[Fanatical] '%s' asks for the e-mail newsletter, subscribing.", title)
+                    ticked = await self._fanatical_click(FAN_MARK_MAIN_JS, "newsletter step")
+                await self.sleep(2)
+                continue
+            # A Steam wishlist or a partner link: only you can do those.
+            step = steps[at].get("text") or steps[at].get("type")
+            logger.warning("[Fanatical] '%s' needs a step from you: %s.", title, step)
+            notice = self._vnc_notice("Fanatical: a giveaway step needs you",
+                                      f"'{title}' asks you to: {step}. "
+                                      "Do it in the browser, the bot claims the game after.")
+
+            async def asked_step_done(at=at, kind=steps[at].get("type")) -> bool:
+                now = (await self._fanatical_giveaway())["steps"]
+                # The list can re-render, so the asked step is found by its type first and its position only after.
+                same = [s for s in now if s.get("type") == kind] or now[at:at + 1]
+                return bool(same) and all(s.get("done") for s in same)
+
+            if not await self._wait_for_vnc_login(asked_step_done, custom_msg=notice, store_key="fanatical"):
+                return "steps"
+        if not seen:
+            logger.debug("[Fanatical] '%s' shows no giveaway steps at %s.", title, await self._fanatical_path())
+            return "no-steps"
+        return "ready" if await self._fanatical_steps_done() else "steps"
+
+    async def _fanatical_checkout(self, title: str) -> tuple[str, str]:
+        """Check the free cart out as its page does: ("receipt", its address), else "not-free", "no-cart" or "stuck"."""
+        cart_seen = free_seen = moved = paid = False
+        for attempt in range(25):
+            await self.sleep(3)
+            try:
+                state = json.loads(await self.page.evaluate(FAN_CHECKOUT_STATE_JS) or "{}")
+            except Exception as e:
+                logger.debug("[Fanatical] Could not read the checkout: %s", e)
+                continue
+            path = str(state.get("path") or "")
+            if fanatical_page(path, "receipt"):
+                return "receipt", path
+            if not fanatical_page(path, "cart"):
+                if moved:
+                    # /billing or /payment wants details the bot never types.
+                    logger.debug("[Fanatical] Checkout went to %s.", path)
+                    return "stuck", ""
+                if not cart_seen and attempt >= 5:
+                    logger.debug("[Fanatical] Still on %s after the claim click.", path)
+                    return "no-cart", ""
+                continue
+            cart_seen = True
+            if state.get("total") is not None:
+                total = fanatical_price(state["total"])
+                logger.debug("[Fanatical] Cart total %s (%s).", state["total"], total)
+                if total is None:
+                    logger.warning("[Fanatical] Could not read your cart's total, so '%s' was left in it.", title)
+                    return "not-free", ""
+                if total != 0:
+                    logger.warning("[Fanatical] Your cart costs %s, so '%s' was left in it.", state["total"], title)
+                    return "not-free", ""
+                free_seen = True
+            if not free_seen or paid:
+                continue
+            if state.get("pay") and not state.get("payDisabled"):
+                paid = moved = await self._fanatical_click(FAN_MARK_PAY_JS, state["pay"])
+            elif state.get("proceed"):
+                moved = await self._fanatical_click(FAN_MARK_PROCEED_JS, "Proceed to checkout") or moved
+        return ("stuck" if cart_seen else "no-cart"), ""
+
+    async def _fanatical_complete_order(self, game_id: str, title: str, oid: str = "",
+                                        seconds: int = 50) -> dict | None:
+        """This giveaway's item once its order is COMPLETE, read from the order itself; None when it is not by then."""
+        waited, found, listed_complete, misses = 0, None, None, 0
+        for pause in (0, 3, 5, 8, 13, 21):
+            if waited + pause > seconds:
+                break
+            await self.sleep(pause)
+            waited += pause
+            # The receipt names the order; when it does not, or that order cannot be read, the list finds it by name.
+            found = await self._fanatical_order_item(oid, game_id, title, ours=True) if oid else None
+            if not found:
+                found = find_fanatical_item(await self._fanatical_orders() or [], game_id, title)
+                if found and found["status"] == "COMPLETE":
+                    listed_complete = found
+                    found = await self._fanatical_order_item(found["oid"], game_id, title)
+                    misses += not found
+            if found and found["status"] == "COMPLETE":
+                return found
+            if misses >= 2:
+                break
+        # The list said COMPLETE but the order itself would not load: claimed, the key stays in your library.
+        if listed_complete:
+            return listed_complete
+        logger.debug("[Fanatical] Order for '%s' is %s.", title, found["status"] if found else "not on the account")
+        return None
+
+    async def _fanatical_newsletter(self, tries: int = 1) -> bool | None:
+        """True when your account gets Fanatical's newsletter (or confirmation is pending), None when unreadable."""
+        subscribed = None
+        for attempt in range(tries):
+            if attempt:
+                await self.sleep(3)
+            try:
+                answer = json.loads(await self.page.evaluate(FAN_NEWSLETTER_JS, await_promise=True) or "{}")
+            except Exception as e:
+                logger.debug("[Fanatical] Could not read the newsletter state: %s", e)
+                continue
+            if answer.get("status") != 200:
+                logger.debug("[Fanatical] Account read answered %s %s", answer.get("status"), answer.get("error", ""))
+                continue
+            subscribed = bool(answer.get("subscribed"))
+            # The receipt page signs you up a moment after it opens, so a "no" is asked again.
+            if subscribed:
+                break
+        return subscribed
+
+    async def _fanatical_unsubscribe(self, title: str) -> None:
+        """Take back the newsletter this claim signed you up for, the way the account page's own link does."""
+        try:
+            raw = await self.page.evaluate(FAN_UNSUBSCRIBE_JS, await_promise=True)
+            answer = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as e:
+            logger.debug("[Fanatical] Newsletter unsubscribe failed: %s", e)
+            answer = {}
+        logger.debug("[Fanatical] Newsletter unsubscribe answered %s %s", answer.get("status"), answer.get("error", ""))
+        # The receipt page can still sign you up just after this, so the answer is read a moment later.
+        await self.sleep(3)
+        if await self._fanatical_newsletter() is False:
+            logger.info("[Fanatical] Unsubscribed from the newsletter again after '%s'.", title)
+        else:
+            logger.warning("[Fanatical] Could not unsubscribe from the newsletter, do it in your Fanatical account.")
 
     async def _remember_fanatical(self, game_id: str, title: str, url: str, status: str, steam_key: str = "") -> None:
-        """Store a Fanatical outcome; a key still waiting for Steam keeps its "claimed" row."""
+        """Store a Fanatical outcome; "existed" never overwrites a row, so Steam's outcome for its key stays."""
         async with async_session() as session:
-            obj, _ = await get_or_create(
+            obj, created = await get_or_create(
                 session, store="fanatical", user=self.user,
                 game_id=game_id, title=title, url=url, status=status,
             )
-            if not (status == "existed" and str(obj.status or "").startswith("claimed")):
+            if created or status != "existed":
                 obj.status = status
             if steam_key:
                 obj.code = steam_key
@@ -1008,30 +1386,19 @@ class GamerPowerClaimer(BaseClaimer):
                 await self.page.get(url)
                 await self.sleep(4)
 
-            needs_login = await self.page.evaluate("""
+            # The cookie wall covers the header, so it goes first either way.
+            await self.page.evaluate("""
                 (() => {
-                    const body = (document.body?.innerText || '');
-                    const btns = [...document.querySelectorAll('button, a')];
-                    const hasSignIn = btns.some(b => {
-                        const t = (b.textContent || '').trim().toLowerCase();
-                        return t === 'sign in' || t.includes('sign in to a fanatical');
-                    });
-                    return hasSignIn || body.includes('Create or Sign in to a Fanatical account');
+                    const b = [...document.querySelectorAll('button, a')].find(x =>
+                        (x.textContent || '').includes('Reject All Non-Essential') ||
+                        (x.textContent || '').includes('Reject All'));
+                    if (b) b.click();
                 })()
             """)
+            await self.sleep(2)
 
-            if needs_login:
-                # The cookie wall covers the header, so it goes first either way.
-                await self.page.evaluate("""
-                    (() => {
-                        const b = [...document.querySelectorAll('button, a')].find(x =>
-                            (x.textContent || '').includes('Reject All Non-Essential') ||
-                            (x.textContent || '').includes('Reject All'));
-                        if (b) b.click();
-                    })()
-                """)
-                await self.sleep(2)
-
+            # Every giveaway lists "Create or Sign in" as its first step, done or not, so only the header decides.
+            if not await self._fanatical_signed_in():
                 email = cfg.fanatical_email
                 password = cfg.fanatical_password
                 if email and password:
@@ -1049,18 +1416,27 @@ class GamerPowerClaimer(BaseClaimer):
                             self._fanatical_signed_in, custom_msg=self._no_credentials_notice("Fanatical", "FANATICAL"),
                             store_key="fanatical"):
                         return
+                self._fan_session_noted = True
+            elif not self._fan_session_noted:
+                self._log_side_signed_in("Fanatical", cfg.fanatical_email)
+                self._fan_session_noted = True
 
             current_url = str(await self.page.evaluate("window.location.href") or "")
             if not current_url.startswith(url):
                 await self.page.get(url)
                 await self.sleep(4)
 
-            # Ownership comes from your orders; the page's own words count only when that API cannot be read.
+            # Ownership comes from a COMPLETE order; one left INITIALISED by an unfinished checkout is not yours.
             orders = await self._fanatical_orders()
             if orders is not None:
-                owned = find_fanatical_item(orders, game_id, title) is not None
+                found = find_fanatical_item(orders, game_id, title)
+                owned = bool(found) and found["status"] == "COMPLETE"
+                if found and not owned:
+                    logger.debug("[Fanatical] '%s' has an unfinished %s order, claiming again.", title, found["status"])
             else:
-                owned = await self._fanatical_page_says_claimed()
+                # The giveaway page never says it is yours, so without the orders API ownership is unknown.
+                logger.debug("[Fanatical] Orders could not be read, so '%s' is treated as not yet claimed.", title)
+                owned = False
             if owned:
                 logger.info("[Fanatical] '%s' already claimed.", title)
                 if not cfg.dryrun:
@@ -1069,6 +1445,13 @@ class GamerPowerClaimer(BaseClaimer):
                 return
 
             if cfg.dryrun:
+                giveaway = await self._fanatical_giveaway()
+                logger.debug("[Fanatical] Steps for '%s': %s", title,
+                             [(s.get("type"), s.get("done")) for s in giveaway["steps"]])
+                if giveaway["soldOut"]:
+                    logger.info("[Fanatical] '%s' is sold out, skipping.", title)
+                    self.notify_games.remove(notify_game)
+                    return
                 logger.info("DRYRUN – skipped '%s'.", title)
                 notify_game["status"] = "available (dry run)"
                 return
@@ -1077,41 +1460,68 @@ class GamerPowerClaimer(BaseClaimer):
                 notify_game["status"] = "failed:challenge"
                 return
 
-            clicked = False
-            for _ in range(5):
-                clicked = await self.page.evaluate("""
-                    (() => {
-                        const btns = [...document.querySelectorAll('button, a')];
-                        const claim = btns.find(b => {
-                            const t = (b.textContent || '').trim().toLowerCase();
-                            return t === 'claim this game' || t === 'claim game';
-                        });
-                        if (claim && !claim.disabled) {
-                            claim.click(); return true;
-                        }
-                        return false;
-                    })()
-                """)
-                if clicked:
-                    break
-                await self.sleep(2)
+            # Read before any step: the claim can sign you up through a step, an old consent or a pre-ticked box.
+            had_newsletter = None if cfg.fanatical_newsletter else await self._fanatical_newsletter()
 
-            # A claim is a giveaway order, so it counts once that order is on the account.
-            claimed, found = False, None
-            if clicked:
-                await self.sleep(6)
-                if orders is not None:
-                    for _ in range(3):
-                        found = find_fanatical_item(await self._fanatical_orders() or [], game_id, title)
-                        if found:
-                            break
-                        await self.sleep(5)
-                    claimed = found is not None
-                else:
-                    claimed = await self._fanatical_claim_left_page()
+            steps = await self._fanatical_finish_steps(title)
+            if steps == "sold-out":
+                # GamerPower keeps listing a giveaway after its keys run out, that is no news for you.
+                logger.info("[Fanatical] '%s' is sold out, skipping.", title)
+                self.notify_games.remove(notify_game)
+                return
+            if steps == "steam":
+                notify_game["status"] = "failed:steam-not-linked"
+                await self.take_screenshot(f"fanatical_fail_{filenamify(title)}")
+                return
+            if steps == "no-steps":
+                logger.warning("[Fanatical] '%s' shows no giveaway steps, it may have ended.", title)
+                notify_game["status"] = "failed:no-steps"
+                await self.take_screenshot(f"fanatical_fail_{filenamify(title)}")
+                return
+            if steps != "ready":
+                logger.warning("[Fanatical] '%s' still has an unfinished step, not claimed.", title)
+                notify_game["status"] = "failed:steps"
+                await self.take_screenshot(f"fanatical_fail_{filenamify(title)}")
+                return
 
-            if claimed:
-                key = await self._fanatical_reveal_key(found, title) if found else ""
+            # The claim only puts the game in the cart; the free order behind it is made at checkout.
+            if not await self._fanatical_click(FAN_MARK_MAIN_JS, "Claim button"):
+                logger.warning("[Fanatical] '%s' offers no claim button.", title)
+                notify_game["status"] = "failed:claim"
+                await self.take_screenshot(f"fanatical_fail_{filenamify(title)}")
+                return
+            outcome, receipt = await self._fanatical_checkout(title)
+            logger.debug("[Fanatical] Checkout for '%s' ended: %s", title, outcome)
+            if outcome in ("not-free", "no-cart"):
+                if outcome == "no-cart":
+                    logger.warning("[Fanatical] '%s' never reached the cart, Fanatical did not take the claim.", title)
+                notify_game["status"] = "failed:not-free" if outcome == "not-free" else "failed:checkout"
+                await self.take_screenshot(f"fanatical_fail_{filenamify(title)}")
+                return
+
+            if outcome == "stuck":
+                logger.warning("[Fanatical] The checkout for '%s' needs you.", title)
+                notice = self._vnc_notice("Fanatical: finish the checkout",
+                                          f"'{title}' is in your Fanatical cart. "
+                                          "Finish the free checkout in the browser.")
+                if await self._wait_for_vnc_login(self._fanatical_on_receipt, custom_msg=notice, store_key="fanatical"):
+                    outcome, receipt = "receipt", await self._fanatical_path()
+
+            order_id = fanatical_receipt_order(receipt)
+            authorised = fanatical_receipt_authorised(receipt)
+            logger.debug("[Fanatical] Receipt for '%s': order id %s, authorised %s", title, bool(order_id), authorised)
+            found = None
+            if outcome == "receipt" and (order_id or orders is not None):
+                found = await self._fanatical_complete_order(game_id, title, oid=order_id)
+            elif outcome == "stuck" and orders is not None:
+                # You may have finished it over VNC and moved on from the receipt; the account knows.
+                found = await self._fanatical_complete_order(game_id, title, seconds=0)
+
+            # A receipt the account cannot confirm still counts, but only one that says the order went through.
+            if found or (outcome == "receipt" and orders is None and authorised):
+                # A bundle has one key per game inside, a list-only item lacks the ids: both stay in your library.
+                single = bool(found) and bool(found["item"].get("_id")) and found["item"].get("type") != "bundle"
+                key = await self._fanatical_reveal_key(found, title) if single else ""
                 steam_key = key if key and fanatical_item_is_steam(found["item"]) else ""
                 await self._remember_fanatical(game_id, title, url, "claimed", steam_key)
                 if steam_key and is_store_active("steam"):
@@ -1122,9 +1532,20 @@ class GamerPowerClaimer(BaseClaimer):
                     notify_game["status"] = "claimed, key in your Fanatical library 🔑"
                 await self.take_screenshot(f"fanatical_{filenamify(title)}")
             else:
-                logger.warning("[Fanatical] '%s' was not confirmed as claimed (clicked: %s).", title, clicked)
-                notify_game["status"] = "failed:unconfirmed"
+                logger.warning("[Fanatical] '%s' was not confirmed as claimed (checkout: %s).", title, outcome)
+                notify_game["status"] = "failed:unconfirmed" if outcome == "receipt" else "failed:checkout"
                 await self.take_screenshot(f"fanatical_fail_{filenamify(title)}")
+
+            # The order signs you up once the checkout runs, whether or not the claim is confirmed after.
+            if not cfg.fanatical_newsletter:
+                now_subscribed = await self._fanatical_newsletter(tries=3) if had_newsletter is False else None
+                logger.debug("[Fanatical] Newsletter for '%s': before %s, after %s",
+                             title, had_newsletter, now_subscribed)
+                if fanatical_should_unsubscribe(had_newsletter, now_subscribed):
+                    await self._fanatical_unsubscribe(title)
+                elif had_newsletter is None or (had_newsletter is False and now_subscribed is None):
+                    logger.warning("[Fanatical] Could not check your newsletter after '%s', "
+                                   "check it in your account.", title)
 
         except Exception:
             logger.exception("[Fanatical] Error claiming '%s'", title)
