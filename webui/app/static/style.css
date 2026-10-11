@@ -76,3 +76,10 @@ pre.log { background: var(--code); padding: .75rem; border-radius: 8px; overflow
 code { background: var(--code); padding: .1rem .35rem; border-radius: 5px; overflow-wrap: anywhere; }
 .foot { text-align: center; padding: 0 16px 1.5rem; }
 @media (max-width: 560px) { .card { padding: .85rem; } h1 { font-size: 1.3rem; } }
+details.howto { background: var(--code); border-radius: 8px; padding: .5rem .75rem; margin: .5rem 0 .75rem; }
+details.howto summary { font-weight: 600; }
+details.howto h4 { font-size: .95rem; margin: .75rem 0 .25rem; }
+details.howto ul, details.howto ol { margin: .25rem 0; padding-left: 1.2rem; }
+details.howto li { margin-bottom: .2rem; }
+.tag.busy { background: var(--warn-bg); color: var(--warn); }
+.store-help h3 { margin: 1rem 0 .25rem; }

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_field.html" import field %}
+{% from "_help.html" import help_block %}
 {% block title %}Instellingen{% endblock %}
 {% block content %}
 <form method="post" action="/instellingen" class="settings" autocomplete="off">
@@ -23,7 +24,7 @@
           <span>{{ s.store.name }}</span></label>
       </legend>
       <p class="muted small">{{ s.store.about }}</p>
-      {% if s.store.needs_vnc %}<p class="help">{{ s.store.needs_vnc }}</p>{% endif %}
+      {{ help_block(s.store.key) }}
       <div class="fields">
         {% for v in s.fields if not v.field.advanced %}{{ field(v, errors) }}{% endfor %}
       </div>

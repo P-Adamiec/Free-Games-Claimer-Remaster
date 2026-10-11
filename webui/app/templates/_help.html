@@ -1,0 +1,15 @@
+{% macro help_block(key, open=false) -%}
+{% set h = store_help[key] %}
+<details class="howto"{% if open %} open{% endif %}>
+  <summary>Hoe inloggen werkt <span class="tag {{ help_modes[h.mode].tone }}">{{ help_modes[h.mode].label }}</span></summary>
+  <p>{{ h.summary }}</p>
+  {% if h.bot %}<h4>Wat de bot zelf doet</h4><ul>{% for t in h.bot %}<li>{{ t }}</li>{% endfor %}</ul>{% endif %}
+  {% if h.you %}<h4>Wat je zelf moet doen</h4><ul>{% for t in h.you %}<li>{{ t }}</li>{% endfor %}</ul>{% endif %}
+  {% if h.twofa %}<h4>Tweestapsverificatie</h4><ul>{% for t in h.twofa %}<li>{{ t }}</li>{% endfor %}</ul>{% endif %}
+  {% if h.key_steps %}
+  <h4>Zo vind je de authenticator-sleutel</h4>
+  <ol>{% for t in h.key_steps %}<li>{{ t }}</li>{% endfor %}</ol>
+  {% endif %}
+  {% if h.notes %}<h4>Goed om te weten</h4><ul>{% for t in h.notes %}<li>{{ t }}</li>{% endfor %}</ul>{% endif %}
+</details>
+{%- endmacro %}

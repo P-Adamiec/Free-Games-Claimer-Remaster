@@ -42,7 +42,6 @@ class Store:
     about: str
     fields: tuple = ()
     default_on: bool = False
-    needs_vnc: str = ""
 
 
 def _login(prefix: str, user_label: str = "E-mailadres", kind: str = EMAIL, user_key: str = "") -> tuple:
@@ -109,8 +108,7 @@ STORES: tuple[Store, ...] = (
         Field("ITCHIO_OTP_CODES", "Herstelcodes", CODES, help=CODES_HELP, advanced=True),
     )),
     Store("fanatical", "Fanatical", "Steam-sleutels uit giveaways.", _login("FANATICAL")),
-    Store("indiegala", "IndieGala", "Giveaways.", _login("INDIEGALA"),
-          needs_vnc="Bij het inloggen moet je zelf een captcha aanvinken via het scherm; daarna blijf je 14 dagen ingelogd."),
+    Store("indiegala", "IndieGala", "Giveaways.", _login("INDIEGALA")),
     Store("alienware", "Alienware Arena", "Alleen een melding, de sleutel claim je zelf.", ()),
 )
 STORE_KEYS = tuple(s.key for s in STORES)

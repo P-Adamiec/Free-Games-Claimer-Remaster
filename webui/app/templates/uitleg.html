@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% from "_help.html" import help_block %}
+{% block title %}Uitleg{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Uitleg</h1>
+  <p>{{ general.intro }}</p>
+  <h2>Welke winkel vraagt wat van je?</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Winkel</th><th>Inloggen</th><th>Kort</th></tr></thead>
+    <tbody>
+    {% for s in stores %}{% set h = store_help[s.key] %}
+      <tr>
+        <td><a href="#{{ s.key }}">{{ s.name }}</a></td>
+        <td><span class="tag {{ help_modes[h.mode].tone }}">{{ help_modes[h.mode].label }}</span></td>
+        <td>{{ h.summary }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <ul class="small muted">
+    {% for code, m in help_modes.items() %}<li><strong>{{ m.label }}</strong>: {{ m.text }}</li>{% endfor %}
+  </ul>
+</section>
+
+{% for sec in general.sections %}
+<section class="card" id="{{ sec.id }}">
+  <h2>{{ sec.title }}</h2>
+  {% for p in sec.paragraphs %}<p>{{ p }}</p>{% endfor %}
+  {% if sec.steps %}<ol>{% for t in sec.steps %}<li>{{ t }}</li>{% endfor %}</ol>{% endif %}
+  {% if sec.bullets %}<ul>{% for t in sec.bullets %}<li>{{ t }}</li>{% endfor %}</ul>{% endif %}
+</section>
+{% endfor %}
+
+<section class="card">
+  <h2>Per winkel</h2>
+  {% for s in stores %}
+  <div id="{{ s.key }}" class="store-help">
+    <h3>{{ s.name }}</h3>
+    {{ help_block(s.key) }}
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}

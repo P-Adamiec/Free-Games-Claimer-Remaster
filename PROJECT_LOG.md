@@ -21,6 +21,10 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
 
 ## 2026-10-11
 
+- Inloghulp in de webui (`webui/app/help.py`): per winkel een uitklapblok "Hoe inloggen werkt" bij Instellingen
+  en een nieuwe pagina 'Uitleg' (overzichtstabel, scherm van de bot, meldingen, sessies, authenticator-sleutel
+  met stappen per winkel). Gebaseerd op de code van de bot en de helppagina's van de winkels zelf; waar die
+  verschillen staat het erbij (Steam Guard zonder sleutel, Epic Authenticator, Fanatical- en Unity-codes).
 - Takenlijst met workers in plaats van de `flock` en de gespreide tijden (#10). Elke run is een taak in een
   gedeelde SQLite-takenlijst (`webui/jobqueue.py`, volume `fgc_queue`, WAL, claimen met `BEGIN IMMEDIATE`).
   - De planning van een bot en 'Nu uitvoeren' zetten alleen een taak in de rij (hooguit één wachtende per bot);

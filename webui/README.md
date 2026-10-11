@@ -9,6 +9,10 @@ Iedere gebruiker heeft een **eigen bot** (eigen container, eigen winkelaccounts)
   problemen van de laatste run en het logboek;
 - op **Nu uitvoeren** drukken en in de **Takenlijst** zien wanneer de run aan de beurt is;
 - het **scherm van de bot** openen (noVNC) om zelf in te loggen bij een winkel.
+- lezen hoe inloggen per winkel werkt: bij Instellingen staat per winkel een blok "Hoe inloggen werkt", en
+  de pagina **Uitleg** geeft een overzicht (automatisch / af en toe zelf / altijd zelf), uitleg over het
+  scherm van de bot, meldingen en de authenticator-sleutel. Alle teksten staan op één plek:
+  `webui/app/help.py`.
 
 Alles hieronder gebruikt voorbeeldnamen (`user1`, `user2`, `<server-ip>`, `games.example.org`).
 

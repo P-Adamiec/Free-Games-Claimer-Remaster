@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from webui import jobqueue
-from webui.app import botstate, config_store, schema, security
+from webui.app import botstate, config_store, help as storehelp, schema, security
 from webui.app.users import UserError, UserStore, fingerprint
 
 log = logging.getLogger("webui")
@@ -90,6 +90,8 @@ def create_app(environ=None) -> FastAPI:
     throttle = security.Throttle()
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.globals["store_names"] = botstate.STORE_NAMES
+    templates.env.globals["store_help"] = storehelp.STORE_HELP
+    templates.env.globals["help_modes"] = storehelp.MODES
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.users, app.state.bots, app.state.throttle, app.state.queue = users, bots, throttle, queue
@@ -337,6 +339,11 @@ def create_app(environ=None) -> FastAPI:
         return RedirectResponse("/instellingen", status_code=303)
 
     # ---------------------------------------------------------------- own account
+
+    @app.get("/uitleg")
+    async def explain(request: Request):
+        require(request)
+        return render(request, "uitleg.html", stores=schema.STORES, general=storehelp.GENERAL)
 
     @app.get("/account")
     async def account_get(request: Request):
