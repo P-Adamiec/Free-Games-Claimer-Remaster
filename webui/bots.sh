@@ -110,7 +110,11 @@ EOF
 
 compose_up() {
 	[ "$NO_UP" = 1 ] && { echo "Start of werk bij met: docker compose up -d --build --remove-orphans"; return; }
-	(cd "$ROOT" && docker compose up -d --build --remove-orphans)
+	# Webui first: it writes each new bot's staggered schedule into the bot's volume at startup.
+	# Starting the bots in the same step let a new bot read its config before that file existed,
+	# so it ran on upstream defaults (every 12 h, run at startup).
+	(cd "$ROOT" && docker compose up -d --build --remove-orphans --wait webui &&
+		docker compose up -d --build --remove-orphans)
 }
 
 add() {
