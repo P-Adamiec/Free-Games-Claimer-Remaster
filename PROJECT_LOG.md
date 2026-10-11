@@ -16,7 +16,7 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
 
 - **Bereikbaarheid voor Bjorn** — nu alleen op het thuisnetwerk. Of het via de reverse proxy en een
   hostnaam moet, met HTTPS, is nog niet besloten.
-- **Eerste logins** — een aantal winkels vraagt de eerste keer een handmatige login of 2FA via noVNC (poort 7080).
+- **Eerste logins** — een aantal winkels vraagt de eerste keer een handmatige login of 2FA via het scherm van de bot (noVNC, op de website onder 'Scherm').
   Dat moet Bjorn zelf doen, of Sjoerd samen met Bjorn.
 
 ## 2026-10-11
@@ -25,7 +25,6 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
   Login, 403 op Beheer voor een gewone gebruiker en de noVNC-pagina getest op het thuisnetwerk.
 - Fix `bots.sh`: webui eerst starten. Een nieuwe bot las zijn config voordat de webui de gespreide planning had
   geschreven en draaide dan elke 12 uur plus direct bij het opstarten.
-
 - Webinterface gebouwd (`webui/`, FastAPI): gebruikersaccounts (argon2, admin/gebruiker), instellingen per winkel,
   dashboard met geclaimde games (uit `fgc.db`), log, status en 'Nu uitvoeren', noVNC via de webui achter de login.
   - Instellingen gaan via `data/config.env` in het volume van de bot (leest upstream al); wachtwoorden alleen
