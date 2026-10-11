@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Account{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Je account</h1>
+  <p>Ingelogd als <strong>{{ me }}</strong>{% if my.role == 'admin' %} (beheerder){% endif %}.</p>
+  <h2>Wachtwoord wijzigen</h2>
+  <form method="post" action="/account">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Huidig wachtwoord <input type="password" name="current" autocomplete="current-password" required></label>
+    <label>Nieuw wachtwoord (minstens 10 tekens) <input type="password" name="new" minlength="10" autocomplete="new-password" required></label>
+    <label>Nieuw wachtwoord nogmaals <input type="password" name="repeat" minlength="10" autocomplete="new-password" required></label>
+    <button type="submit" class="primary">Wachtwoord wijzigen</button>
+  </form>
+</section>
+{% endblock %}

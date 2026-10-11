@@ -639,6 +639,13 @@ async def main() -> None:
         logger.info("Initial claiming run disabled by RUN_ON_STARTUP=false.")
 
     scheduler.start()
+    # [fork:webui] begin – status, log, run queue and requests for the web interface (webui/bridge.py)
+    try:
+        from webui.bridge import attach as _webui_attach
+        _webui_attach(scheduler, run_claimers_scheduled, _claim_run_lock)
+    except ImportError:
+        logger.debug("webui/ not present, running without the web interface bridge.")
+    # [fork:webui] end
     interval_text = (
         f"runs every {cfg.scheduler_hours} hours"
         if cfg.scheduler_hours > 0

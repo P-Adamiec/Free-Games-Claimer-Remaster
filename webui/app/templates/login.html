@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Inloggen{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Inloggen</h1>
+  {% if insecure %}
+  <p class="flash bad">Deze verbinding lijkt geen HTTPS te zijn, en inloggen werkt alleen via https.
+    Gebruik het https-adres. Beheerder: staat de reverse proxy in <code>WEBUI_TRUSTED_PROXIES</code>?
+    Zonder HTTPS op je eigen netwerk: <code>WEBUI_COOKIE_SECURE=false</code>.</p>
+  {% endif %}
+  {% if error %}<p class="flash bad" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>Gebruikersnaam <input name="username" autocomplete="username" autocapitalize="none" required autofocus></label>
+    <label>Wachtwoord <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit" class="primary">Inloggen</button>
+  </form>
+</section>
+{% endblock %}

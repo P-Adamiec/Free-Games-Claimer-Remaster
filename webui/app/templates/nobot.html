@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>Nog geen bot gekoppeld</h1>
+  <p>Aan jouw account is nog geen bot gekoppeld. Vraag de beheerder om een bot voor je aan te maken
+    en aan je account te koppelen.</p>
+  {% if my.role == 'admin' %}<p><a class="button" href="/beheer">Naar beheer</a></p>{% endif %}
+</section>
+{% endblock %}

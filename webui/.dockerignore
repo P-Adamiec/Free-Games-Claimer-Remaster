@@ -1,0 +1,4 @@
+# Per-bot env files hold VNC passwords: never bake them into an image.
+bots/
+__pycache__/
+*.pyc

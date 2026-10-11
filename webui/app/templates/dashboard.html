@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Overzicht{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="row between">
+    <h1>Overzicht</h1>
+    <span id="state" class="badge {{ st.state }}" data-poll="/api/status">{{ st.label }}</span>
+  </div>
+  {% if not configured %}
+  <p class="flash warn">Je hebt nog geen winkels ingesteld. Ga naar <a href="/instellingen">Instellingen</a>
+    om je accounts in te vullen.</p>
+  {% endif %}
+  {% if st.restart_pending %}<p class="flash warn">Nieuwe instellingen worden geladen zodra de huidige run klaar is.</p>{% endif %}
+  {% if st.message %}<p class="flash warn">{{ st.message }}</p>{% endif %}
+  <dl class="facts">
+    <div><dt>Laatste run</dt><dd>{{ st.last_finished }}</dd></div>
+    <div><dt>Volgende run</dt><dd id="next-run">{{ st.next_run }}</dd></div>
+    <div><dt>Planning</dt><dd>{{ schedule }}</dd></div>
+    <div><dt>Geclaimd in totaal</dt><dd>{{ claimed }}</dd></div>
+  </dl>
+  <form method="post" action="/run" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="primary" {% if not st.alive or st.running or st.queued or st.run_pending %}disabled{% endif %}>Nu uitvoeren</button>
+    <span class="muted small">
+      {% if others_busy %}Een andere bot is nu bezig: jouw run komt in de wachtrij en start daarna vanzelf.
+      {% else %}Er draait steeds maar één bot tegelijk; een run kan dus even op zijn beurt wachten.{% endif %}
+    </span>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Inloggen bij een winkel (scherm)</h2>
+  <p>Soms wil een winkel dat je zelf iets doet: de eerste keer inloggen, een captcha, of een code uit je
+    e-mail of sms. De bot wacht dan een paar minuten en stuurt (als je meldingen hebt ingesteld) een bericht.
+    Open dan het scherm hieronder: je ziet de browser van de bot en kunt daar gewoon klikken en typen.
+    Daarna gaat de bot zelf verder.</p>
+  <p class="row">
+    <a class="button primary" href="/vnc/" target="_blank" rel="noopener">Scherm van de bot openen</a>
+    {% if vnc_password %}
+    <button type="button" class="secondary" data-reveal="vncpw">Schermwachtwoord tonen</button>
+    <code id="vncpw" class="hidden">{{ vnc_password }}</code>
+    {% endif %}
+  </p>
+  <p class="muted small">Het scherm is leeg of zwart als de bot niets doet; dat is normaal. Tip: start eerst
+    "Nu uitvoeren" en open dan het scherm.</p>
+</section>
+
+{% if failures %}
+<section class="card">
+  <h2>Problemen bij de laatste run</h2>
+  <ul class="problems">
+    {% for p in failures %}<li><span class="tag bad">{{ p.kind }}</span> {{ p.text }}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Games per winkel</h2>
+  {% if not per_store %}<p class="muted">Nog niets. Na de eerste run verschijnen hier je games.</p>{% endif %}
+  {% for store, items in per_store.items() %}
+  <details {% if loop.first %}open{% endif %}>
+    <summary>{{ store }} <span class="muted">({{ items|selectattr('tone', 'equalto', 'ok')|list|length }} geclaimd, {{ items|length }} totaal)</span></summary>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Game</th><th>Status</th><th>Datum</th></tr></thead>
+      <tbody>
+      {% for g in items %}
+        <tr>
+          <td>{% if g.url %}<a href="{{ g.url }}" target="_blank" rel="noopener noreferrer">{{ g.title }}</a>{% else %}{{ g.title }}{% endif %}</td>
+          <td><span class="tag {{ g.tone }}" title="{{ g.status }}">{{ g.label }}</span></td>
+          <td class="nowrap">{{ g.when }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <div class="row between">
+    <h2>Logboek</h2>
+    <a class="button secondary" href="/">Vernieuwen</a>
+  </div>
+  {% if log %}<pre class="log">{% for line in log %}{{ line }}{% endfor %}</pre>
+  {% else %}<p class="muted">Nog geen logregels.</p>{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Beheer{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Beheer</h1>
+  <h2>Bots</h2>
+  {% if not rows %}<p class="muted">Er zijn nog geen bots. Maak er een aan op de server met
+    <code>./webui/bots.sh add &lt;naam&gt;</code>.</p>{% endif %}
+  {% for c in conflicts %}<p class="flash warn">{{ c }}</p>{% endfor %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Bot</th><th>Gebruiker</th><th>Status</th><th>Planning</th><th>Laatste run</th><th>Geclaimd</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.bot.name }}</td>
+        <td>{{ r.owner or '–' }}</td>
+        <td><span class="badge {{ r.st.state }}">{{ r.st.label }}</span></td>
+        <td>{{ r.schedule }}</td>
+        <td class="nowrap">{{ r.st.last_finished }}</td>
+        <td>{{ r.claimed }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Gebruikers</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Naam</th><th>Rol en bot</th><th>Wachtwoord resetten</th><th></th></tr></thead>
+    <tbody>
+    {% for name, u in users.items() %}
+      <tr>
+        <td>{{ name }}{% if name == me %} <span class="muted">(jij)</span>{% endif %}</td>
+        <td>
+          <form method="post" action="/beheer/{{ name }}/wijzig" class="row">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <select name="role" aria-label="Rol">
+              <option value="user" {% if u.role == 'user' %}selected{% endif %}>gebruiker</option>
+              <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>beheerder</option>
+            </select>
+            <select name="bot" aria-label="Bot">
+              <option value="">geen bot</option>
+              {% for b in bots %}<option value="{{ b.name }}" {% if u.bot == b.name %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+            </select>
+            <button type="submit" class="secondary">Bewaar</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="/beheer/{{ name }}/wachtwoord" class="row">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="password" name="password" minlength="10" placeholder="nieuw wachtwoord" autocomplete="new-password" required aria-label="Nieuw wachtwoord">
+            <button type="submit" class="secondary">Reset</button>
+          </form>
+        </td>
+        <td>
+          {% if name != me %}
+          <form method="post" action="/beheer/{{ name }}/verwijder" data-confirm="{{ name }} echt verwijderen?">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">Verwijder</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Nieuwe gebruiker</h3>
+  <form method="post" action="/beheer/nieuw" class="fields">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Gebruikersnaam <input name="username" pattern="[a-z][a-z0-9_\-]{1,31}" autocapitalize="none" required></label>
+    <label>Wachtwoord (minstens 10 tekens) <input type="password" name="password" minlength="10" autocomplete="new-password" required></label>
+    <label>Rol <select name="role"><option value="user">gebruiker</option><option value="admin">beheerder</option></select></label>
+    <label>Bot <select name="bot"><option value="">geen bot</option>{% for b in bots %}<option value="{{ b.name }}">{{ b.name }}</option>{% endfor %}</select></label>
+    <button type="submit" class="primary">Aanmaken</button>
+  </form>
+  <p class="muted small">Een nieuwe bot (een eigen container voor een extra persoon) maak je op de server aan met
+    <code>./webui/bots.sh add &lt;naam&gt;</code>; daarna kun je hem hier aan een gebruiker koppelen.</p>
+</section>
+{% endblock %}

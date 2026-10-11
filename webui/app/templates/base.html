@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}Gratis games{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">🎮 Gratis games</a>
+    {% if me %}
+    <nav>
+      <a href="/">Overzicht</a>
+      <a href="/instellingen">Instellingen</a>
+      {% if my.role == 'admin' %}<a href="/beheer">Beheer</a>{% endif %}
+      <a href="/account">Account</a>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="link" type="submit">Uitloggen</button>
+      </form>
+    </nav>
+    {% endif %}
+  </header>
+  <main>
+    {% for tone, text in flashes %}<p class="flash {{ tone }}" role="status">{{ text }}</p>{% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="foot muted small">
+    Free Games Claimer Remaster met webinterface ·
+    <a href="https://github.com/sjkanon/Free-Games-Claimer-Remaster" rel="noopener">broncode (AGPL-3.0)</a>
+  </footer>
+</body>
+</html>

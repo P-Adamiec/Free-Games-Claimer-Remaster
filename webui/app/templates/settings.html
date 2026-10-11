@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_field.html" import field %}
+{% block title %}Instellingen{% endblock %}
+{% block content %}
+<form method="post" action="/instellingen" class="settings" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <section class="card">
+    <h1>Instellingen</h1>
+    <p>Zet de winkels aan waar je gratis games wilt claimen en vul je inloggegevens in.
+      Wachtwoorden en sleutels worden nooit meer getoond: staat er <em>ingesteld</em>, dan is er al een
+      opgeslagen. Laat het veld leeg om het te houden.</p>
+    {% if st.restart_pending %}<p class="flash warn">Eerdere wijzigingen wachten nog tot de huidige run klaar is.</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Winkels</h2>
+    {% if errors.get('STORES') %}<p class="error">{{ errors['STORES'] }}</p>{% endif %}
+    {% if view.stores_locked %}<p class="help">De winkelkeuze is vastgezet in de Docker-instellingen van deze bot.</p>{% endif %}
+    {% for s in view.stores %}
+    <fieldset class="store{% if not s.enabled %} off{% endif %}">
+      <legend>
+        <label class="switch"><input type="checkbox" name="stores" value="{{ s.store.key }}" data-store-toggle {% if s.enabled %}checked{% endif %} {% if view.stores_locked %}disabled{% endif %}>
+          <span>{{ s.store.name }}</span></label>
+      </legend>
+      <p class="muted small">{{ s.store.about }}</p>
+      {% if s.store.needs_vnc %}<p class="help">{{ s.store.needs_vnc }}</p>{% endif %}
+      <div class="fields">
+        {% for v in s.fields if not v.field.advanced %}{{ field(v, errors) }}{% endfor %}
+      </div>
+      {% set adv = s.fields | selectattr('field.advanced') | list %}
+      {% if adv %}
+      <details><summary>Meer opties</summary><div class="fields">{% for v in adv %}{{ field(v, errors) }}{% endfor %}</div></details>
+      {% endif %}
+    </fieldset>
+    {% endfor %}
+  </section>
+
+  {% for sec in view.sections %}
+  <section class="card" id="{{ sec.id }}">
+    <h2>{{ sec.title }}</h2>
+    {% if sec.id == 'planning' %}
+    <p class="muted small">Nu: {{ schedule }}. Er draait altijd maar één bot tegelijk (de rest wacht in de
+      wachtrij), maar kies bij voorkeur tijden die niet samenvallen met die van anderen.</p>
+    {% endif %}
+    <div class="fields">
+      {% for v in sec.fields if not v.field.advanced %}{{ field(v, errors) }}{% endfor %}
+    </div>
+    {% set adv = sec.fields | selectattr('field.advanced') | list %}
+    {% if adv %}
+    <details><summary>Meer opties</summary><div class="fields">{% for v in adv %}{{ field(v, errors) }}{% endfor %}</div></details>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  <section class="card sticky">
+    <label class="check"><input type="checkbox" name="run_after"> Na opslaan meteen een run starten</label>
+    <button type="submit" class="primary">Opslaan</button>
+    <p class="muted small">Na opslaan herstart de bot (niet midden in een run) om de instellingen te laden.</p>
+  </section>
+  <datalist id="timezones">{% for tz in timezones %}<option value="{{ tz }}">{% endfor %}</datalist>
+</form>
+{% endblock %}

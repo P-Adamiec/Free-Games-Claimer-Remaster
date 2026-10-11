@@ -22,3 +22,6 @@ data/
 TEMP_*
 debug_*
 *.log
+
+# [fork:webui] per-bot env files hold VNC passwords, never bake them into the image
+webui/bots/

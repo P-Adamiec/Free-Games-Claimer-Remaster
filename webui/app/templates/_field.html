@@ -1,0 +1,40 @@
+{% macro field(v, errors) -%}
+{% set f = v.field %}
+<div class="field{% if errors.get(f.key) %} invalid{% endif %}{% if v.locked %} locked{% endif %}">
+  {% if f.kind == 'bool' %}
+    <label class="check"><input type="checkbox" name="{{ f.key }}" {% if v.value %}checked{% endif %} {% if v.locked %}disabled{% endif %}> {{ f.label }}</label>
+  {% elif f.kind == 'multi' %}
+    <span class="label">{{ f.label }}</span>
+    <div class="choices">
+    {% for code, name in f.choices %}
+      <label class="check"><input type="checkbox" name="{{ f.key }}" value="{{ code }}" {% if code in v.value %}checked{% endif %} {% if v.locked %}disabled{% endif %}> {{ name }}</label>
+    {% endfor %}
+    </div>
+  {% elif f.secret %}
+    <label>{{ f.label }}
+      <input type="password" name="{{ f.key }}" autocomplete="new-password" spellcheck="false" autocapitalize="none"
+             placeholder="{% if v.is_set %}ingesteld (leeg laten = niet wijzigen){% else %}niet ingesteld{% endif %}" {% if v.locked %}disabled{% endif %}>
+    </label>
+    {% if v.is_set and not v.locked %}
+      <label class="check small"><input type="checkbox" name="{{ f.key }}__clear"> wissen</label>
+    {% endif %}
+  {% elif f.kind == 'int' %}
+    <label>{{ f.label }}
+      <input type="number" name="{{ f.key }}" value="{{ v.value }}" placeholder="{{ f.default }}" inputmode="numeric"
+             {% if f.min is not none %}min="{{ f.min }}"{% endif %} {% if f.max is not none %}max="{{ f.max }}"{% endif %} {% if v.locked %}disabled{% endif %}>
+    </label>
+  {% elif f.kind == 'tz' %}
+    <label>{{ f.label }}
+      <input name="{{ f.key }}" value="{{ v.value }}" placeholder="{{ f.default }}" list="timezones" autocapitalize="none" {% if v.locked %}disabled{% endif %}>
+    </label>
+  {% else %}
+    <label>{{ f.label }}
+      <input type="{{ 'email' if f.kind == 'email' else 'text' }}" name="{{ f.key }}" value="{{ v.value }}" placeholder="{{ f.default }}"
+             autocomplete="off" spellcheck="false" autocapitalize="none" {% if v.locked %}disabled{% endif %}>
+    </label>
+  {% endif %}
+  {% if f.help %}<p class="help">{{ f.help }}</p>{% endif %}
+  {% if v.locked %}<p class="help">Vastgezet in de Docker-instellingen van deze bot; hier wijzigen kan niet.</p>{% endif %}
+  {% if errors.get(f.key) %}<p class="error">{{ errors[f.key] }}</p>{% endif %}
+</div>
+{%- endmacro %}

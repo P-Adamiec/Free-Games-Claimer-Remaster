@@ -17,6 +17,10 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 # Handled by Docker, not by config.py: the image tag, TurboVNC's own password and the user the entrypoint switches to.
 DOCKER_ONLY = {"FGC_TAG", "VNC_PASSWORD", "PUID", "PGID"}
+# [fork:webui] read by the webui container and webui/bots.sh, documented in webui/README.md
+DOCKER_ONLY |= {"WEBUI_ADMIN_USER", "WEBUI_ADMIN_PASSWORD", "WEBUI_PORT", "WEBUI_BIND", "WEBUI_PUBLIC_URL",
+                "WEBUI_TRUSTED_PROXIES", "WEBUI_COOKIE_SECURE", "WEBUI_SECRET_KEY", "WEBUI_TIMEZONE",
+                "FGC_RUN_TIMEOUT_MINUTES"}
 
 
 def _config_vars() -> list[str]:
