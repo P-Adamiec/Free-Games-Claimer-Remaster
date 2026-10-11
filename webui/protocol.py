@@ -3,7 +3,8 @@
 Both containers mount the same data volume (/fgc/data). There is no network
 connection and no Docker API between them: the web interface writes small
 request files, the bot (webui/bridge.py) picks them up and writes its status
-back. Standard library only, because both sides import it.
+back. Claim runs themselves go through the shared job queue (webui/jobqueue.py).
+Standard library only, because both sides import it.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from pathlib import Path
 CONFIG_FILE = "config.env"
 WEBUI_DIR = "webui"
 STATUS_FILE = "status.json"          # written by the bot, read by the web interface
-RUN_REQUEST = "request-run.json"     # "run now", written by the web interface
 RESTART_REQUEST = "request-restart.json"  # "settings changed, restart", written by the web interface
 RESTART_NOTE = "restarted.json"      # left by the bot right before it restarts itself
 LOG_FILE = "bot.log"                 # plain-text copy of the bot's log

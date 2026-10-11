@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Takenlijst{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="row between">
+    <h1>Takenlijst</h1>
+    <a class="button secondary" href="/taken">Vernieuwen</a>
+  </div>
+  <p class="muted small">Elke run (volgens planning of met "Nu uitvoeren") komt hier in de rij. Er
+    draai{% if workers == 1 %}t één run{% else %}en hooguit {{ workers }} runs{% endif %} tegelijk
+    (nu {{ running_total }} bezig); de rest wacht op volgorde van aanmelden.
+    {% if not admin and others %}Voor je in de rij of bezig: {{ others }} taak/taken van anderen.{% endif %}</p>
+
+  <h2>Bezig en in de wachtrij</h2>
+  {% if not active %}<p class="muted">Niets in de rij.</p>{% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr>{% if admin %}<th>Bot</th>{% endif %}<th>#</th><th>Status</th><th>Aangemaakt</th><th>Door</th><th></th></tr></thead>
+    <tbody>
+    {% for j in active %}
+      <tr>
+        {% if admin %}<td>{{ j.bot }}{% if alive.get(j.bot) == false %} <span class="tag bad">offline</span>{% endif %}</td>{% endif %}
+        <td>{{ j.id }}</td>
+        <td><span class="badge {{ j.tone }}">{{ j.label }}{% if j.status == 'running' %} · {{ j.elapsed }} min{% elif j.position %} · plek {{ j.position }}{% endif %}</span></td>
+        <td class="nowrap">{{ j.created }}</td>
+        <td>{{ j.source_label }}{% if j.requested_by %} ({{ j.requested_by }}){% endif %}</td>
+        <td>
+          {% if j.status == 'queued' %}
+          <form method="post" action="/taken/{{ j.id }}/annuleer" data-confirm="Taak {{ j.id }} annuleren?">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">Annuleren</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Geschiedenis</h2>
+  {% if not history %}<p class="muted">Nog geen afgeronde taken.</p>{% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr>{% if admin %}<th>Bot</th>{% endif %}<th>#</th><th>Resultaat</th><th>Gestart</th><th>Duur</th><th>Door</th></tr></thead>
+    <tbody>
+    {% for j in history %}
+      <tr>
+        {% if admin %}<td>{{ j.bot }}</td>{% endif %}
+        <td>{{ j.id }}</td>
+        <td>
+          <span class="tag {{ j.tone }}">{{ j.label }}</span>
+          {% if j.claimed is not none %}<span class="small">{{ j.claimed }} geclaimd{% if j.failed_games %}, {{ j.failed_games }} mislukt{% endif %}</span>{% endif %}
+          {% if j.error %}<div class="small muted">{{ j.error }}</div>{% endif %}
+          {% if j.problems %}<details><summary class="small">{{ j.problems|length }} melding(en)</summary>
+            <ul class="problems small">{% for p in j.problems %}<li>{{ p }}</li>{% endfor %}</ul></details>{% endif %}
+        </td>
+        <td class="nowrap">{{ j.started if j.started != '–' else j.created }}</td>
+        <td>{% if j.duration is not none %}{{ j.duration }} min{% else %}–{% endif %}</td>
+        <td>{{ j.source_label }}{% if j.requested_by %} ({{ j.requested_by }}){% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  <p class="muted small">De geschiedenis wordt 30 dagen bewaard.</p>
+</section>
+{% endblock %}

@@ -39,8 +39,8 @@
   <section class="card" id="{{ sec.id }}">
     <h2>{{ sec.title }}</h2>
     {% if sec.id == 'planning' %}
-    <p class="muted small">Nu: {{ schedule }}. Er draait altijd maar één bot tegelijk (de rest wacht in de
-      wachtrij), maar kies bij voorkeur tijden die niet samenvallen met die van anderen.</p>
+    <p class="muted small">Nu: {{ schedule }}. Op die tijden zet de bot een run in de
+      <a href="/taken">takenlijst</a>; hij start zodra er een plek vrij is.</p>
     {% endif %}
     <div class="fields">
       {% for v in sec.fields if not v.field.advanced %}{{ field(v, errors) }}{% endfor %}

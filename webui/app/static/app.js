@@ -39,7 +39,7 @@
           var next = document.getElementById("next-run");
           if (next) next.textContent = s.next_run;
           // A run just finished: reload once to show the new games and log.
-          if (last !== s.label && (s.state === "ok") && /Bezig|wachtrij|Verzoek/.test(last)) {
+          if (last !== s.label && (s.state === "ok") && /Bezig|wachtrij/.test(last)) {
             window.location.reload();
           }
           last = s.label;

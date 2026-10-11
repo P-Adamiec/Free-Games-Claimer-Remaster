@@ -25,7 +25,7 @@ def env(tmp_path):
     (tmp_path / "env" / "bob.env").write_text("VNC_PASSWORD=bobvnc12\n")
     return {"WEBUI_DATA_DIR": str(tmp_path / "w"), "FGC_BOTS": "alice,bob", "FGC_BOTS_DIR": str(tmp_path / "bots"),
             "FGC_BOTS_ENV_DIR": str(tmp_path / "env"), "WEBUI_ADMIN_USER": "alice",
-            "WEBUI_ADMIN_PASSWORD": ADMIN_PW, "WEBUI_COOKIE_SECURE": "false"}
+            "WEBUI_ADMIN_PASSWORD": ADMIN_PW, "WEBUI_COOKIE_SECURE": "false", "FGC_QUEUE_DIR": str(tmp_path / "queue")}
 
 
 @pytest.fixture
@@ -52,12 +52,12 @@ class TestStartup:
         with pytest.raises(SystemExit, match="WEBUI_ADMIN_PASSWORD"):
             webapp.create_app(env)
 
-    def test_a_new_bot_gets_its_own_schedule(self, app, env):
+    def test_a_new_bot_gets_the_default_schedule(self, app, env):
+        # The same times for everyone: the job queue decides who runs first.
         from pathlib import Path
-        alice = (Path(env["FGC_BOTS_DIR"]) / "alice" / "config.env").read_text()
-        bob = (Path(env["FGC_BOTS_DIR"]) / "bob" / "config.env").read_text()
-        assert "06:00,18:00" in alice and "09:00,21:00" in bob
-        assert "RUN_ON_STARTUP='false'" in alice
+        for bot in ("alice", "bob"):
+            text = (Path(env["FGC_BOTS_DIR"]) / bot / "config.env").read_text()
+            assert "SCHEDULER_FIXED_TIMES='06:00,18:00'" in text and "RUN_ON_STARTUP='false'" in text
 
 
 class TestLogin:
@@ -168,3 +168,57 @@ class TestHeaders:
         r = TestClient(application, base_url="https://testserver").get("/login")
         cookie = r.headers["set-cookie"].lower()
         assert "httponly" in cookie and "secure" in cookie and "samesite=lax" in cookie
+
+
+class TestJobList:
+    def test_run_now_enqueues_once(self, app):
+        client, _ = login(app, "bob", USER_PW)
+        token = csrf(client, "/")
+        client.post("/run", data={"csrf": token})
+        r = client.post("/run", data={"csrf": token})
+        assert "al een run" in r.text
+        jobs = app.state.queue.active()
+        assert [(j["bot"], j["source"], j["requested_by"]) for j in jobs] == [("bob", "manual", "bob")]
+
+    def test_the_badge_shows_the_queue(self, app, env):
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from webui import protocol
+        protocol.write_json(Path(env["FGC_BOTS_DIR"]) / "bob" / "webui" / "status.json",
+                            {"heartbeat": datetime.now(timezone.utc).isoformat()})
+        app.state.queue.enqueue("alice")
+        app.state.queue.enqueue("bob")
+        client, _ = login(app, "bob", USER_PW)
+        assert "In de wachtrij (plek 2)" in client.get("/").text
+
+    def test_users_see_only_their_own_jobs(self, app):
+        app.state.queue.enqueue("alice", requested_by="alice")
+        app.state.queue.enqueue("bob")
+        client, _ = login(app, "bob", USER_PW)
+        page = client.get("/taken").text
+        assert "(alice)" not in page and "1 taak/taken van anderen" in page
+
+    def test_admin_sees_all_and_the_worker_count(self, app):
+        app.state.queue.enqueue("bob")
+        client, _ = login(app, "alice", ADMIN_PW)
+        page = client.get("/taken").text
+        assert "<td>bob" in page and "Annuleren" in page
+
+    def test_cancel_rules(self, app):
+        other, _ = app.state.queue.enqueue("alice")
+        own, _ = app.state.queue.enqueue("bob")
+        client, _ = login(app, "bob", USER_PW)
+        token = csrf(client, "/taken")
+        assert client.post(f"/taken/{other['id']}/annuleer", data={"csrf": token}).status_code == 403
+        client.post(f"/taken/{own['id']}/annuleer", data={"csrf": token})
+        assert app.state.queue.get(own["id"])["status"] == "cancelled"
+        admin, _ = login(app, "alice", ADMIN_PW)
+        admin.post(f"/taken/{other['id']}/annuleer", data={"csrf": csrf(admin, "/taken")})
+        assert app.state.queue.get(other["id"])["status"] == "cancelled"
+
+    def test_save_with_run_after_queues_a_run(self, app):
+        client, _ = login(app, "bob", USER_PW)
+        token = csrf(client, "/instellingen")
+        client.post("/instellingen", data={"csrf": token, "stores": ["steam"], "SCHEDULER_HOURS": "12",
+                                           "run_after": "on"})
+        assert [j["bot"] for j in app.state.queue.active()] == ["bob"]

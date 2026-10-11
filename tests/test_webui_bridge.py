@@ -1,16 +1,16 @@
-"""[fork:webui] The bot side: status file, requests, and one claim run at a time across bots."""
+"""[fork:webui] The bot side: status file, restart requests, and runs only through the job queue."""
 
 import asyncio
-import json
+import logging
 
 import pytest
 
-from webui import bridge, protocol
+from webui import bridge, jobqueue, protocol
 
 
 class FakeJob:
-    def __init__(self, job_id, func):
-        self.id, self.func, self.next_run_time = job_id, func, None
+    def __init__(self, job_id, func, args=()):
+        self.id, self.func, self.args, self.next_run_time = job_id, func, args, None
 
 
 class FakeScheduler:
@@ -29,27 +29,24 @@ class FakeScheduler:
     def remove_job(self, job_id):
         del self.jobs[job_id]
 
-    def modify_job(self, job_id, func):
-        self.jobs[job_id].func = func
+    def modify_job(self, job_id, func, args=()):
+        self.jobs[job_id].func, self.jobs[job_id].args = func, args
 
 
-def make(tmp_path, monkeypatch, name="alice", lock_dir=None, runs=None):
-    if lock_dir:
-        monkeypatch.setenv("FGC_RUN_LOCK_DIR", str(lock_dir))
-    else:
-        monkeypatch.delenv("FGC_RUN_LOCK_DIR", raising=False)
+def make(tmp_path, monkeypatch, name="alice", queue=None, workers="1", events=None, run_seconds=0.05):
     monkeypatch.setenv("FGC_BOT_NAME", name)
+    monkeypatch.setenv("FGC_WORKERS", workers)
     sched, lock = FakeScheduler(), asyncio.Lock()
 
     async def run_job():
         async with lock:
-            if runs is not None:
-                runs.append(("start", name))
-            await asyncio.sleep(0.05)
-            if runs is not None:
-                runs.append(("end", name))
+            if events is not None:
+                events.append(("start", name))
+            await asyncio.sleep(run_seconds)
+            if events is not None:
+                events.append(("end", name))
 
-    b = bridge.Bridge(sched, run_job, lock, tmp_path / name)
+    b = bridge.Bridge(sched, run_job, lock, tmp_path / name, queue=queue)
     b.dir.mkdir(parents=True)
     return b, sched, lock
 
@@ -59,38 +56,17 @@ class TestStatus:
         b, _, _ = make(tmp_path, monkeypatch)
         b.poll()
         data = protocol.read_json(b.dir / protocol.STATUS_FILE)
-        assert data["running"] is False and data["heartbeat"]
-
-    def test_a_finished_run_is_remembered_with_its_problems(self, tmp_path, monkeypatch):
-        b, _, lock = make(tmp_path, monkeypatch)
-
-        async def scenario():
-            await lock.acquire()
-            b.track_run()
-            b.collector.emit(__import__("logging").makeLogRecord({"levelname": "ERROR", "msg": "Epic login failed"}))
-            lock.release()
-            b.track_run()
-
-        asyncio.run(scenario())
-        assert b.last_run["problems"][0]["message"] == "Epic login failed"
+        assert data["running"] is False and data["heartbeat"] and data["bot"] == "alice"
 
     def test_log_lines_lose_markup_and_secrets(self):
-        import logging
         rec = logging.makeLogRecord({"msg": "\\[Steam] password=hunter2 ok"})
         assert bridge.plain(rec) == "[Steam] password=*** ok"
 
 
-class TestRequests:
-    def test_run_request_is_taken_once(self, tmp_path, monkeypatch):
-        b, sched, _ = make(tmp_path, monkeypatch)
-        protocol.write_json(b.dir / protocol.RUN_REQUEST, {})
-        b.poll()
-        assert bridge.WEBUI_JOB_ID in sched.jobs
-        assert not (b.dir / protocol.RUN_REQUEST).exists()
-
+class TestRestart:
     def test_restart_waits_for_a_running_claim(self, tmp_path, monkeypatch):
         b, _, lock = make(tmp_path, monkeypatch)
-        protocol.write_json(b.dir / protocol.RESTART_REQUEST, {"run_after": False})
+        protocol.write_json(b.dir / protocol.RESTART_REQUEST, {})
 
         async def scenario():
             await lock.acquire()
@@ -99,70 +75,141 @@ class TestRequests:
             return during, b.poll()
 
         during, after = asyncio.run(scenario())
-        assert during is None and after == {"run_after": False}
+        assert during is None and after == {}
 
-    def test_after_a_settings_restart_the_startup_run_is_skipped(self, tmp_path, monkeypatch):
+    def test_after_a_restart_by_us_the_startup_run_is_skipped(self, tmp_path, monkeypatch):
         b, sched, _ = make(tmp_path, monkeypatch)
         sched.add_job(lambda: None, id=bridge.STARTUP_JOB_ID)
-        protocol.write_json(b.dir / protocol.RESTART_NOTE, {"run_after": False})
+        protocol.write_json(b.dir / protocol.RESTART_NOTE, {})
         b.setup()
         assert bridge.STARTUP_JOB_ID not in sched.jobs
 
-    def test_jobs_are_routed_through_the_queue(self, tmp_path, monkeypatch):
-        b, sched, _ = make(tmp_path, monkeypatch)
+
+class TestThroughTheQueue:
+    def test_schedule_only_enqueues(self, tmp_path, monkeypatch):
+        q = jobqueue.JobQueue(tmp_path / "q")
+        b, sched, _ = make(tmp_path, monkeypatch, queue=q)
         sched.add_job(lambda: None, id="claim_all")
+        sched.add_job(lambda: None, id=bridge.STARTUP_JOB_ID)
         b.wrap_jobs()
-        assert sched.jobs["claim_all"].func == b.queued_run
+        job = sched.jobs["claim_all"]
+        job.func(*job.args)
+        job.func(*job.args)                           # deduped
+        sched.jobs[bridge.STARTUP_JOB_ID].func(*sched.jobs[bridge.STARTUP_JOB_ID].args)
+        active = q.active()
+        assert len(active) == 1 and active[0]["source"] == "scheduled"
 
+    def test_without_a_queue_the_schedule_is_left_alone(self, tmp_path, monkeypatch):
+        b, sched, _ = make(tmp_path, monkeypatch)
+        original = lambda: None  # noqa: E731
+        sched.add_job(original, id="claim_all")
+        b.wrap_jobs()
+        assert sched.jobs["claim_all"].func is original
 
-class TestOneRunAtATime:
-    def test_two_bots_take_turns(self, tmp_path, monkeypatch):
-        runs = []
-        a, _, _ = make(tmp_path, monkeypatch, "alice", tmp_path / "lock", runs)
-        b, _, _ = make(tmp_path, monkeypatch, "bob", tmp_path / "lock", runs)
-        monkeypatch.setattr(bridge, "LOCK_POLL_SECONDS", 0.01)
+    def test_a_restart_marks_the_cut_off_run(self, tmp_path, monkeypatch):
+        q = jobqueue.JobQueue(tmp_path / "q")
+        q.bot_heartbeat("alice")
+        q.enqueue("alice")
+        job = q.claim("alice", 1, 3600)
+        b, _, _ = make(tmp_path, monkeypatch, queue=q)
+        b.setup()
+        assert q.get(job["id"])["status"] == jobqueue.FAILED
 
-        async def both():
-            await asyncio.gather(a.queued_run(), b.queued_run())
-
-        asyncio.run(both())
-        # Never two "start" in a row: the second bot waited for the first to end.
-        assert [k for k, _ in runs] == ["start", "end", "start", "end"]
-
-    def test_a_second_trigger_while_queued_is_dropped(self, tmp_path, monkeypatch):
-        runs = []
-        a, _, _ = make(tmp_path, monkeypatch, "alice", None, runs)
-
-        async def twice():
-            await asyncio.gather(a.queued_run(), a.queued_run())
-
-        asyncio.run(twice())
-        assert runs.count(("start", "alice")) == 1
-
-    def test_waiting_gives_up_after_the_timeout(self, tmp_path, monkeypatch):
-        import fcntl
-        runs = []
-        a, _, _ = make(tmp_path, monkeypatch, "alice", tmp_path / "lock", runs)
-        a.timeout = 0.03
-        monkeypatch.setattr(bridge, "LOCK_POLL_SECONDS", 0.01)
-        (tmp_path / "lock").mkdir()
-        with open(tmp_path / "lock" / "run.lock", "a+") as held:
-            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
-            asyncio.run(a.queued_run())
-        assert runs == [] and a.queued_since is None
-
-    def test_a_stuck_run_restarts_the_bot(self, tmp_path, monkeypatch):
-        b, _, lock = make(tmp_path, monkeypatch)
-        b.timeout = 0
-        restarted = []
-        monkeypatch.setattr(b, "restart", lambda req: restarted.append(req))
+    def test_a_claimed_job_runs_and_is_finished_with_a_summary(self, tmp_path, monkeypatch):
+        q = jobqueue.JobQueue(tmp_path / "q")
+        events = []
+        b, _, _ = make(tmp_path, monkeypatch, queue=q, events=events)
+        job, _ = q.enqueue("alice", source="manual")
 
         async def scenario():
-            await lock.acquire()
-            b.track_run()
-            b.run_started_at -= 1
-            b.check_timeout()
-            lock.release()
+            b.poll()
+            await b.task
 
         asyncio.run(scenario())
-        assert restarted == [{"run_after": False}]
+        done = q.get(job["id"])
+        assert events == [("start", "alice"), ("end", "alice")]
+        assert done["status"] == jobqueue.DONE and done["result"]["claimed"] == 0
+
+    def test_a_crashing_run_is_marked_failed(self, tmp_path, monkeypatch):
+        q = jobqueue.JobQueue(tmp_path / "q")
+        b, _, _ = make(tmp_path, monkeypatch, queue=q)
+
+        async def boom():
+            raise RuntimeError("chrome gone")
+
+        b.run_job = boom
+        job, _ = q.enqueue("alice")
+
+        async def scenario():
+            b.poll()
+            await b.task
+
+        asyncio.run(scenario())
+        got = q.get(job["id"])
+        assert got["status"] == jobqueue.FAILED and "chrome gone" in got["error"]
+
+    def test_a_stuck_run_is_marked_timeout_and_restarts_the_bot(self, tmp_path, monkeypatch):
+        q = jobqueue.JobQueue(tmp_path / "q")
+        b, _, _ = make(tmp_path, monkeypatch, queue=q, run_seconds=5)
+        restarted = []
+        monkeypatch.setattr(b, "restart", lambda req: restarted.append(req))
+        job, _ = q.enqueue("alice")
+
+        async def scenario():
+            b.poll()
+            b.timeout = 0
+            b.current_started -= 1
+            b.poll()
+            b.task.cancel()
+
+        asyncio.run(scenario())
+        assert restarted and q.get(job["id"])["status"] == jobqueue.TIMEOUT
+
+    def test_no_new_job_while_a_restart_is_pending(self, tmp_path, monkeypatch):
+        q = jobqueue.JobQueue(tmp_path / "q")
+        b, _, _ = make(tmp_path, monkeypatch, queue=q)
+        q.enqueue("alice")
+        protocol.write_json(b.dir / protocol.RESTART_REQUEST, {})
+        monkeypatch.setattr(b, "restart", lambda req: None)
+
+        async def scenario():
+            b.poll()
+
+        asyncio.run(scenario())
+        assert b.current is None and q.active()[0]["status"] == jobqueue.QUEUED
+
+
+async def _drive(bridges, until):
+    while not until():
+        for b in bridges:
+            b.poll()
+        await asyncio.sleep(0.01)
+    for b in bridges:
+        if b.task:
+            await b.task
+
+
+def _overlap(events) -> int:
+    running = most = 0
+    for kind, _ in events:
+        running += 1 if kind == "start" else -1
+        most = max(most, running)
+    return most
+
+
+@pytest.mark.parametrize("workers,expected", [("1", 1), ("2", 2)])
+def test_two_bots_and_the_worker_limit(tmp_path, monkeypatch, workers, expected):
+    q = jobqueue.JobQueue(tmp_path / "q")
+    events = []
+    a, _, _ = make(tmp_path, monkeypatch, "alice", q, workers, events, run_seconds=0.2)
+    b, _, _ = make(tmp_path, monkeypatch, "bob", q, workers, events, run_seconds=0.2)
+    for bot in (a, b):
+        bot.last_beat = 0
+        q.bot_heartbeat(bot.bot_name)
+    q.enqueue("alice")
+    q.enqueue("bob")
+    asyncio.run(_drive([a, b], lambda: len(events) == 4))
+    # FGC_WORKERS=1: never two runs at once, in FIFO order. =2: both at once is allowed (and happens).
+    assert _overlap(events) == expected
+    if expected == 1:
+        assert events == [("start", "alice"), ("end", "alice"), ("start", "bob"), ("end", "bob")]

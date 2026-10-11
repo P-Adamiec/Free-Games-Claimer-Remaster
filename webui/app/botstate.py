@@ -86,20 +86,16 @@ def fmt_time(value) -> str:
 
 # ------------------------------------------------------------------ schedule
 
-def default_schedule(index: int) -> dict[str, str]:
-    """A different pair of daily times per bot, so two Chromes never run at once by default."""
-    hour = 6 + 3 * (index % 4)            # 06/18, 09/21, 12/00, 15/03
-    minute = 30 * ((index // 4) % 2)      # bots 5-8 half an hour later
-    times = f"{hour:02d}:{minute:02d},{(hour + 12) % 24:02d}:{minute:02d}"
-    return {"SCHEDULER_HOURS": "0", "SCHEDULER_FIXED_TIMES": times,
-            "SCHEDULER_TIMEZONE": "Europe/Amsterdam", "RUN_ON_STARTUP": "false"}
+# The same sane default for every new bot: the job queue decides who runs first.
+DEFAULT_SCHEDULE = {"SCHEDULER_HOURS": "0", "SCHEDULER_FIXED_TIMES": "06:00,18:00",
+                    "SCHEDULER_TIMEZONE": "Europe/Amsterdam", "RUN_ON_STARTUP": "false"}
 
 
 def seed_config(bot: Bot) -> bool:
-    """Give a new bot its staggered schedule before it first starts. True when written."""
+    """Give a new bot the default schedule before it first starts. True when written."""
     if bot.config_file.exists() or not bot.dir.exists():
         return False
-    config_store.write_config(bot.config_file, default_schedule(bot.index))
+    config_store.write_config(bot.config_file, dict(DEFAULT_SCHEDULE))
     return True
 
 
@@ -117,69 +113,47 @@ def schedule_text(values: dict[str, str]) -> str:
     return " ".join(parts) or "niets ingepland"
 
 
-def _minutes(time_text: str, tz: str) -> int | None:
-    try:
-        h, m = (int(p) for p in time_text.split(":"))
-        local = datetime.now(ZoneInfo(tz)).replace(hour=h, minute=m, second=0, microsecond=0)
-    except (ValueError, ZoneInfoNotFoundError):
-        return None
-    utc = local.astimezone(timezone.utc)
-    return utc.hour * 60 + utc.minute
-
-
-def schedule_conflicts(configs: dict[str, dict[str, str]], gap: int = 60) -> list[str]:
-    """Dutch warnings for bots that may run at the same time (memory: each run starts Chrome)."""
-    warnings = []
-    slots: list[tuple[str, int]] = []
-    for name, values in configs.items():
-        if (values.get("SCHEDULER_HOURS", "12").strip() or "12") != "0":
-            warnings.append(f"{name} draait op een interval (elke zoveel uur): dat kan samenvallen met een "
-                            "andere bot. Vaste tijden zijn veiliger.")
-        tz = values.get("SCHEDULER_TIMEZONE", "UTC") or "UTC"
-        for t in filter(None, (p.strip() for p in values.get("SCHEDULER_FIXED_TIMES", "").split(","))):
-            minute = _minutes(t, tz)
-            if minute is not None:
-                slots.append((name, minute))
-    for i, (a, ma) in enumerate(slots):
-        for b, mb in slots[i + 1:]:
-            if a != b and min(abs(ma - mb), 1440 - abs(ma - mb)) < gap:
-                warnings.append(f"{a} en {b} hebben een run binnen een uur van elkaar.")
-    return list(dict.fromkeys(warnings))
-
-
 # ------------------------------------------------------------------ status
 
-def status(bot: Bot) -> dict:
+def fmt_epoch(value) -> str:
+    if not value:
+        return "–"
+    return datetime.fromtimestamp(float(value), timezone.utc).astimezone(display_tz()).strftime("%d-%m-%Y %H:%M")
+
+
+def minutes_since(value) -> int:
+    return max(0, int((datetime.now(timezone.utc).timestamp() - float(value or 0)) // 60))
+
+
+def status(bot: Bot, queue_state: dict | None = None) -> dict:
+    """Bot status for the badge: the queue says running/queued, status.json says alive."""
     raw = protocol.read_json(bot.webui_dir / protocol.STATUS_FILE) or {}
     beat = parse_time(raw.get("heartbeat"))
     age = (datetime.now(timezone.utc) - beat).total_seconds() if beat else None
     alive = age is not None and age < ALIVE_SECONDS
     last = raw.get("last_run") if isinstance(raw.get("last_run"), dict) else None
-    if not alive:
+    q = queue_state or {}
+    running, queued = q.get("running"), q.get("queued")
+    if running:
+        state, label = "busy", f"Bezig met een run ({minutes_since(running['started_at'])} min)"
+    elif not alive:
         state, label = "off", "Niet bereikbaar"
     elif raw.get("restarting"):
         state, label = "busy", "Herstart…"
-    elif raw.get("running"):
-        state, label = "busy", "Bezig met een run"
-    elif raw.get("queued"):
-        state, label = "busy", "In de wachtrij (een andere bot is bezig)"
-    elif (bot.webui_dir / protocol.RUN_REQUEST).exists():
-        state, label = "busy", "Verzoek verstuurd…"
+    elif queued:
+        state, label = "busy", (f"In de wachtrij (plek {queued['position']})" if queued.get("position")
+                                else "In de wachtrij")
     else:
         state, label = "ok", "Actief, wacht op de volgende run"
     return {
         "alive": alive, "state": state, "label": label,
-        "running": bool(alive and raw.get("running")),
-        "queued": bool(alive and raw.get("queued")),
-        "run_started": fmt_time(raw.get("run_started")),
+        "running": bool(running), "queued": bool(queued),
+        "job": running or queued,
         "last_run": last,
-        "last_started": fmt_time(last.get("started")) if last else "–",
         "last_finished": fmt_time(last.get("finished")) if last else "–",
         "next_run": fmt_time(raw.get("next_run")) if alive else "–",
         "version": raw.get("version", ""),
         "restart_pending": bool(raw.get("restart_pending")) or (bot.webui_dir / protocol.RESTART_REQUEST).exists(),
-        "run_pending": (bot.webui_dir / protocol.RUN_REQUEST).exists(),
-        "message": raw.get("message", ""),
         "heartbeat": fmt_time(raw.get("heartbeat")),
     }
 
@@ -195,13 +169,28 @@ def env_value(bot: Bot, key: str) -> str:
         return ""
 
 
-def request_run(bot: Bot) -> None:
-    protocol.write_json(bot.webui_dir / protocol.RUN_REQUEST, {"at": datetime.now(timezone.utc).isoformat()})
+def request_restart(bot: Bot) -> None:
+    protocol.write_json(bot.webui_dir / protocol.RESTART_REQUEST, {"at": datetime.now(timezone.utc).isoformat()})
 
 
-def request_restart(bot: Bot, run_after: bool = False) -> None:
-    protocol.write_json(bot.webui_dir / protocol.RESTART_REQUEST,
-                        {"at": datetime.now(timezone.utc).isoformat(), "run_after": run_after})
+JOB_LABELS = {"queued": ("In de wachtrij", "muted"), "running": ("Bezig", "busy"), "done": ("Klaar", "ok"),
+              "failed": ("Mislukt", "bad"), "timeout": ("Te lang bezig", "bad"),
+              "cancelled": ("Geannuleerd", "muted")}
+SOURCE_LABELS = {"scheduled": "planning", "startup": "bij opstarten", "manual": "handmatig"}
+
+
+def job_view(job: dict) -> dict:
+    """A job from the queue, ready for a template."""
+    label, tone = JOB_LABELS.get(job["status"], (job["status"], "muted"))
+    result = job.get("result") or {}
+    end = job.get("finished_at")
+    dur = int((end - job["started_at"]) // 60) if end and job.get("started_at") else None
+    return {**job, "label": label, "tone": tone, "source_label": SOURCE_LABELS.get(job["source"], job["source"]),
+            "created": fmt_epoch(job["created_at"]), "started": fmt_epoch(job.get("started_at")),
+            "finished": fmt_epoch(end), "duration": dur,
+            "elapsed": minutes_since(job["started_at"]) if job["status"] == "running" else None,
+            "claimed": result.get("claimed"), "failed_games": result.get("failed"),
+            "problems": result.get("problems") or []}
 
 
 # ------------------------------------------------------------------ games, log

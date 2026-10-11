@@ -21,6 +21,19 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
 
 ## 2026-10-11
 
+- Takenlijst met workers in plaats van de `flock` en de gespreide tijden (#10). Elke run is een taak in een
+  gedeelde SQLite-takenlijst (`webui/jobqueue.py`, volume `fgc_queue`, WAL, claimen met `BEGIN IMMEDIATE`).
+  - De planning van een bot en 'Nu uitvoeren' zetten alleen een taak in de rij (hooguit één wachtende per bot);
+    een bot runt pas na het claimen van een plek. Hooguit `FGC_WORKERS` runs tegelijk (standaard 1, `auto` =
+    (geheugen − 1 GB) / 1,5 GB, max 4), FIFO over alle bots.
+  - Heartbeat per lopende taak: een stille bot (2 min) geeft *mislukt*, langer dan `FGC_RUN_TIMEOUT_MINUTES`
+    geeft *te lang bezig* plus herstart van de bot. Wachtende taken vervallen na 24 uur, geschiedenis 30 dagen.
+  - Nieuwe pagina 'Takenlijst' (eigen taken; beheerder ziet alles, aantal workers en kan annuleren); de
+    statusbadge komt uit de takenlijst. Nieuwe bots krijgen allemaal 06:00 en 18:00; de waarschuwingen over
+    gelijke tijden in Beheer zijn weg.
+  - Fix `bots.sh add`: stopte zonder melding als `WEBUI_PUBLIC_URL` niet in `.env` stond (`set -e`).
+  - Uitrol: `./webui/bots.sh generate`, daarna `docker compose up -d --build` (webui eerst); volume
+    `fgc_runlock` mag weg. 1506 tests groen.
 - Uitgerold op de container: webui + bots `sjoerd` en `bjorn`; accounts `sjoerd` (admin) en `bjorn` aangemaakt.
   Login, 403 op Beheer voor een gewone gebruiker en de noVNC-pagina getest op het thuisnetwerk.
 - Fix `bots.sh`: webui eerst starten. Een nieuwe bot las zijn config voordat de webui de gespreide planning had

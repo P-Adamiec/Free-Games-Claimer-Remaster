@@ -7,7 +7,7 @@ Iedere gebruiker heeft een **eigen bot** (eigen container, eigen winkelaccounts)
 - de planning, meldingen (Discord / Apprise) en een paar andere opties instellen;
 - zien wat de bot gedaan heeft: status, laatste en volgende run, geclaimde games per winkel,
   problemen van de laatste run en het logboek;
-- op **Nu uitvoeren** drukken;
+- op **Nu uitvoeren** drukken en in de **Takenlijst** zien wanneer de run aan de beurt is;
 - het **scherm van de bot** openen (noVNC) om zelf in te loggen bij een winkel.
 
 Alles hieronder gebruikt voorbeeldnamen (`user1`, `user2`, `<server-ip>`, `games.example.org`).
@@ -21,7 +21,7 @@ internet ──https──> Nginx Proxy Manager ──http──> webui (poort 8
                      ┌──────────────────────────────┼──────────────────────────────┐
                  fgc-user1 (bot)                fgc-user2 (bot)                     ...
                  volume fgc_data_user1           volume fgc_data_user2
-                         └──────── gedeeld volume fgc_runlock (één run tegelijk) ────────┘
+                         └──────── gedeeld volume fgc_queue: takenlijst (jobs.db) ────────┘
 ```
 
 - **Eén bot per persoon.** De bot kan maar één set inloggegevens per winkel aan, dus elke persoon
@@ -33,20 +33,34 @@ internet ──https──> Nginx Proxy Manager ──http──> webui (poort 8
   bij het opstarten leest, vraagt de webinterface na *Opslaan* om een herstart; de bot stopt dan
   zichzelf **tussen twee runs** en Docker (`restart: unless-stopped`) start hem opnieuw.
 - **Geen Docker-socket.** De webcontainer heeft geen toegang tot Docker. Hij praat met de bots
-  alleen via kleine bestanden in hun volume (`data/webui/`): `status.json` (van de bot),
-  `request-run.json` en `request-restart.json` (van de webinterface) en `bot.log`. Een
+  alleen via kleine bestanden in hun volume (`data/webui/`): `status.json` en `bot.log` (van de
+  bot) en `request-restart.json` (van de webinterface), plus de gedeelde takenlijst. Een
   docker-socket(-proxy) die containers mag herstarten of aanmaken is in feite root op de server;
   dat risico is zo helemaal vermeden. Bots toevoegen gebeurt daarom op de server met `bots.sh`.
-- **Eén run tegelijk.** Elke bot draait Chrome; twee tegelijk kost veel geheugen. Daarom pakt elke
-  bot vóór een run een gedeeld slot (`flock` op `run.lock` in het volume `fgc_runlock`). Andere bots
-  wachten tot het slot vrij is ("In de wachtrij"); *Nu uitvoeren* gaat via dezelfde wachtrij.
-  - Stopt of crasht een bot, dan geeft de kernel het slot vanzelf vrij: een slot kan niet "blijven hangen".
-  - Duurt een run langer dan `FGC_RUN_TIMEOUT_MINUTES` (standaard 180), dan herstart die bot zichzelf
-    (en geeft zo het slot vrij). Een wachtende run geeft het na diezelfde tijd op.
-  - Daarnaast krijgt elke nieuwe bot een **eigen standaardtijdstip**: bot 1 om 06:00 en 18:00,
-    bot 2 om 09:00 en 21:00, bot 3 om 12:00 en 00:00, enz. (tijdzone Europe/Amsterdam, niet
-    direct bij het opstarten). Zo hoeft er zelden iemand te wachten. De planning staat op het
-    overzicht en bij Instellingen; Beheer waarschuwt als twee bots binnen een uur van elkaar draaien.
+- **Takenlijst met workers.** Elke run is een *taak* in een gedeelde takenlijst: een SQLite-bestand
+  (`jobs.db`, WAL-modus) in het volume `fgc_queue`, dat alle bots en de webinterface mounten.
+  - De eigen planning van een bot en *Nu uitvoeren* **zetten alleen een taak in de rij**. Per bot
+    staat er hooguit één taak te wachten (een tweede aanvraag wordt genegeerd).
+  - Een bot start pas een run als hij een taak heeft **geclaimd**. Claimen gebeurt in één
+    schrijftransactie (`BEGIN IMMEDIATE`), dus twee bots kunnen nooit dezelfde laatste plek pakken.
+  - Er lopen hooguit `FGC_WORKERS` runs tegelijk (standaard **1**; elke run is een Chrome).
+    `FGC_WORKERS=auto` rekent het uit: **floor((geheugen − 1 GB) / 1,5 GB)**, minimaal 1 en
+    maximaal 4. "Geheugen" is de cgroup-limiet van de container als die er is, anders `MemTotal`.
+    Voorbeeld: 4 GB → 2, 8 GB → 4.
+  - Volgorde: **wie het eerst komt** (FIFO over alle bots). Een bot die al bezig is of al een
+    minuut geen teken van leven gaf, houdt de rij niet op.
+  - Een lopende taak krijgt elke 15 seconden een heartbeat. Hoort de takenlijst 2 minuten niets
+    (bot gecrasht of gestopt), dan wordt de taak *mislukt* en komt de plek vrij. Duurt een run
+    langer dan `FGC_RUN_TIMEOUT_MINUTES` (standaard 180), dan wordt hij *te lang bezig* en herstart
+    de bot zichzelf. Een bot die opnieuw start, markeert een afgebroken run van zichzelf als mislukt.
+  - Een taak die 24 uur blijft wachten (bot niet bereikbaar) vervalt. Afgeronde taken blijven
+    30 dagen bewaard (maximaal 1000).
+  - Daardoor mogen meerdere bots gewoon dezelfde planning hebben. Elke nieuwe bot krijgt dezelfde
+    standaard: dagelijks om 06:00 en 18:00 (Europe/Amsterdam), niet direct bij het opstarten.
+  - Op de pagina **Takenlijst** ziet een gebruiker de eigen taken (plek in de rij, hoe lang bezig,
+    geschiedenis met resultaat: aantal geclaimd/mislukt en meldingen). De beheerder ziet de taken
+    van alle bots en het aantal workers, en kan wachtende taken annuleren. Een gebruiker kan
+    een eigen wachtende taak ook annuleren.
 - **noVNC via de webinterface.** De noVNC-poorten van de bots worden niet gepubliceerd. Onder
   `/vnc/` toont de webinterface het scherm van **jouw eigen** bot: de pagina én de websocket
   controleren je login (en de Origin), en verbinden alleen met de bot die aan jouw account
@@ -178,7 +192,8 @@ Niet doen als de site via internet bereikbaar is.
 | `WEBUI_COOKIE_SECURE` | `true` | `false` alleen voor http op je eigen netwerk |
 | `WEBUI_SECRET_KEY` | gegenereerd | sleutel voor sessiecookies (32+ tekens) |
 | `WEBUI_TIMEZONE` | `Europe/Amsterdam` | tijdzone voor datums op de site |
-| `FGC_RUN_TIMEOUT_MINUTES` | `180` | maximale duur van één run; daarna herstart die bot |
+| `FGC_WORKERS` | `1` | aantal runs tegelijk over alle bots, of `auto` (zie Takenlijst) |
+| `FGC_RUN_TIMEOUT_MINUTES` | `180` | maximale duur van één run; daarna *te lang bezig* en herstart die bot |
 
 `WEBUI_PUBLIC_URL` wordt gelezen als je een bot toevoegt; staat hij er pas later in, voeg de regel
 `VNC_URL=https://games.example.org/vnc` toe aan `webui/bots/<naam>.env` en draai `docker compose up -d`.
@@ -191,6 +206,24 @@ apparaat-bevestiging. De bot wacht dan een paar minuten (*Wachttijd voor handmat
 stuurt een melding als je die hebt ingesteld. Open dan op het overzicht **Scherm van de bot
 openen**, voer het VNC-wachtwoord in (staat op het overzicht) en rond het inloggen af. Daarna
 blijft de bot meestal lang ingelogd. Tip: druk eerst op *Nu uitvoeren* en open dan het scherm.
+
+## Bijwerken vanaf de versie met `fgc_runlock`
+
+De eerste versie liet bots op elkaar wachten met een `flock` in het volume `fgc_runlock`. Die is
+vervangen door de takenlijst (volume `fgc_queue`). De override moet daarom opnieuw gemaakt worden:
+
+```sh
+git pull
+./webui/bots.sh generate
+docker compose up -d --build --remove-orphans --wait webui
+docker compose up -d --build --remove-orphans
+docker volume rm <project>_fgc_runlock     # optioneel, wordt niet meer gebruikt
+```
+
+De takenlijst (`jobs.db`) wordt vanzelf aangemaakt; er is geen migratie nodig. Bestaande bots houden
+hun huidige planning (de oude, gespreide tijden); dat mag zo blijven of je zet ze in Instellingen
+gelijk. Wil je meer dan één run tegelijk, zet dan `FGC_WORKERS` in `.env` en draai daarna
+`docker compose up -d`.
 
 ## Bestaande installatie met één bot
 

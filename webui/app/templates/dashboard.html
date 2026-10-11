@@ -11,19 +11,18 @@
     om je accounts in te vullen.</p>
   {% endif %}
   {% if st.restart_pending %}<p class="flash warn">Nieuwe instellingen worden geladen zodra de huidige run klaar is.</p>{% endif %}
-  {% if st.message %}<p class="flash warn">{{ st.message }}</p>{% endif %}
   <dl class="facts">
-    <div><dt>Laatste run</dt><dd>{{ st.last_finished }}</dd></div>
+    <div><dt>Laatste run</dt><dd>{% if last_job %}{{ last_job.finished }} · <span class="tag {{ last_job.tone }}">{{ last_job.label }}</span>{% else %}{{ st.last_finished }}{% endif %}</dd></div>
     <div><dt>Volgende run</dt><dd id="next-run">{{ st.next_run }}</dd></div>
     <div><dt>Planning</dt><dd>{{ schedule }}</dd></div>
     <div><dt>Geclaimd in totaal</dt><dd>{{ claimed }}</dd></div>
   </dl>
   <form method="post" action="/run" class="row">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit" class="primary" {% if not st.alive or st.running or st.queued or st.run_pending %}disabled{% endif %}>Nu uitvoeren</button>
+    <button type="submit" class="primary" {% if st.running or st.queued %}disabled{% endif %}>Nu uitvoeren</button>
     <span class="muted small">
-      {% if others_busy %}Een andere bot is nu bezig: jouw run komt in de wachtrij en start daarna vanzelf.
-      {% else %}Er draait steeds maar één bot tegelijk; een run kan dus even op zijn beurt wachten.{% endif %}
+      Elke run gaat via de <a href="/taken">takenlijst</a>: er draai{% if workers == 1 %}t steeds één run{% else %}en steeds hooguit {{ workers }} runs{% endif %}
+      tegelijk (nu {{ running_total }}). Is alles bezet, dan wacht je run op zijn beurt.
     </span>
   </form>
 </section>
@@ -44,6 +43,13 @@
   <p class="muted small">Het scherm is leeg of zwart als de bot niets doet; dat is normaal. Tip: start eerst
     "Nu uitvoeren" en open dan het scherm.</p>
 </section>
+
+{% if last_job and last_job.error %}
+<section class="card">
+  <h2>Laatste run: {{ last_job.label | lower }}</h2>
+  <p class="flash bad">{{ last_job.error }}</p>
+</section>
+{% endif %}
 
 {% if failures %}
 <section class="card">

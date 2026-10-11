@@ -6,7 +6,8 @@
   <h2>Bots</h2>
   {% if not rows %}<p class="muted">Er zijn nog geen bots. Maak er een aan op de server met
     <code>./webui/bots.sh add &lt;naam&gt;</code>.</p>{% endif %}
-  {% for c in conflicts %}<p class="flash warn">{{ c }}</p>{% endfor %}
+  <p class="muted small">Gelijktijdige runs (workers): <strong>{{ workers }}</strong>. Alle runs gaan via de
+    <a href="/taken">takenlijst</a>; dezelfde planningstijd voor meerdere bots is dus geen probleem.</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th>Bot</th><th>Gebruiker</th><th>Status</th><th>Planning</th><th>Laatste run</th><th>Geclaimd</th></tr></thead>

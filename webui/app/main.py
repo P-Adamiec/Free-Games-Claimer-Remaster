@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import re
+import sqlite3
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -19,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
+from webui import jobqueue
 from webui.app import botstate, config_store, schema, security
 from webui.app.users import UserError, UserStore, fingerprint
 
@@ -76,14 +78,21 @@ def create_app(environ=None) -> FastAPI:
         except OSError as exc:
             log.warning("Kon geen startinstellingen schrijven voor %s: %s", bot.name, exc)
 
-    prepare_run_lock(Path(env.get("FGC_RUN_LOCK_DIR") or "/runlock"))
+    queue_dir = Path(env.get("FGC_QUEUE_DIR") or "/queue")
+    try:
+        queue = jobqueue.JobQueue(queue_dir)
+    except (OSError, sqlite3.Error) as exc:
+        raise SystemExit(f"FOUT: de takenlijst in {queue_dir} kan niet geopend worden ({exc}). Is het volume "
+                         "fgc_queue gekoppeld? Draai ./webui/bots.sh generate en daarna docker compose up -d.")
+    prepare_queue(queue_dir)
+    workers = jobqueue.workers_from_env(env)
     secure_cookies = _truthy(env.get("WEBUI_COOKIE_SECURE"), True)
     throttle = security.Throttle()
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.globals["store_names"] = botstate.STORE_NAMES
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.users, app.state.bots, app.state.throttle = users, bots, throttle
+    app.state.users, app.state.bots, app.state.throttle, app.state.queue = users, bots, throttle, queue
 
     # ---------------------------------------------------------------- middleware
 
@@ -214,17 +223,19 @@ def create_app(environ=None) -> FastAPI:
         bot = bot_of(user)
         if not bot:
             return render(request, "nobot.html")
-        st = botstate.status(bot)
+        qs = queue.bot_state(bot.name)
+        st = botstate.status(bot, qs)
         games = botstate.games(bot)
         values = config_store.read_config(bot.config_file)
-        others_busy = any(botstate.status(b)["running"] for b in bots if b.name != bot.name)
+        last_job = botstate.job_view(qs["last"]) if qs["last"] else None
         per_store: dict[str, list] = {}
         for g in games:
             per_store.setdefault(g["store_name"], []).append(g)
         return render(request, "dashboard.html", bot=bot, st=st, per_store=per_store,
                       claimed=sum(1 for g in games if g["tone"] == "ok"),
                       failures=botstate.run_failures(bot, st, games), log=botstate.log_tail(bot),
-                      schedule=botstate.schedule_text(values), others_busy=others_busy,
+                      schedule=botstate.schedule_text(values), last_job=last_job,
+                      workers=workers, running_total=qs["running_total"],
                       vnc_password=botstate.env_value(bot, "VNC_PASSWORD"),
                       stores=config_store.selected_stores(values), configured=bool(values.get("STORES")))
 
@@ -234,9 +245,8 @@ def create_app(environ=None) -> FastAPI:
         bot = bot_of(user)
         if not bot:
             return JSONResponse({}, status_code=404)
-        st = botstate.status(bot)
-        return {k: st[k] for k in ("state", "label", "running", "queued", "next_run", "last_finished",
-                                   "restart_pending", "run_pending")}
+        st = botstate.status(bot, queue.bot_state(bot.name))
+        return {k: st[k] for k in ("state", "label", "running", "queued", "next_run", "restart_pending")}
 
     @app.post("/run")
     async def run_now(request: Request):
@@ -245,15 +255,44 @@ def create_app(environ=None) -> FastAPI:
         bot = bot_of(user)
         if not bot:
             raise Forbidden()
-        st = botstate.status(bot)
-        if not st["alive"]:
-            flash(request, "De bot is nu niet bereikbaar; probeer het over een minuut opnieuw.", "bad")
-        elif st["running"] or st["queued"] or st["run_pending"]:
-            flash(request, "Er loopt al een run of er staat er een in de wachtrij.", "bad")
+        job, created = queue.enqueue(bot.name, source="manual", requested_by=name)
+        if created:
+            flash(request, "Run toegevoegd aan de takenlijst. Hij start zodra er een plek vrij is.")
         else:
-            botstate.request_run(bot)
-            flash(request, "Run aangevraagd. Als een andere bot bezig is, wacht deze run in de wachtrij.")
+            flash(request, "Er staat al een run van jouw bot in de wachtrij.", "bad")
         return RedirectResponse("/", status_code=303)
+
+    # ---------------------------------------------------------------- job list
+
+    @app.get("/taken")
+    async def jobs_page(request: Request):
+        name, user = require(request)
+        admin = user.get("role") == "admin"
+        mine = (user.get("bot") or "")
+        active = [botstate.job_view(j) for j in queue.active()]
+        history = [botstate.job_view(j) for j in queue.history(None if admin else mine or "-", 100)]
+        if not admin:
+            # Others' jobs only as an anonymous count: your place in line still makes sense.
+            ahead = sum(1 for j in active if j["bot"] != mine)
+            active = [j for j in active if j["bot"] == mine]
+        else:
+            ahead = 0
+        return render(request, "jobs.html", active=active, history=history, admin=admin, workers=workers,
+                      running_total=sum(1 for j in queue.active() if j["status"] == "running"),
+                      others=ahead, alive=queue.bots_alive())
+
+    @app.post("/taken/{job_id}/annuleer")
+    async def job_cancel(request: Request, job_id: int):
+        name, user = require(request)
+        await checked_form(request)
+        job = queue.get(job_id)
+        if not job or (user.get("role") != "admin" and job["bot"] != user.get("bot")):
+            raise Forbidden()
+        if queue.cancel(job_id, by=name):
+            flash(request, f"Taak {job_id} is geannuleerd.")
+        else:
+            flash(request, "Deze taak is al gestart of klaar en kan niet meer geannuleerd worden.", "bad")
+        return RedirectResponse("/taken", status_code=303)
 
     # ---------------------------------------------------------------- settings
 
@@ -261,7 +300,7 @@ def create_app(environ=None) -> FastAPI:
         locked = config_store.locked_keys(bot.env_file)
         return render(request, "settings.html", bot=bot, view=config_store.view(values, locked),
                       errors=errors or {}, timezones=schema.timezones(), status=status,
-                      schedule=botstate.schedule_text(values), st=botstate.status(bot))
+                      schedule=botstate.schedule_text(values), st=botstate.status(bot, queue.bot_state(bot.name)))
 
     @app.get("/instellingen")
     async def settings_get(request: Request):
@@ -286,7 +325,10 @@ def create_app(environ=None) -> FastAPI:
             return settings_page(request, bot, new, errors, status=400)
         if new != current:
             config_store.write_config(bot.config_file, new)
-            botstate.request_restart(bot, run_after=bool(form.get("run_after")))
+            botstate.request_restart(bot)
+            if form.get("run_after"):
+                # Claimed by the bot once it has restarted with the new settings.
+                queue.enqueue(bot.name, source="manual", requested_by=name)
             log.info("Instellingen van bot %s gewijzigd door %s.", bot.name, name)
             flash(request, "Opgeslagen. De bot herstart om de nieuwe instellingen te laden "
                            "(als er een run bezig is: zodra die klaar is).")
@@ -331,11 +373,10 @@ def create_app(environ=None) -> FastAPI:
         all_users = users.all()
         owner = {u.get("bot"): n for n, u in all_users.items() if u.get("bot")}
         configs = {b.name: config_store.read_config(b.config_file) for b in bots}
-        rows = [{"bot": b, "st": botstate.status(b), "owner": owner.get(b.name),
+        rows = [{"bot": b, "st": botstate.status(b, queue.bot_state(b.name)), "owner": owner.get(b.name),
                  "schedule": botstate.schedule_text(configs[b.name]),
                  "claimed": sum(1 for g in botstate.games(b) if g["tone"] == "ok")} for b in bots]
-        return render(request, "admin.html", users=all_users, rows=rows, bots=bots,
-                      conflicts=botstate.schedule_conflicts(configs))
+        return render(request, "admin.html", users=all_users, rows=rows, bots=bots, workers=workers)
 
     async def admin_action(request: Request, action):
         require(request, admin=True)
@@ -472,17 +513,16 @@ def create_app(environ=None) -> FastAPI:
     return app
 
 
-def prepare_run_lock(folder: Path) -> None:
-    """Let every bot take the shared run lock, also bots that run as their own user (PUID)."""
-    if not folder.is_dir():
-        return
+def prepare_queue(folder: Path) -> None:
+    """Let every bot write the shared job list, also bots that run as their own user (PUID)."""
     try:
         os.chmod(folder, 0o1777)
-        lock = folder / "run.lock"
-        lock.touch(exist_ok=True)
-        os.chmod(lock, 0o666)
+        for name in (jobqueue.DB_NAME, jobqueue.DB_NAME + "-wal", jobqueue.DB_NAME + "-shm"):
+            path = folder / name
+            if path.exists():
+                os.chmod(path, 0o666)
     except OSError as exc:
-        log.warning("Kon de gedeelde run-lock in %s niet klaarzetten: %s", folder, exc)
+        log.warning("Kon de takenlijst in %s niet voor alle bots openzetten: %s", folder, exc)
 
 
 def _safe_next(value: str) -> str:

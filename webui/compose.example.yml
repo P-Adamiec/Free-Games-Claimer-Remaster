@@ -19,12 +19,13 @@ services:
     ports: !reset []
     volumes: !override
       - fgc_data_user1:/fgc/data
-      - fgc_runlock:/fgc/runlock
+      - fgc_queue:/fgc/queue
     env_file: !override
       - webui/bots/user1.env
     environment:
       FGC_BOT_NAME: "user1"
-      FGC_RUN_LOCK_DIR: /fgc/runlock
+      FGC_QUEUE_DIR: /fgc/queue
+      FGC_WORKERS: "${FGC_WORKERS:-1}"
       FGC_RUN_TIMEOUT_MINUTES: "${FGC_RUN_TIMEOUT_MINUTES:-180}"
 
   fgc-user2:
@@ -37,12 +38,13 @@ services:
     ports: !reset []
     volumes: !override
       - fgc_data_user2:/fgc/data
-      - fgc_runlock:/fgc/runlock
+      - fgc_queue:/fgc/queue
     env_file: !override
       - webui/bots/user2.env
     environment:
       FGC_BOT_NAME: "user2"
-      FGC_RUN_LOCK_DIR: /fgc/runlock
+      FGC_QUEUE_DIR: /fgc/queue
+      FGC_WORKERS: "${FGC_WORKERS:-1}"
       FGC_RUN_TIMEOUT_MINUTES: "${FGC_RUN_TIMEOUT_MINUTES:-180}"
 
   webui:
@@ -57,9 +59,10 @@ services:
     environment:
       FGC_BOTS: "user1,user2"
       WEBUI_DATA_DIR: /webui-data
+      FGC_QUEUE_DIR: /queue
     volumes:
       - webui_data:/webui-data
-      - fgc_runlock:/runlock
+      - fgc_queue:/queue
       - ./webui/bots:/bots-env:ro
       - fgc_data_user1:/bots/user1
       - fgc_data_user2:/bots/user2
@@ -74,6 +77,6 @@ services:
 
 volumes:
   webui_data:
-  fgc_runlock:
+  fgc_queue:
   fgc_data_user1:
   fgc_data_user2:
