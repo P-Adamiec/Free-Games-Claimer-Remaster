@@ -21,6 +21,11 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
 
 ## 2026-10-11
 
+- Uitgerold op de container: webui + bots `sjoerd` en `bjorn`; accounts `sjoerd` (admin) en `bjorn` aangemaakt.
+  Login, 403 op Beheer voor een gewone gebruiker en de noVNC-pagina getest op het thuisnetwerk.
+- Fix `bots.sh`: webui eerst starten. Een nieuwe bot las zijn config voordat de webui de gespreide planning had
+  geschreven en draaide dan elke 12 uur plus direct bij het opstarten.
+
 - Webinterface gebouwd (`webui/`, FastAPI): gebruikersaccounts (argon2, admin/gebruiker), instellingen per winkel,
   dashboard met geclaimde games (uit `fgc.db`), log, status en 'Nu uitvoeren', noVNC via de webui achter de login.
   - Instellingen gaan via `data/config.env` in het volume van de bot (leest upstream al); wachtwoorden alleen
