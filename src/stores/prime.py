@@ -117,7 +117,10 @@ class PrimeGamingClaimer(BaseClaimer):
             await self.sleep(4)
 
             # Step 2: Make sure we are logged into Amazon
-            await self._ensure_logged_in()
+            # [fork:fix] stop here when signing in failed, instead of trying to claim while signed out.
+            if not await self._ensure_logged_in():
+                logger.warning("Not signed in to Prime Gaming – skipping claiming this run.")
+                return
 
             # Step 3: Find and claim all available free games
             await self._claim_internal_games()
@@ -248,8 +251,10 @@ class PrimeGamingClaimer(BaseClaimer):
         logger.debug("Luna signed-in check: no account first name on the page")
         return False
 
-    async def _ensure_logged_in(self, silent_if_logged_in: bool = False) -> None:
+    async def _ensure_logged_in(self, silent_if_logged_in: bool = False) -> bool:  # [fork:fix] returns success
         """Check if logged in; if not, click 'Sign in' in a loop until logged in.
+
+        Returns True when signed in, False when signing in failed (also after a VNC timeout).
 
         Matches the JS pattern: sometimes after Amazon login completes,
         Prime Gaming still shows 'Sign in' and needs another click to finalize.
@@ -275,7 +280,7 @@ class PrimeGamingClaimer(BaseClaimer):
         if await self._is_signed_in():
             if not silent_if_logged_in:
                 self.log_signed_in()
-            return
+            return True
             
         if silent_if_logged_in:
             logger.warning("Session lost mid-operation! Attempting re-login…")
@@ -337,7 +342,7 @@ class PrimeGamingClaimer(BaseClaimer):
                     logged_in = await self._wait_for_vnc_login(_vnc_check)
                     if not logged_in:
                         logger.warning("VNC login timed out – skipping.")
-                        return
+                        return False
 
             # Taking the page away mid-code is what made manual 2FA impossible (issue #46).
             if await self._code_screen_present():
@@ -349,7 +354,7 @@ class PrimeGamingClaimer(BaseClaimer):
 
             if await self._is_signed_in():
                 self.log_signed_in()
-                return
+                return True
 
         # Automated login didn't complete – ask the user to finish it via VNC.
         logger.warning("Automated Prime login did not complete – requesting manual VNC login.")
@@ -359,8 +364,9 @@ class PrimeGamingClaimer(BaseClaimer):
         )
         if await self._wait_for_vnc_login(self._is_signed_in, custom_msg=custom_msg):
             self.log_signed_in()
-            return
+            return True
         logger.warning("Prime login still not completed after VNC wait – skipping.")
+        return False
 
     async def _do_login(self) -> None:
         """Fill in email + password on the Amazon login page."""
@@ -888,7 +894,9 @@ class PrimeGamingClaimer(BaseClaimer):
             return
             
         # Ensure session hasn't expired mid-loop before processing the card
-        await self._ensure_logged_in(silent_if_logged_in=True)
+        if not await self._ensure_logged_in(silent_if_logged_in=True):  # [fork:fix]
+            logger.warning("Not signed in – skipping '%s'.", title)
+            return
 
         try:
             claimed = await self.page.evaluate(
@@ -952,7 +960,9 @@ class PrimeGamingClaimer(BaseClaimer):
             return
 
         # Ensure session hasn't expired mid-loop before processing the card
-        await self._ensure_logged_in(silent_if_logged_in=True)
+        if not await self._ensure_logged_in(silent_if_logged_in=True):  # [fork:fix]
+            logger.warning("Not signed in – skipping '%s'.", title)
+            return
 
         try:
             # Navigate directly to the detail page if we have a detail URL
@@ -969,7 +979,9 @@ class PrimeGamingClaimer(BaseClaimer):
                     # Navigate back to claims page and re-authenticate
                     await self.page.get(URL_CLAIM)
                     await self.sleep(3)
-                    await self._ensure_logged_in()
+                    if not await self._ensure_logged_in():  # [fork:fix]
+                        logger.warning("Re-login failed – skipping '%s'.", title)
+                        return
                     # Navigate back to the detail page after re-login
                     await self.page.get(full_detail_url)
                     await self.sleep(4)

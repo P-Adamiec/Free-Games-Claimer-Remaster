@@ -21,6 +21,11 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
 
 ## 2026-10-11
 
+- Twee upstream-fouten opgelost (gemarkeerd `[fork:fix]`, tests in `tests/test_fork_fixes.py`): Prime claimde
+  door na een mislukte login (ook bij opnieuw inloggen midden in een run); GOG opende met `GOG_NEWSLETTER=false`
+  alleen de abonnementenpagina zonder iets uit te vinken. Het uitvinken is nog niet live getest (geen GOG-claim
+  gehad); de bot waarschuwt in het log als de opties niet gevonden worden.
+
 - Inloghulp in de webui (`webui/app/help.py`): per winkel een uitklapblok "Hoe inloggen werkt" bij Instellingen
   en een nieuwe pagina 'Uitleg' (overzichtstabel, scherm van de bot, meldingen, sessies, authenticator-sleutel
   met stappen per winkel). Gebaseerd op de code van de bot en de helppagina's van de winkels zelf; waar die

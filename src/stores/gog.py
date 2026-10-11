@@ -435,9 +435,43 @@ class GOGClaimer(BaseClaimer):
         # GOG automatically subscribes you to their newsletter when you claim a game.
         # If the user hasn't opted in (GOG_NEWSLETTER=0), unsubscribe automatically.
         if status == "claimed" and not cfg.gog_newsletter:
-            logger.debug("Unsubscribing from newsletter")
-            await self.page.get("https://www.gog.com/en/account/settings/subscriptions")
-            await self.sleep(3)
+            await self._unsubscribe_newsletter()  # [fork:fix] the page was opened but nothing was unticked
+
+    # [fork:fix] begin – untick GOG's marketing newsletters (as vogler/free-games-claimer did).
+    NEWSLETTERS = ("Promotions and hot deals", "Marketing communications through Trusted Partners")
+
+    async def _unsubscribe_newsletter(self) -> None:
+        logger.debug("Unsubscribing from newsletter")
+        await self.page.get("https://www.gog.com/en/account/settings/subscriptions")
+        await self.sleep(4)
+        script = '''
+            (() => {
+                const names = %s;
+                const out = {unticked: [], already: [], missing: []};
+                for (const name of names) {
+                    const row = Array.from(document.querySelectorAll('li, label, div'))
+                        .filter(el => el.textContent && el.textContent.includes(name) && el.querySelector('input[type=checkbox]'))
+                        .sort((a, b) => a.textContent.length - b.textContent.length)[0];
+                    const box = row && row.querySelector('input[type=checkbox]');
+                    if (!box) { out.missing.push(name); continue; }
+                    if (!box.checked) { out.already.push(name); continue; }
+                    (box.closest('label') || row.querySelector('label') || box).click();
+                    out.unticked.push(name);
+                }
+                return JSON.stringify(out);
+            })()
+        ''' % json.dumps(list(self.NEWSLETTERS))
+        try:
+            result = json.loads(await self.page.evaluate(script) or "{}")
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning("Could not read GOG's newsletter settings: %s", exc)
+            return
+        await self.sleep(2)
+        if result.get("unticked"):
+            logger.info("GOG newsletter unsubscribed: %s", ", ".join(result["unticked"]))
+        if result.get("missing"):
+            logger.warning("GOG newsletter option not found (page changed?): %s", ", ".join(result["missing"]))
+    # [fork:fix] end
 
     async def redeem_pending_codes(self) -> None:
         """Find GOG codes from Prime Gaming that haven't been redeemed yet, and redeem them."""
