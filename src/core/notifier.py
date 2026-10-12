@@ -60,11 +60,17 @@ async def send_discord(
     async with httpx.AsyncClient(timeout=30) as client:
         for i, chunk in enumerate(chunks):
             data = {"content": chunk, "username": username}
+
             # Attach the screenshot only to the first chunk
             if i == 0 and screenshot_path and screenshot_path.exists():
                 files = {"file": (screenshot_path.name, screenshot_path.read_bytes(), "image/png")}
+                if cfg.discord_suppress_embeds:
+                    # multipart form fields require string values
+                    data["flags"] = "4"
                 resp = await client.post(webhook_url, data=data, files=files)
             else:
+                if cfg.discord_suppress_embeds:
+                    data["flags"] = 4  # JSON payload accepts an integer
                 resp = await client.post(webhook_url, json=data)
 
             if resp.status_code not in (200, 204):

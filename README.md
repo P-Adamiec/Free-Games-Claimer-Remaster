@@ -4,9 +4,9 @@
   <img alt="logo-free-games-claimer" src="https://github.com/user-attachments/assets/6d749140-c2a2-45d4-ac73-70b16e74a757" />
 </p>
 
-> **Not a fork** – a complete ground-up Python remaster inspired by [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer). 
+> **Not a fork** – a complete ground-up Python remaster inspired by [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer).
 >
-> ℹ️ **Are you coming from the original Node.js version?**  
+> ℹ️ **Are you coming from the original Node.js version?**
 > For a comprehensive, file-by-file breakdown of what changed, dropped features, stealth automation upgrades, and architectural differences, **please read [MODIFICATIONS.md](./MODIFICATIONS.md).**
 
 Automatically claims free games on:
@@ -213,6 +213,7 @@ Options are set via environment variables in `.env`:
 | `DEBUG_LIBS` | `false` | Adds the internals of the libraries the bot uses (every CDP frame sent to Chrome, HTTP handshakes, SQL queries). Only turn this on if a bug report asks for it. |
 | `DRYRUN`| `false` | Simulate a run without claiming games. Detects available giveaways and sends a summary report. |
 | `DISCORD_WEBHOOK` | | Discord webhook URL for notifications. |
+| `DISCORD_SUPPRESS_EMBEDS` | `false` | Set to true to stop Discord from generating link preview cards for URLs in notifications. |
 | `NOTIFY` | | Apprise URL(s) for Telegram, Slack, ntfy, etc. Multiple services can be separated by commas. |
 | `NOTIFY_TEST` | `false` | Send a test notification on startup to verify your setup works. |
 | `NOTIFY_SUMMARY` | `true` | Set to false to disable game claim summaries. (Applies to all services) |

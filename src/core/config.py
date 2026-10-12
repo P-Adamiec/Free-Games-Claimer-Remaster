@@ -187,7 +187,7 @@ _unquote_environment()
 
 class Config:
     """All application settings in one place.
-    
+
     Every setting here corresponds to an environment variable in your .env file.
     For example, 'eg_email' reads from the EG_EMAIL variable.
     """
@@ -240,6 +240,7 @@ class Config:
 
     # --- Notifications ---
     discord_webhook: str | None = os.getenv("DISCORD_WEBHOOK")
+    discord_suppress_embeds: bool = _bool("DISCORD_SUPPRESS_EMBEDS", default=False)
     notify_url: str | None = os.getenv("NOTIFY")  # apprise URL fallback
     notify_summary: bool = _bool("NOTIFY_SUMMARY", default=True)
     notify_errors: bool = _bool("NOTIFY_ERRORS", default=True)
