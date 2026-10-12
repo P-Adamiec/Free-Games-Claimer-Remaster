@@ -179,3 +179,9 @@ class TestTheVncPassword:
         # vncserver rejects a .vnc folder under /tmp unless its mode is exactly 700.
         block = START_VNC.split('pw="-rfbauth', 1)[1].split("\nfi\n", 1)[0]
         assert 'chmod 700 "$HOME/.vnc"' in block
+
+    def test_no_password_is_said_out_loud(self):
+        # Without one, anyone who reaches the port drives a browser signed in to every store.
+        block = START_VNC.split('if [ -z "${VNC_PASSWORD:-}" ]; then', 1)[1].split("\nelse\n", 1)[0]
+        assert "WARNING: VNC_PASSWORD is empty" in block and "$NOVNC_PORT" in block
+        assert START_VNC.index('NOVNC_PORT="${NOVNC_PORT:-7080}"') < START_VNC.index("WARNING: VNC_PASSWORD")

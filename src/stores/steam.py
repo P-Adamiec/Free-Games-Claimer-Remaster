@@ -8,9 +8,10 @@ import re
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, filenamify
+from src.core.claimer import BaseClaimer, filenamify, track_missing_base
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
+from src.core.run_state import needs_you
 from src.core.url_security import url_has_allowed_host
 
 logger = logging.getLogger("fgc.steam")
@@ -27,6 +28,23 @@ DEMO_JS = r"""
     const isDemoBlock = el => !!el && (el.matches('.demo_above_purchase') || !!el.querySelector('.demo_above_purchase, #demoGameBtn'));
     const isDemoBtn = el => !!el && (!!el.closest('.demo_above_purchase, #demoGameBtn') || /\bdemo\b|playtest/i.test(el.textContent || ''));
 """
+
+
+def base_game_button_js(dry: bool) -> str:
+    """Find the free base game's add button and click it, or only report it in a dry run."""
+    return r"""
+JSON.stringify(((dry) => {""" + DEMO_JS + r"""
+    const take = (btn, method) => { if (!dry) btn.click(); return { success: true, method }; };
+    const allBtns = [...document.querySelectorAll('.btn_medium')].filter(b => !isDemoBtn(b));
+    const addLibBtn = allBtns.find(b => b.textContent.includes('Add to Library') || b.textContent.includes('Dodaj do biblioteki'));
+    if (addLibBtn) return take(addLibBtn, 'add_to_library');
+    const addBtn = document.querySelector('[data-action="add_to_account"]');
+    if (addBtn && !isDemoBtn(addBtn)) return take(addBtn, 'add_to_account');
+    const greenBtns = [...document.querySelectorAll('.btn_green_steamui.btn_medium')].filter(b => !isDemoBtn(b));
+    const playBtn = greenBtns.find(b => b.textContent.includes('Play Game') || b.textContent.includes('Zagraj'));
+    if (playBtn) return take(playBtn, 'play_game');
+    return { success: false };
+})(""" + ("true" if dry else "false") + "))"
 
 # "Remember me" is a div with role="checkbox", ticked by default, so it is clicked only when off (#65).
 REMEMBER_ME_JS = r"""
@@ -97,6 +115,9 @@ def is_waiting_steam_key(status: str | None, code: str | None, extra: str | None
 class SteamClaimer(BaseClaimer):
     store_name = "steam"
 
+    # Set when a sign-in nobody finished stops the run.
+    _signed_out: bool = False
+
     async def run(self, extra_games: list | None = None) -> None:
         """Main entry point: find free Steam games and claim them.
         
@@ -130,11 +151,19 @@ class SteamClaimer(BaseClaimer):
                 logger.info("No free games found on SteamDB. Done.")
 
             # Step 3: Claim SteamDB's games, then whatever GamerPower found for Steam.
-            for game in sdb_games:
+            todo = list(sdb_games) + [{**g, "url": g["final_url"], "source": "gamerpower"} for g in (extra_games or [])]
+            for index, game in enumerate(todo):
+                if game.get("source") == "gamerpower":
+                    logger.info("🎮 [GamerPower] '%s' → Steam", game.get("title", "Unknown"))
                 await self._claim_game(game)
-            for game in (extra_games or []):
-                logger.info("🎮 [GamerPower] '%s' → Steam", game.get("title", "Unknown"))
-                await self._claim_game({**game, "url": game["final_url"], "source": "gamerpower"})
+                # A sign-in nobody finished ends the run instead of failing every game after it (TODO 2).
+                if self._signed_out:
+                    left = len(todo) - index
+                    logger.error("Aborting Steam flow due to login failure, %d game(s) left for the next run.", left)
+                    needs_you(self.store_name, left)
+                    if cfg.notify_errors:
+                        await self.notify("steam: could not sign in, the rest is left for the next run.")
+                    break
 
         except Exception as exc:
             logger.exception("Fatal error")
@@ -168,7 +197,10 @@ class SteamClaimer(BaseClaimer):
             await self.start_browser(force_headful=True, extra_args=["--ignore-gpu-blocklist", "--enable-unsafe-webgpu"])
             await self.page.get(URL_STORE)
             await self.sleep(3)
-            await self._ensure_logged_in(URL_STORE)
+            if not await self._ensure_logged_in(URL_STORE):
+                logger.error("Not signed in to Steam, the %d key(s) stay queued for the next run.", len(waiting))
+                needs_you(self.store_name, len(waiting))
+                return
             for row_id, title, key in waiting:
                 if not await self._activate_key(row_id, title, key):
                     break
@@ -367,8 +399,8 @@ class SteamClaimer(BaseClaimer):
     # Login
     # ------------------------------------------------------------------
 
-    async def _ensure_logged_in(self, return_url: str) -> None:
-        """Check login status on current page, log in if needed, return to game url."""
+    async def _ensure_logged_in(self, return_url: str) -> bool:
+        """Check login status on current page, log in if needed, return to game url; False only when nobody finished it."""
         async def _is_logged_in() -> bool:
             result = await self.page.evaluate(
                 """
@@ -398,7 +430,7 @@ class SteamClaimer(BaseClaimer):
         if await _is_logged_in():
             if not self.user or self.user == "unknown":
                 self.log_signed_in()
-            return
+            return True
 
         # Not logged in → navigate directly to login page
         logger.warning("Not signed in – redirecting to login page…")
@@ -415,8 +447,8 @@ class SteamClaimer(BaseClaimer):
             await self.sleep(3)
             if await _is_logged_in():
                 self.log_signed_in()
-                return
-            
+                return True
+
             # Auto-login failed (CAPTCHA, wrong creds, etc.) → fall back to VNC
             logger.warning("Auto-login failed. Falling back to VNC manual login…")
             await self.page.get(URL_LOGIN)
@@ -428,7 +460,7 @@ class SteamClaimer(BaseClaimer):
         logged_in = await self._wait_for_vnc_login(_is_logged_in)
         if not logged_in:
             logger.warning("VNC login timed out – skipping.")
-            return
+            return False
 
         # Verify login and get username
         await self.page.get(return_url)
@@ -436,8 +468,10 @@ class SteamClaimer(BaseClaimer):
         if await _is_logged_in():
             self.log_signed_in()
         else:
+            # The VNC check saw you signed in, so an unclear page here is not a failed sign-in.
             self.user = cfg.steam_username or "unknown"
             logger.warning("Could not verify login, continuing as %s", self.user)
+        return True
 
     async def _do_login(self) -> None:
         """Perform Steam login with stored credentials.
@@ -585,7 +619,9 @@ class SteamClaimer(BaseClaimer):
             return
 
         # Check login status ON the game page
-        await self._ensure_logged_in(current_url)
+        if not await self._ensure_logged_in(current_url):
+            self._signed_out = True
+            return
         current_url = await self.page.evaluate("window.location.href")
 
         # Handle age gate
@@ -607,20 +643,7 @@ class SteamClaimer(BaseClaimer):
         notify_game = {"title": page_title, "url": current_url, "status": "failed"}
         self.notify_games.append(notify_game)
 
-        # Ensure base game is owned if this is a DLC
-        has_base_game = await self._ensure_base_game(current_url)
-        if not has_base_game:
-            logger.warning("Skipping DLC '%s' because required base game is missing.", page_title)
-            notify_game["status"] = "failed:missing_base"
-            return
-
-        # Re-check age gate after returning from base game page
-        current_url = await self.page.evaluate("window.location.href")
-        if "agecheck/app" in current_url:
-            await self._handle_age_gate()
-            await self.sleep(2)
-
-        # Check if already owned
+        # Owned first: the base-game check leaves this page and could misread a DLC you have (#78).
         owned_raw = await self.page.evaluate(
             """JSON.stringify({ owned: document.querySelector('.game_area_already_owned') !== null })"""
         )
@@ -640,6 +663,29 @@ class SteamClaimer(BaseClaimer):
                 await session.commit()
             notify_game["status"] = "existed"
             return
+
+        # Ensure base game is owned if this is a DLC
+        has_base_game = await self._ensure_base_game(current_url)
+        if not has_base_game:
+            # Kept in the database so the summary tells you once, not every run (#78).
+            async with async_session() as session:
+                obj, _ = await get_or_create(
+                    session, store="steam", user=self.user or "unknown",
+                    game_id=app_id, title=page_title, url=current_url, status="failed:missing_base",
+                )
+                notify_game["status"] = track_missing_base(obj, remember=not cfg.dryrun)
+                await session.commit()
+            if notify_game["status"] == "failed:missing_base":
+                logger.warning("Skipping DLC '%s' because required base game is missing.", page_title)
+            else:
+                logger.info("Skipping DLC '%s', its base game is still missing (already reported).", page_title)
+            return
+
+        # Re-check age gate after returning from base game page
+        current_url = await self.page.evaluate("window.location.href")
+        if "agecheck/app" in current_url:
+            await self._handle_age_gate()
+            await self.sleep(2)
 
         # Check if this is a pure Free-to-Play game with nothing to claim.
         # IMPORTANT: DLC for F2P games (e.g. World of Warships DLC) can be
@@ -865,6 +911,12 @@ class SteamClaimer(BaseClaimer):
             await self.take_screenshot(f"steam_fail_{filenamify(page_title)}")
             return
 
+        if not await self._in_library(current_url):
+            logger.warning("'%s' is not in your library after the claim (%s).", page_title, method)
+            notify_game["status"] = "failed:unconfirmed"
+            await self.take_screenshot(f"steam_fail_{filenamify(page_title)}")
+            return
+
         logger.info("✓ Claimed '%s'!", page_title)
 
         async with async_session() as session:
@@ -914,7 +966,7 @@ class SteamClaimer(BaseClaimer):
             logger.warning("DLC requires a base game, but couldn't find the store link.")
             return False
             
-        logger.info("DLC requires a base game. Checking base game: %s", base_url)
+        logger.debug("DLC requires a base game. Checking base game: %s", base_url)
         
         # Navigate to base game
         await self.page.get(base_url)
@@ -927,61 +979,59 @@ class SteamClaimer(BaseClaimer):
         try:
             owned = json.loads(owned_raw) if isinstance(owned_raw, str) else {}
             if owned.get("owned"):
-                logger.info("Base game is already in library.")
+                logger.debug("Base game is already in library.")
                 await self.page.get(dlc_url)  # Return to DLC
                 await self.sleep(3)
                 return True
         except (json.JSONDecodeError, TypeError):
             pass
             
-        # Try to add base game
-        # For Free-to-Play games, clicking "Play Game" adds it to the library.
-        # For Free-to-Keep games, clicking "Add to Account" does it.
-        add_raw = await self.page.evaluate('''
-            JSON.stringify((() => {''' + DEMO_JS + '''
-                // Try "Add to Library" (Blue button, new Steam UI)
-                const allBtns = [...document.querySelectorAll('.btn_medium')].filter(b => !isDemoBtn(b));
-                const addLibBtn = allBtns.find(b => b.textContent.includes('Add to Library') || b.textContent.includes('Dodaj do biblioteki'));
-                if (addLibBtn) { addLibBtn.click(); return { success: true, method: 'add_to_library' }; }
-
-                // Try Add to Account first (Free to keep)
-                const addBtn = document.querySelector('[data-action="add_to_account"]');
-                if (addBtn && !isDemoBtn(addBtn)) { addBtn.click(); return { success: true, method: 'add_to_account' }; }
-
-                // Try Play Game (Free to Play)
-                const greenBtns = [...document.querySelectorAll('.btn_green_steamui.btn_medium')].filter(b => !isDemoBtn(b));
-                const playBtn = greenBtns.find(b => b.textContent.includes('Play Game') || b.textContent.includes('Zagraj'));
-                if (playBtn) { playBtn.click(); return { success: true, method: 'play_game' }; }
-                
-                return { success: false };
-            })())
-        ''')
+        bg_title = await self.page.evaluate(
+            "document.querySelector('#appHubAppName')?.textContent?.trim() || 'Required Base Game'"
+        )
+        add_raw = await self.page.evaluate(base_game_button_js(cfg.dryrun))
         try:
             add_res = json.loads(add_raw) if isinstance(add_raw, str) else {}
         except (json.JSONDecodeError, TypeError):
             add_res = {"success": False}
-            
+
+        if add_res.get("success") and cfg.dryrun:
+            logger.info("DRYRUN – would add the free base game '%s' first.", bg_title)
+            self.notify_games.append({"title": bg_title, "url": base_url, "status": "available (dry run)"})
+            await self.page.get(dlc_url)
+            await self.sleep(4)
+            return True
+
         if add_res.get("success"):
-            logger.info("Added base game to library via %s. Wait 5s...", add_res.get("method"))
-            
-            bg_title_raw = await self.page.evaluate(
-                "document.querySelector('#appHubAppName')?.textContent?.trim() || 'Required Base Game'"
-            )
-            self.notify_games.append({
-                "title": bg_title_raw,
-                "url": base_url,
-                "status": "claimed"
-            })
-            
             await self.sleep(5)
-            
-            # Go back to the DLC page
+            if not await self._in_library(base_url):
+                logger.warning("The free base game '%s' did not reach your library (%s).", bg_title, add_res.get("method"))
+                self.notify_games.append({"title": bg_title, "url": base_url, "status": "failed:unconfirmed"})
+                await self.take_screenshot(f"steam_fail_{filenamify(bg_title)}")
+                return False
+
+            logger.info("✓ Added the free base game '%s' to your library.", bg_title)
+            self.notify_games.append({"title": bg_title, "url": base_url, "status": "claimed"})
             logger.debug("Returning to DLC page...")
             await self.page.get(dlc_url)
             await self.sleep(4)
             return True
-            
-        logger.warning("Base game is not free or could not be added.")
+
+        logger.debug("Base game is not free or could not be added.")
+        return False
+
+    async def _in_library(self, url: str, tries: int = 3) -> bool:
+        """Reload the store page until Steam marks it as in your library, the only proof a claim went through."""
+        for attempt in range(1, tries + 1):
+            await self.page.get(url)
+            await self.sleep(4)
+            here = await self.page.evaluate("window.location.href")
+            if isinstance(here, str) and "agecheck/app" in here:
+                await self._handle_age_gate()
+                await self.sleep(2)
+            if await self.page.evaluate("document.querySelector('.game_area_already_owned') !== null") is True:
+                return True
+            logger.debug("Not in the library yet (read %d of %d) on %s", attempt, tries, await self._page_brief())
         return False
 
     async def _handle_age_gate(self) -> None:

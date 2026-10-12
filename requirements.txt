@@ -1,5 +1,6 @@
 # Core browser automation
-nodriver>=0.50.3
+# Upper bounds below: the next major (for 0.x nodriver the next minor) changes the API; Dependabot proposes the bump.
+nodriver>=0.50.3,<0.51
 
 # Process cleanup (kill orphaned Chrome process trees)
 psutil>=7.2.2
@@ -8,7 +9,7 @@ psutil>=7.2.2
 browserforge>=1.2.4
 
 # Database
-sqlalchemy[asyncio]>=2.1.0
+sqlalchemy[asyncio]>=2.1.0,<3
 aiosqlite>=0.22.1
 
 # Notifications
@@ -19,7 +20,7 @@ apprise>=1.13.1,<2.0.0
 tenacity>=9.1.4
 
 # Scheduler
-APScheduler>=3.11.3
+APScheduler>=3.11.3,<4
 tzdata>=2026.4
 
 # OTP / 2FA
@@ -32,7 +33,7 @@ python-dotenv>=1.2.3
 rich>=15.0.0
 
 # HTTP client
-httpx>=0.28.1
+httpx>=0.28.1,<1
 
 # Tests (development only, not needed to run the bot)
 pytest>=9.1.1

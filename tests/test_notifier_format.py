@@ -12,6 +12,7 @@ import apprise
 import pytest
 from apprise.conversion import convert_between
 
+from src.core.claimer import mask_account
 from src.core.notifier import format_game_list, markdown_ready, markdown_safe
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -100,3 +101,28 @@ class TestTitlesCannotBreakTheMessage:
         before = "• **[Astral Ascent](https://example.com/x)**: claimed"
         assert format_game_list([{"title": "Astral Ascent", "url": "https://example.com/x",
                                    "status": "claimed"}]) == before
+
+
+class TestTheMaskedAccountCannotBreakTheMessage:
+    """The mask's "***" in "p***@gmail.com" opened bold on Discord and left a stray "**" on the line below (2026-10-12)."""
+
+    LINES = "**AliExpress** ({}):\n• **[AliExpress Daily Check-in](https://example.com/x)**: claimed 40"
+
+    @staticmethod
+    def _html(md):
+        return convert_between(apprise.NotifyFormat.MARKDOWN, apprise.NotifyFormat.HTML, md)
+
+    def test_the_mask_is_kept_but_said_as_text(self):
+        assert markdown_safe(mask_account("pawel@gmail.com")) == r"p\*\*\*@gmail.com"
+
+    def test_the_summary_keeps_its_bold_parts_where_they_belong(self):
+        html = self._html(self.LINES.format(markdown_safe(mask_account("pawel@gmail.com"))))
+        assert "<strong>AliExpress</strong> (p***@gmail.com):" in html
+        assert '<strong><a href="https://example.com/x">' in html and "<em>" not in html
+
+    def test_the_unescaped_mask_is_what_broke_it(self):
+        assert "<em>" in self._html(self.LINES.format(mask_account("pawel@gmail.com")))
+
+    def test_main_escapes_the_account_in_the_header(self):
+        main = (ROOT / "main.py").read_text(encoding="utf-8")
+        assert "markdown_safe(mask_account(result.get('user')))" in main

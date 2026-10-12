@@ -699,6 +699,7 @@ class GamerPowerClaimer(BaseClaimer):
         self._fanatical_games = []
         # Itch.io signs in once per run, not once per giveaway.
         self._itch_session_ok = False
+        self._itch_unreachable = False
         self._ig_session_noted = False
         self._fan_session_noted = False
 
@@ -782,31 +783,45 @@ class GamerPowerClaimer(BaseClaimer):
             logger.debug("Notifications silenced for '%s', leaving '%s' out of the summary.", target_store, title)
             del self.notify_games[reported:]
 
-    async def _itch_logged_in(self) -> bool:
-        """Signed in when itch.io offers a logout link and no login link. Verified live."""
+    async def _itch_session_state(self) -> str:
+        """'in' with only a logout link, 'out' with only a login link, else 'unknown' (not itch.io, error, timeout, check)."""
         try:
-            return bool(await self.page.evaluate("""
-                (() => {
-                    const hrefs = [...document.querySelectorAll('a[href]')]
-                        .map(a => a.getAttribute('href') || '');
-                    return hrefs.some(h => h.includes('/logout')) && !hrefs.some(h => h.includes('/login'));
-                })()
-            """))
+            raw = await self.page.evaluate("""
+                JSON.stringify((() => {
+                    const hrefs = [...document.querySelectorAll('a[href]')].map(a => a.getAttribute('href') || '');
+                    return {href: location.href, logout: hrefs.some(h => h.includes('/logout')),
+                            login: hrefs.some(h => h.includes('/login'))};
+                })())
+            """)
+            links = json.loads(raw) if isinstance(raw, str) else {}
         except Exception as e:
             logger.debug("[Itch.io] Sign-in check failed: %s", e)
-            return False
+            return "unknown"
+        # A block or portal page with a login link of its own must not get itch.io's password.
+        if not url_has_allowed_host(str(links.get("href") or ""), "itch.io", allow_subdomains=True):
+            return "unknown"
+        if links.get("logout") and not links.get("login"):
+            return "in"
+        if links.get("login") and not links.get("logout"):
+            return "out"
+        return "unknown"
 
-    async def _itch_logged_in_after_load(self, seconds: int = 12) -> bool:
-        """Signed in, asked again until itch.io has finished loading; a page still loading has no logout link yet."""
+    async def _itch_logged_in(self) -> bool:
+        """Signed in when itch.io offers a logout link and no login link. Verified live."""
+        return await self._itch_session_state() == "in"
+
+    async def _itch_state_after_load(self, seconds: int = 12) -> str:
+        """The session state, asked again until itch.io shows one; a page still loading has neither link yet."""
         waited = 0
         while True:
-            if await self._itch_logged_in():
+            state = await self._itch_session_state()
+            if state != "unknown":
                 if waited:
-                    logger.debug("[Itch.io] Signed in once the page finished loading (%ss).", waited)
-                return True
+                    logger.debug("[Itch.io] Session read as '%s' once the page finished loading (%ss).", state, waited)
+                return state
             if waited >= seconds:
-                logger.debug("[Itch.io] Still no sign-in after %ss of loading.", waited)
-                return False
+                logger.debug("[Itch.io] No sign-in or sign-out link after %ss of loading.", waited)
+                return state
             await self.sleep(2)
             waited += 2
 
@@ -871,13 +886,16 @@ class GamerPowerClaimer(BaseClaimer):
             await self.sleep(6)
         return bool(sent)
 
-    async def _resubmit_when_form_returns(self, label: str, email: str, password: str) -> bool:
-        """Wait for the sign-in form to come back after a human check, then send it.
+    async def _resubmit_when_form_returns(self, label: str, email: str, password: str, check_fn=None) -> bool:
+        """Send the sign-in form again once it returns after a human check; done at once if already signed in.
 
-        The check disappears a moment before the page reloads, and one look at that moment
-        finds no form at all.
+        The check disappears a moment before the page reloads, so one look at that moment finds no form.
         """
         for _ in range(6):
+            # A session that was valid all along shows no form after the check, only the signed-in site.
+            if check_fn and await check_fn():
+                logger.debug("[%s] Already signed in once the check cleared, nothing to send.", label)
+                return True
             if await self._resubmit_login(label, email, password):
                 return True
             await self.sleep(3)
@@ -900,7 +918,9 @@ class GamerPowerClaimer(BaseClaimer):
                     return True
                 # The check interrupted a sign-in that was already sent, so send it again
                 # rather than asking you to type a password the bot already has.
-                if credentials and await self._resubmit_when_form_returns(label, *credentials)                         and await check_fn():
+                if (credentials
+                        and await self._resubmit_when_form_returns(label, *credentials, check_fn=check_fn)
+                        and await check_fn()):
                     return True
 
         state = {}
@@ -1650,18 +1670,31 @@ class GamerPowerClaimer(BaseClaimer):
         """
         if self._itch_session_ok:
             return True
+        if self._itch_unreachable:
+            return False
 
-        await self.page.get("https://itch.io/")
-        await self.sleep(3)
-        # Cloudflare's "Just a moment" page has no logout link, so judging it read as signed out (#59).
-        if await self._human_challenge_present():
-            logger.debug("[Itch.io] Waiting for the Cloudflare check to pass before judging the session.")
-            if not await self._wait_out_challenge("Itch.io", store_key="itchio"):
-                return False
-        # Right after the check clears itch.io is still loading, so one look read a signed-in session as out (#59).
-        if await self._itch_logged_in_after_load():
+        state = "unknown"
+        for attempt in range(3):
+            await self.page.get("https://itch.io/")
+            await self.sleep(3)
+            # Cloudflare's "Just a moment" page has no logout link, so judging it read as signed out (#59).
+            if await self._human_challenge_present():
+                logger.debug("[Itch.io] Waiting for the Cloudflare check to pass before judging the session.")
+                if not await self._wait_out_challenge("Itch.io", store_key="itchio"):
+                    return False
+            # No logout link is not "signed out": an error or timeout page has no login link either.
+            state = await self._itch_state_after_load()
+            if state != "unknown":
+                break
+            logger.debug("[Itch.io] Could not read the session on %s%s", await self._page_brief(),
+                         ", loading itch.io again." if attempt < 2 else ".")
+        if state == "in":
             self._itch_session_ok = True
             return True
+        if state == "unknown":
+            logger.warning("[Itch.io] itch.io did not load, trying again next run.")
+            self._itch_unreachable = True
+            return False
 
         email = cfg.itchio_email
         password = cfg.itchio_password
@@ -1700,6 +1733,8 @@ class GamerPowerClaimer(BaseClaimer):
         try:
             # Signing in is decided on itch.io itself and done once per run.
             if not await self._itch_session_ready():
+                if self._itch_unreachable:
+                    notify_game["status"] = "failed:itch-unreachable"
                 return
 
             # Staying on the previous game's page made every later giveaway inherit its banner.

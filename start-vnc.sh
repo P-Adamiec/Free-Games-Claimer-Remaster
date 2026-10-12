@@ -29,6 +29,8 @@ rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.tX${DISPLAY_NUM}-lock" "/tmp/.X11-unix
 if [ -z "${VNC_PASSWORD:-}" ]; then
 	pw="-SecurityTypes None"
 	pwt="no password!"
+	echo "WARNING: VNC_PASSWORD is empty, so anyone who can reach port $NOVNC_PORT can use this browser and every" \
+		"store it is signed in to. Set VNC_PASSWORD in .env unless only you can reach this machine."
 else
 	pw="-rfbauth $HOME/.vnc/passwd"
 	pwt="with password"

@@ -11,15 +11,18 @@ import json
 import logging
 import random
 import re
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import nodriver as uc
 
 from browserforge.fingerprints import FingerprintGenerator
 from browserforge.injectors.utils import InjectFunction
 
-from src.core.claimer import BaseClaimer
+from src.core.claimer import BaseClaimer, chrome_version
 from src.core.config import cfg
+from src.core.run_state import next_run, run_started
 from src.core.url_security import url_has_allowed_host
 
 logger = logging.getLogger("fgc.aliexpress")
@@ -63,6 +66,45 @@ _COIN_CAPTURE_JS = r"""
 # Filename (inside the AliExpress browser profile dir) where the generated
 # Android fingerprint is cached so the bot presents the SAME device every day.
 FINGERPRINT_CACHE = "fgc_fingerprint.json"
+
+
+def chrome_grease_brands(major: int, full: str) -> tuple[list, list]:
+    """Chrome's brand lists for a version; the made-up "Not…Brand" entry and the order follow Chromium's own rule."""
+    chars = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"]
+    grease = (f"Not{chars[major % 11]}A{chars[(major + 1) % 11]}Brand", ["8", "99", "24"][major % 3])
+    order = [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)][major % 6]
+    slots, full_slots = [None] * 3, [None] * 3
+    for place, (brand, short, long) in zip(order, [(grease[0], grease[1], f"{grease[1]}.0.0.0"),
+                                                 ("Chromium", str(major), full),
+                                                 ("Google Chrome", str(major), full)]):
+        slots[place] = {"brand": brand, "version": short}
+        full_slots[place] = {"brand": brand, "version": long}
+    return slots, full_slots
+
+
+def with_chrome_version(fp: dict, full: str) -> dict:
+    """The same phone with the Chrome version the browser really runs, in its UA, client hints and script alike."""
+    match = re.fullmatch(r"(\d+)\.\d+\.\d+\.\d+", str(full or ""))
+    md = dict(fp.get("ua_metadata") or {})
+    old_full = str(md.get("uaFullVersion") or "")
+    if not match or not old_full or old_full == full:
+        return fp
+    major, old_major = int(match.group(1)), old_full.split(".", 1)[0]
+    brands, full_list = chrome_grease_brands(major, full)
+    ua = re.sub(rf"Chrome/{old_major}\.0\.0\.0", f"Chrome/{major}.0.0.0", fp["ua"])
+    js = re.sub(rf"Chrome/{old_major}\.0\.0\.0", f"Chrome/{major}.0.0.0", fp["inject_js"])
+    js = js.replace(f'"uaFullVersion": "{old_full}"', f'"uaFullVersion": "{full}"')
+    js = re.sub(r'"brands": \[[^\]]*\]', lambda m: '"brands": ' + json.dumps(brands), js)
+    js = re.sub(r'"fullVersionList": \[[^\]]*\]', lambda m: '"fullVersionList": ' + json.dumps(full_list), js)
+    header = ", ".join(f'"{b["brand"]}";v="{b["version"]}"' for b in brands)
+    js = re.sub(r'"sec-ch-ua": "(?:[^"\\]|\\.)*"', lambda m: '"sec-ch-ua": ' + json.dumps(header), js)
+    # A phone moved only halfway is worse than an old one, so anything left behind keeps the old bundle.
+    stale = [f"Chrome/{old_major}.", f'"version": "{old_major}"', f'v=\\"{old_major}\\"'] if old_major != str(major) else []
+    if any(s in js + ua for s in [old_full] + stale):
+        return fp
+    md.update(brands=brands, fullVersionList=full_list, uaFullVersion=full)
+    return {**fp, "ua": ua, "ua_metadata": md, "inject_js": js}
+
 
 def aliexpress_country_site(url: str) -> str:
     """The country site a coin page load was sent to ("it" for it.aliexpress.com), empty for the global one."""
@@ -269,6 +311,55 @@ def today_from_payloads(payloads) -> dict:
     return out
 
 
+def day_start_from_payloads(payloads) -> int | None:
+    """When today's check-in day began (ms), from the calendar's node for today; None when the API did not say."""
+    for payload in payloads or []:
+        if "sign.list" not in str((payload or {}).get("api") or ""):
+            continue
+        try:
+            data = (json.loads(payload["body"]).get("data") or {}).get("data") or {}
+            nodes = [n for seq in (data.get("signQuerySequenceNodeList") or [])
+                     for n in (seq.get("dailySignNodeList") or [])]
+        except Exception:
+            continue
+        for node in nodes:
+            if node.get("calendarDayDistance") == 0 and _as_int(node.get("calendarDayStartTimeMill")):
+                return _as_int(node.get("calendarDayStartTimeMill"))
+    return None
+
+
+# The check-in day turns at midnight in California: the calendar's day starts read 07:00 UTC in October 2026.
+AE_DAY_ZONE = ZoneInfo("America/Los_Angeles")
+
+
+def ae_day_end(day_start_ms: int | None, now: datetime) -> datetime:
+    """When today's AliExpress check-in day ends: its start in the API plus a day, else the next midnight in California."""
+    if day_start_ms:
+        # A day is added on California's clock, so the day the clocks change ends at midnight too.
+        end = (datetime.fromtimestamp(day_start_ms / 1000, tz=AE_DAY_ZONE) + timedelta(days=1)).astimezone(timezone.utc)
+        if end > now:
+            return end
+    local = now.astimezone(AE_DAY_ZONE)
+    midnight = datetime(local.year, local.month, local.day, tzinfo=AE_DAY_ZONE) + timedelta(days=1)
+    return midnight.astimezone(timezone.utc)
+
+
+def retry_later(next_run_at: datetime | None, day_start_ms: int | None = None, now: datetime | None = None,
+                started: datetime | None = None, spare_hours: int = 2) -> bool:
+    """True when the next run reaches the check-in with hours of today left, so a miss now is not the last chance.
+
+    A trigger due while this run still works is dropped by the scheduler, so it does not count.
+    """
+    if next_run_at is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    if next_run_at <= now + timedelta(minutes=20):
+        return False
+    # The next run gets to AliExpress as late into it as this one did.
+    reach = now - started if started and started <= now else timedelta(0)
+    return next_run_at + reach <= ae_day_end(day_start_ms, now) - timedelta(hours=spare_hours)
+
+
 def signed_in_from_payloads(payloads) -> bool | None:
     """True when the coin API answered with this account's check-in calendar, None when it did not say."""
     for payload in payloads or []:
@@ -289,9 +380,6 @@ def signed_in_from_payloads(payloads) -> bool | None:
 
 class AliExpressClaimer(BaseClaimer):
     store_name = "aliexpress"
-
-    # Ships its own full browserforge fingerprint, so the desktop base stealth must NOT layer on top.
-    inject_base_stealth = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -405,19 +493,11 @@ class AliExpressClaimer(BaseClaimer):
         except Exception as e:
             self.logger.debug("CDP emulation override exception: %s", e)
 
-        # Block app-scheme requests (aliexpress://, intent://…) that pop 'Open xdg-open?' dialogs.
+        # Network events feed the coin listener; app-scheme dialogs are stopped by Chrome's policy and _APP_BLOCK_JS.
         try:
             await self.page.send(uc.cdp.network.enable())
-            await self.page.send(uc.cdp.network.set_blocked_urls(urls=[
-                "*aliexpress://*", "*aliexpresshd://*", "*aecmd://*", "*alibaba://*",
-                "*intent://*", "*market://*", "*android-app://*",
-                "*alipay://*", "*alipays://*", "*tmall://*", "*taobao://*",
-                "aliexpress:*", "aliexpresshd:*", "aecmd:*", "alibaba:*",
-                "intent:*", "market:*", "android-app:*",
-                "alipay:*", "alipays:*", "tmall:*", "taobao:*",
-            ]))
         except Exception as e:
-            self.logger.debug("CDP set_blocked_urls exception: %s", e)
+            self.logger.debug("CDP network.enable exception: %s", e)
 
         # Inject fingerprint + app-block + coin-capture at document-start (Page.enable first, else it's a no-op).
         try:
@@ -462,7 +542,7 @@ class AliExpressClaimer(BaseClaimer):
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and data.get("inject_js") and data.get("ua"):
                     self.logger.debug("Loaded cached AliExpress fingerprint (%s).", data.get("ua"))
-                    return data
+                    return self._match_chrome(data, cache_path)
         except Exception as e:
             self.logger.debug("Fingerprint cache read failed (%s), regenerating.", e)
 
@@ -491,6 +571,8 @@ class AliExpressClaimer(BaseClaimer):
             # The full navigator/screen/WebGL override script for this device.
             "inject_js": InjectFunction(fp),
         }
+        # browserforge's newest phone can be versions behind the Chrome in this image.
+        data = with_chrome_version(data, chrome_version())
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps(data), encoding="utf-8")
@@ -498,6 +580,22 @@ class AliExpressClaimer(BaseClaimer):
         except Exception as e:
             self.logger.debug("Fingerprint cache write failed: %s", e)
         return data
+
+    def _match_chrome(self, data: dict, cache_path) -> dict:
+        """The cached phone after a Chrome update, saved so every later run shows the same one."""
+        full = chrome_version()
+        moved = with_chrome_version(data, full)
+        if moved is data:
+            if full and full != data.get("ua_metadata", {}).get("uaFullVersion"):
+                self.logger.debug("Could not move the AliExpress phone to Chrome %s, keeping it as it was.", full)
+            return data
+        self.logger.debug("AliExpress phone moved from Chrome %s to %s.",
+                          data.get("ua_metadata", {}).get("uaFullVersion"), full)
+        try:
+            cache_path.write_text(json.dumps(moved), encoding="utf-8")
+        except Exception as e:
+            self.logger.debug("Fingerprint cache write failed: %s", e)
+        return moved
 
     # ------------------------------------------------------------------
     # Coin-balance API interception
@@ -1503,6 +1601,20 @@ class AliExpressClaimer(BaseClaimer):
             parts.append(f"balance {total:,} 🪙")
         return ", ".join(parts)
 
+    def _leave_to_next_run(self, why: str) -> bool:
+        """When a later run can still collect today, say so quietly instead of raising the alarm."""
+        upcoming = next_run()
+        if not retry_later(upcoming, day_start_from_payloads(self._coin_payloads), started=run_started()):
+            return False
+        try:
+            shown = upcoming.astimezone(ZoneInfo(cfg.scheduler_timezone))
+        except Exception:
+            shown = upcoming.astimezone(timezone.utc)
+        self.logger.info("Not collected this run (%s); the next run at %s still has today's AliExpress day "
+                         "ahead of it, so it tries again.", why, shown.strftime("%H:%M %Z"))
+        self._report("skipped, next run tries again ⏳")
+        return True
+
     def _report(self, status: str) -> None:
         """Append the AliExpress check-in result to the notification list."""
         self.notify_games.append({
@@ -1594,12 +1706,14 @@ class AliExpressClaimer(BaseClaimer):
             health = await self._page_health()
 
         if page_is_dead(health):
+            await self._dump_failure_state()
+            if self._leave_to_next_run("the coin page did not render"):
+                return
             self.logger.error(
                 "AliExpress served an empty coin page (%s of %s characters rendered), so the check-in "
                 "could not be read this time. This comes and goes: the same page works in other runs. "
                 "Collect in the mobile app if it keeps happening.",
                 health.get("innerTextLen"), health.get("textContentLen"))
-            await self._dump_failure_state()
             self._report("failed, the coin page did not render 🚫")
             return
 
@@ -1660,7 +1774,7 @@ class AliExpressClaimer(BaseClaimer):
                 await self.sleep(wait_s)
                 await self._rewarm_to_coins()
             else:
-                self.logger.error("🚫 Gave up after %d retries: %s.", attempts - 1, reason)
+                self.logger.warning("🚫 Gave up after %d retries: %s.", attempts - 1, reason)
 
         # --- Collect -------------------------------------------------------
         if collect_ready:
@@ -1707,6 +1821,8 @@ class AliExpressClaimer(BaseClaimer):
             # A collect button existed but the reward was capped at < min_coins:
             # a persistent bot-flag. Skip per user policy (never collect 1 coin).
             coins = state.get("todayCoins")
+            if self._leave_to_next_run("the check-in did not complete"):
+                return
             self.logger.error(
                 "🚫 Session flagged as low-trust: only %s coin(s) offered instead of the "
                 "full amount, NOT collecting (policy). Collect on your phone to keep the streak.", coins)
@@ -1716,6 +1832,8 @@ class AliExpressClaimer(BaseClaimer):
 
         # No button the bot can read, so hand over via VNC: the page is there,
         # only its labels are ones this parser does not know.
+        if self._leave_to_next_run("no check-in button was found"):
+            return
         self.logger.error("⚠️ AliExpress check-in widget did not render, offering manual VNC collection.")
 
         async def _collected_manually() -> bool:

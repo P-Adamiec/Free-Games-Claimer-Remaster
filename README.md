@@ -15,9 +15,10 @@ Automatically claims free games on:
 - <img alt="logo epic-games" src="https://github.com/user-attachments/assets/82e9e9bf-b6ac-4f20-91db-36d2c8429cb6" width="20" align="middle" /> **Epic Games Store** – weekly free games, including the weekly free Android/iOS mobile game (`EG_MOBILE`)
 - <img alt="logo fab" src="https://www.google.com/s2/favicons?domain=fab.com&sz=64" width="20" align="middle" /> **Fab** – Epic's asset marketplace, its limited-time free assets on your Epic account (opt-in, add `fab` to `STORES`)
 - <img alt="logo unity" src="https://www.google.com/s2/favicons?domain=unity.com&sz=64" width="20" align="middle" /> **Unity Asset Store** – the weekly free [Publisher of the Week](https://assetstore.unity.com/publisher-sale) asset, coupon and all (opt-in, add `unity` to `STORES`)
-- <img alt="logo prime-gaming" src="https://github.com/user-attachments/assets/7627a108-20c6-4525-a1d8-5d221ee89d6e" width="20" align="middle" /> **Amazon Prime Gaming** – monthly Prime Gaming catalogue + GOG and Microsoft key redemption
+- <img alt="logo prime-gaming" src="https://github.com/user-attachments/assets/7627a108-20c6-4525-a1d8-5d221ee89d6e" width="20" align="middle" /> **Amazon Prime Gaming** – monthly Prime Gaming catalogue + GOG, Microsoft and Legacy Games key redemption
 - <img alt="logo gog" src="https://github.com/user-attachments/assets/49040b50-ee14-4439-8e3c-e93cafd7c3a5" width="20" align="middle" /> **GOG** – periodic free giveaways
 - <img alt="logo microsoft" src="https://www.google.com/s2/favicons?domain=xbox.com&sz=64" width="20" align="middle" /> **Microsoft Store** – Prime Gaming code redemption + paid games while they are free to keep
+- <img alt="logo legacy-games" src="https://www.google.com/s2/favicons?domain=legacygames.com&sz=64" width="20" align="middle" /> **Legacy Games** – redeems the Legacy Games codes Prime Gaming hands out into your Legacy Games account before they expire, with the newsletter left unticked
 - <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/ubisoft/ffffff" /><img alt="logo ubisoft" src="https://cdn.simpleicons.org/ubisoft/000000" width="20" align="middle" /></picture> **Ubisoft** – free game giveaways from [ubisoft.com/games/free](https://www.ubisoft.com/en-us/games/free) (giveaways only, never trials, demos or free weekends)
 - <img alt="logo aliexpress" src="https://www.google.com/s2/favicons?domain=aliexpress.com&sz=32" width="20" align="middle" /> **AliExpress** – automated daily check-in that collects coins, using a real-device mobile fingerprint to stay undetected and reading the balance from the coin API. Accounts that live on a country site (for example it.aliexpress.com) are recognised automatically. The coin page often arrives empty; the bot walks back to it up to `AE_PAGE_RETRIES` times (four by default), then reports it and moves on (see [Troubleshooting](#troubleshooting))
 
@@ -136,9 +137,12 @@ Options are set via environment variables in `.env`:
 | `NOVNC_PORT` | `7080` | noVNC web access port. |
 | `VNC_IP` | `localhost`| Host for VNC notification links. Alerts include a one-click `http://<VNC_IP>:<NOVNC_PORT>/?autoconnect=true`. |
 | `VNC_URL` | | Full public noVNC address for notification links, e.g. `https://fgc.example.tld`. Use it behind a reverse proxy: it keeps your scheme and drops the port, replacing `VNC_IP` and `NOVNC_PORT` in the link (`NOVNC_PORT` still publishes the container port). |
-| `VNC_PASSWORD` | | Optional password for VNC access (empty = no password). |
+| `VNC_PASSWORD` | | Password for VNC access. Empty means no password: anyone who can reach the noVNC port can use the browser and every store it is signed in to, so set one unless only you can reach the machine. |
 | `SCHEDULER_HOURS`| `12` | Interval in hours between automatic claiming runs. Accepts any positive number (for example: `1`, `12`, `24`, `72`). Set `0` to disable interval runs. |
 | `SCHEDULER_TIMEZONE` | `UTC` | IANA timezone used for fixed daily scheduler times. |
+| `TZ` | | The container's own clock, log times included. When set, the browser uses it too and `BROWSER_TIMEZONE` is skipped. |
+| `BROWSER_TIMEZONE` | `auto` | The time zone the browser shows sites. `auto` looks up where your IP address is on the first run and remembers it for a month (`BROWSER_TIMEZONE_REFRESH`), one request to ipapi.co, or ipwho.is if that fails, which sees your IP address, because a browser on UTC next to, say, a Polish IP is a sign anti-bot checks look for. `off` keeps UTC, or name one yourself (`Europe/Warsaw`) and nothing is asked. A `TZ` you set for the container wins. It does not move the scheduler, which uses `SCHEDULER_TIMEZONE`. See [Time zone and your IP address](#time-zone-and-your-ip-address). |
+| `BROWSER_TIMEZONE_REFRESH` | `month` | How often `auto` asks again: `run` (every run), `week` or `month`. The answer is kept in `data/browser_timezone.json`; delete that file to have it asked on the next run. Does nothing when you named a zone, chose `off` or set `TZ`, because then nothing is asked at all. |
 | `SCHEDULER_FIXED_TIMES` | | Optional comma-separated daily run times in 24-hour `HH:MM` format (`17:00,21:30`). Set `SCHEDULER_HOURS=0` if you want *only* these fixed daily times without interval runs. |
 | `RUN_ON_STARTUP` | `true` | Run once immediately when the container/application starts. |
 | `RUN_ONCE` | `false` | Claim once, then stop the container (exit code 0), for scheduling it from outside with cron or Ofelia. `SCHEDULER_HOURS=0` with no fixed times does the same, since nothing is scheduled. Set `restart: "no"` in `docker-compose.yml` or Docker will start it again straight away. |
@@ -156,6 +160,8 @@ Options are set via environment variables in `.env`:
 | `PG_PASSWORD` | | Prime Gaming password. |
 | `PG_OTP_KEY` | | Prime Gaming authenticator (TOTP) key. |
 | `PG_FORCE_CHECK_COLLECTED` | `false` | Force re-check already marked 'claimed' games. |
+| `LG_EMAIL` | | Legacy Games account email. With `LG_PASSWORD`, the Legacy Games codes from Prime Gaming are redeemed into that account in the same run (they expire within days). Without them the bot only says how many codes are waiting. The newsletter box is always unticked. |
+| `LG_PASSWORD` | | Legacy Games account password. |
 | `GOG_EMAIL` | | GOG login email. |
 | `GOG_PASSWORD` | | GOG login password. |
 | `GOG_NEWSLETTER` | `false` | Keep newsletter sub after claiming (`true` = keep). |
@@ -181,8 +187,8 @@ Options are set via environment variables in `.env`:
 | `AE_FLAG_RETRIES` | `3` | How many times to wait and re-approach the coin page when the offer is capped. |
 | `AE_FLAG_WAIT` | `480` | Seconds to wait between retries (kept above AliExpress' ~7-min penalty so one wait clears it). |
 | `AE_PAGE_RETRIES` | `4` | How many extra approaches to make when the coin page loads but renders nothing. AliExpress serves it empty most of the time (measured: one usable page in eight looks), so each retry is a real chance at the daily check-in. `0` gives up on the first look. |
-| `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `prime`, `gog`, `microsoft`, `ubisoft`, `aliexpress`. Add `fab`, `unity`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
-| `RESET_DB_GAMES` | `false` | Retroactively erase any database claims recorded within the last 7 days upon execution. Assists in clearing false positives. |
+| `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `prime`, `gog`, `microsoft`, `ubisoft`, `aliexpress` and `legacy`. Add `fab`, `unity`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
+| `RESET_DB_GAMES` | `false` | Erase the database claims recorded within the last 7 days, at every start while it is on, to clear false positives. Codes and keys still waiting to be redeemed are kept. Set it back to `false` after one start. |
 | `GP_CLAIM_DLC` | `false` | Also process GamerPower's in-game DLC giveaways. Off by default: most need an account in that specific game, and they are the bulk of the feed. |
 | `FANATICAL_EMAIL` | | Fanatical account email. |
 | `FANATICAL_PASSWORD`| | Fanatical account password. |
@@ -207,7 +213,7 @@ Options are set via environment variables in `.env`:
 | `NOTIFY_ERRORS` | `true` | Set to false to disable fatal error alerts. (Applies to all services) |
 | `NOTIFY_CLAIM_FAILS`| `true` | Lists games and check-ins that could not be claimed in the run summary, with the reason (e.g. a free DLC without the base game). Set to false to hide them. (Applies to all services) |
 | `NOTIFY_ALREADY_CLAIMED`| `false` | Set to true to also list games you already own, check-ins already collected today and giveaways skipped on purpose (free to play, not a real giveaway). |
-| `NOTIFY_MISSING_BASE`| `true` | Set to false to drop DLC entries that failed because you do not own the base game. They repeat every run and you can only fix them by buying the base game. |
+| `NOTIFY_MISSING_BASE`| `true` | DLC you cannot claim because you do not own its base game: reported once, then again every three weeks while it stays free. Set to false to never list them. Buying the base game lets the next run claim the DLC. |
 | `NOTIFY_DOWNLOAD_ONLY`| `true` | Set to false to drop Itch.io giveaways that are only a download, with nothing to claim onto your account. Reported once by default, then silent. |
 | `NOTIFY_UPDATES` | `true` | Check GitHub for a newer release (at startup, then at most once a day) and notify you once per version. Set to false to disable the check entirely, no request is made. |
 | `NOTIFY_LOGIN_REQUEST`| `true` | Set to false to disable VNC login request pings. (Applies to all services) |
@@ -237,6 +243,48 @@ Set either, both, or neither. Filling one in is all it takes to switch it on. Ev
 | Steam, AliExpress, everything else | | | codes are typed by you over VNC |
 
 Either way this is usually a one-time event per store: on the code screen the bot ticks the store's "remember this browser" box, so it stops being asked on that profile until the profile is deleted.
+
+### Time zone and your IP address
+
+Websites can see two things that should agree: the country your IP address is in, and the time zone your browser reports. A browser that says UTC while your IP address is in Poland is one of the small mismatches anti-bot checks look for, so the bot gives its browser the time zone you actually live in.
+
+**If you set nothing,** the bot asks a free service on its first run which time zone your IP address is in: [ipapi.co](https://ipapi.co), or [ipwho.is](https://ipwho.is) when the first one does not answer. It saves the answer in `data/browser_timezone.json` and asks again only once a month, so a move or a VPN in another country is picked up within a month. That service sees your IP address, the same way every website you open does. Nothing else is sent: no account, no e-mail address, nothing about your games.
+
+**If you would rather the bot asked nobody,** write your time zone in `.env` yourself. Pick one line:
+
+| What you write in `.env` | What websites see | Times in your log | Asks ipapi.co? |
+|---|---|---|---|
+| nothing (the default, `auto`) | the time zone your IP address is in | UTC | yes, once a month |
+| `BROWSER_TIMEZONE=Europe/Warsaw` | Polish time | UTC | no |
+| `TZ=Europe/Warsaw` | Polish time | Polish time | no |
+| `BROWSER_TIMEZONE=off` | UTC | UTC | no |
+
+`BROWSER_TIMEZONE` with your own zone is the recommended choice: it changes only what websites see, and a misspelled name is reported as a warning in the log at the start of the run, after which the bot keeps UTC. `TZ` also moves the times in your log to your own time, and when both are set `TZ` wins, but a misspelled `TZ` falls back to UTC without a word. `off` asks nobody too, but it leaves exactly the mismatch this is meant to avoid.
+
+**If you keep `auto`, you choose how often it asks** with `BROWSER_TIMEZONE_REFRESH`:
+
+| What you write in `.env` | Asks ipapi.co | Good for |
+|---|---|---|
+| nothing, or `BROWSER_TIMEZONE_REFRESH=month` | on the first run, then once a month | most people: your country rarely changes |
+| `BROWSER_TIMEZONE_REFRESH=week` | on the first run, then once a week | a laptop or NAS that moves between countries now and then |
+| `BROWSER_TIMEZONE_REFRESH=run` | at the start of every run | a VPN that changes country often |
+
+When a lookup fails, the bot keeps the zone it saved last time and tries again on the next run. To have it ask straight away, for example after moving, delete `data/browser_timezone.json`.
+
+**How to write your time zone.** Use the name from the [list of tz database time zones](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), written as `Region/City` with the city in English. Not an abbreviation such as `CET`, and not an offset such as `+02:00`: a name follows summer and winter time by itself, an offset does not. Some examples:
+
+| You live in | Write |
+|---|---|
+| Poland | `Europe/Warsaw` |
+| Germany | `Europe/Berlin` |
+| United Kingdom | `Europe/London` |
+| New York, USA | `America/New_York` |
+| California, USA | `America/Los_Angeles` |
+| Brazil (São Paulo) | `America/Sao_Paulo` |
+| Japan | `Asia/Tokyo` |
+| Sydney, Australia | `Australia/Sydney` |
+
+Not sure which one is yours? Open [ipapi.co/timezone](https://ipapi.co/timezone/) in your own browser: the one line it shows is exactly what the bot would have used.
 
 ## Unity, one-time setup
 
@@ -304,7 +352,7 @@ docker compose run --rm app python main.py steam gog --once
 To skip a store, simply exclude it from the `STORES` list. Any unrecognized settings are now reported at startup rather than being ignored silently.
 
 > [!NOTE]
-> **What happens in one run, in order.** GamerPower is asked first, once, and only when this run has a store that can use the answer. Then each big store runs: it claims what it finds itself and, at the end of the same browser session, the giveaways GamerPower found for it. Then any GOG and Microsoft keys waiting from Prime Gaming are redeemed, each only when its store is in this run. Then come the sites with no module of their own (Itch.io, Fanatical, IndieGala, Alienware Arena), all in one browser window. Last, any Steam key a Fanatical giveaway handed out is activated on your Steam account, when Steam is in this run.
+> **What happens in one run, in order.** GamerPower is asked first, once, and only when this run has a store that can use the answer. Then each big store runs: it claims what it finds itself and, at the end of the same browser session, the giveaways GamerPower found for it. Then any GOG and Microsoft keys waiting from Prime Gaming are redeemed, each only when its store is in this run, and Legacy Games codes when `legacy` is in this run and `LG_EMAIL` and `LG_PASSWORD` are set. Then come the sites with no module of their own (Itch.io, Fanatical, IndieGala, Alienware Arena), all in one browser window. Last, any Steam key a Fanatical giveaway handed out is activated on your Steam account, when Steam is in this run.
 >
 > So `STORES=steam` also claims the Steam giveaways GamerPower lists, and `STORES=prime` sends GamerPower no request at all, because nothing in that run could use it.
 >
@@ -337,6 +385,7 @@ free-games-claimer-remaster/
 │   ├── core/               # Shared engine components
 │   │   ├── claimer.py      # BaseClaimer: browser launch, login waits, notifications
 │   │   ├── config.py       # Typed configuration loader (.env → Python)
+│   │   ├── browser_timezone.py # The browser's time zone, matched to your IP address
 │   │   ├── database.py     # SQLAlchemy models & SQLite engine
 │   │   ├── display.py      # The virtual screen the browser draws on, and bringing it back
 │   │   ├── notifier.py     # Modular Discord/Apprise webhooks
@@ -353,6 +402,7 @@ free-games-claimer-remaster/
 │       ├── unity.py        # Unity Asset Store weekly free asset
 │       ├── ubisoft.py      # Ubisoft giveaways (ubisoft.com/games/free)
 │       ├── microsoft.py    # Microsoft Store: Prime codes and paid games while free
+│       ├── legacygames.py  # Legacy Games: redeeming the codes from Prime
 │       ├── aliexpress.py   # AliExpress check-in & coin collecting
 │       ├── epic_mobile.py  # Epic's weekly free Android/iOS game (detection only)
 │       └── gamerpower.py   # GamerPower API (Fanatical, Itch.io, IndieGala, Alienware)
@@ -395,7 +445,7 @@ Both Discord and Apprise can be configured simultaneously, notifications are sen
 | Unity coupon not applied | Unity blocks the coupon while its checkout form is incomplete, see [Unity, one-time setup](#unity-one-time-setup). Two other reasons it stops on purpose: a checkout rendered in a language other than English, and `UNITY_ACCEPT_TOS=false`, which halts right before the EULA. |
 | AliExpress coins not collected | The coin page often loads as an empty shell. The bot walks back to it up to `AE_PAGE_RETRIES` times (four by default), then reports it and moves on. It has been seen working again on a later run; collect in the mobile app if it persists. |
 | Epic captcha | Epic asks now and then, sometimes inside the checkout window after "Add to library". The bot looks there too, pings you to solve it over VNC and finishes the claim once it is gone. The EU right-of-withdrawal step is accepted for you. |
-| False positive claims | Set `RESET_DB_GAMES=true` in your `.env`, reboot the container, and the bot will forget the last 7 days of claims, allowing the logic to try claiming them again. |
+| False positive claims | Set `RESET_DB_GAMES=true` in your `.env`, reboot the container, and the bot will forget the last 7 days of claims, allowing the logic to try claiming them again. Set it back to `false` afterwards, or it does this at every start. |
 | Setting seems to be ignored | The bot names every setting it does not read at startup, for example an invented `STEAM_ENABLE`, and every value that cannot mean what it says, for example `DRYRUN=maybe`, which counts as false. Passwords, e-mail addresses and webhook URLs are masked in that message. |
 | A store was skipped, saying it waited for you | It asked you for something in the browser (a sign-in, a code, a captcha) and nobody answered within `VNC_LOGIN_TIMEOUT`. That store stops asking for the rest of the run, so it does not sit on a login screen for hours or keep re-opening it, and the summary lists what it skipped. Raise the timeout, or let the next run pick it up. |
 | Container crashes on start | Check logs: `docker compose logs app --tail=50`. A clean restart purges `.X1-lock` bugs. |

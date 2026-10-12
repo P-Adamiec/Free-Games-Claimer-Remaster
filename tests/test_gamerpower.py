@@ -5,6 +5,7 @@ field, so every giveaway whose URL hid its destination landed in "unknown".
 """
 
 import asyncio
+import json
 import re
 from pathlib import Path
 
@@ -500,27 +501,181 @@ class TestItchSessionAfterCloudflare:
         def __init__(self, answers):
             self.answers, self.calls, self.slept = list(answers), 0, 0
 
-        async def _itch_logged_in(self):
+        async def _itch_session_state(self):
             self.calls += 1
-            return self.answers.pop(0) if self.answers else False
+            return self.answers.pop(0) if self.answers else "unknown"
 
         async def sleep(self, seconds):
             self.slept += seconds
 
     def test_a_session_that_shows_up_while_the_page_loads_counts(self):
-        stub = self._Stub([False, False, True])
-        assert asyncio.run(GamerPowerClaimer._itch_logged_in_after_load(stub)) is True
+        stub = self._Stub(["unknown", "unknown", "in"])
+        assert asyncio.run(GamerPowerClaimer._itch_state_after_load(stub)) == "in"
         assert stub.calls == 3 and stub.slept == 4
 
-    def test_a_signed_out_page_gives_up_after_the_limit(self):
+    def test_a_page_that_never_shows_either_link_gives_up_after_the_limit(self):
         stub = self._Stub([])
-        assert asyncio.run(GamerPowerClaimer._itch_logged_in_after_load(stub, seconds=12)) is False
+        assert asyncio.run(GamerPowerClaimer._itch_state_after_load(stub, seconds=12)) == "unknown"
         assert stub.calls == 7 and stub.slept == 12
+
+    def test_a_signed_out_page_is_answered_at_once(self):
+        stub = self._Stub(["out"])
+        assert asyncio.run(GamerPowerClaimer._itch_state_after_load(stub)) == "out"
+        assert stub.slept == 0
 
     def test_the_session_check_waits_for_the_page_before_asking_you(self):
         source = (Path(__file__).resolve().parent.parent / "src" / "stores" / "gamerpower.py").read_text(encoding="utf-8")
         ready = source.split("async def _itch_session_ready", 1)[1].split("\n    async def ", 1)[0]
-        assert ready.index("_itch_logged_in_after_load()") < ready.index("_wait_for_vnc_login(")
+        assert ready.index("_itch_state_after_load()") < ready.index("_wait_for_vnc_login(")
+
+
+class TestItchPageThatDidNotLoad:
+    """Seen live on 2026-10-09: a page with neither link was read as signed out, so a valid session was sent to /login."""
+
+    class _Page:
+        def __init__(self):
+            self.visited = []
+
+        async def get(self, url):
+            self.visited.append(url)
+
+    class _Stub:
+        def __init__(self, states):
+            self.states = list(states)
+            self.page = TestItchPageThatDidNotLoad._Page()
+            self._itch_session_ok = False
+            self._itch_unreachable = False
+            self.submitted = False
+
+        async def sleep(self, seconds):
+            pass
+
+        async def _human_challenge_present(self):
+            return False
+
+        async def _itch_state_after_load(self):
+            return self.states.pop(0) if self.states else "unknown"
+
+        async def _page_brief(self):
+            return "chrome-error://chromewebdata/ (itch.io)"
+
+        async def _submit_itch_credentials(self, email, password):
+            self.submitted = True
+
+        async def _itch_logged_in(self):
+            return True
+
+        async def _confirm_side_login(self, *args, **kwargs):
+            return True
+
+        def _log_side_signed_in(self, label, account):
+            pass
+
+    @pytest.fixture(autouse=True)
+    def _credentials(self, monkeypatch):
+        from src.core.config import cfg
+        monkeypatch.setattr(cfg, "itchio_email", "someone@example.com")
+        monkeypatch.setattr(cfg, "itchio_password", "not-a-real-password")
+
+    def test_a_page_that_never_loads_is_not_a_sign_out(self):
+        stub = self._Stub(["unknown", "unknown", "unknown"])
+        assert asyncio.run(GamerPowerClaimer._itch_session_ready(stub)) is False
+        assert stub._itch_unreachable and not stub.submitted
+        assert stub.page.visited == ["https://itch.io/"] * 3
+
+    def test_a_page_that_loads_on_the_second_try_needs_no_login(self):
+        stub = self._Stub(["unknown", "in"])
+        assert asyncio.run(GamerPowerClaimer._itch_session_ready(stub)) is True
+        assert stub._itch_session_ok and not stub.submitted
+
+    def test_only_a_real_sign_out_starts_the_login(self):
+        stub = self._Stub(["out"])
+        assert asyncio.run(GamerPowerClaimer._itch_session_ready(stub)) is True
+        assert stub.submitted and "https://itch.io/login" in stub.page.visited
+
+    def test_the_next_giveaway_does_not_wait_for_it_again(self):
+        stub = self._Stub([])
+        stub._itch_unreachable = True
+        assert asyncio.run(GamerPowerClaimer._itch_session_ready(stub)) is False
+        assert stub.page.visited == []
+
+    def test_the_summary_says_why(self):
+        block = Path(__file__).resolve().parent.parent.joinpath("src", "stores", "gamerpower.py") \
+            .read_text(encoding="utf-8").split("async def _claim_itchio_game", 1)[1].split("\n    async def ", 1)[0]
+        assert "failed:itch-unreachable" in block
+
+
+class TestItchSessionState:
+    """The page itself decides: a logout link is in, a login link is out, anything else is not a verdict."""
+
+    class _Page:
+        def __init__(self, answer):
+            self.answer = answer
+
+        async def evaluate(self, js):
+            if isinstance(self.answer, Exception):
+                raise self.answer
+            return self.answer
+
+    class _Stub:
+        def __init__(self, answer):
+            self.page = TestItchSessionState._Page(answer)
+
+    @staticmethod
+    def _links(href="https://itch.io/", logout=False, login=False):
+        return json.dumps({"href": href, "logout": logout, "login": login})
+
+    @pytest.mark.parametrize("answer,state", [
+        (_links.__func__(logout=True), "in"),
+        (_links.__func__(login=True), "out"),
+        (_links.__func__(logout=True, login=True), "unknown"),
+        (_links.__func__(), "unknown"),
+        (_links.__func__(href="chrome-error://chromewebdata/"), "unknown"),
+        (_links.__func__(href="https://portal.example.net/", login=True), "unknown"),
+        (_links.__func__(href="https://galengames.itch.io/academy-carols", logout=True), "in"),
+        (None, "unknown"),
+        (RuntimeError("target closed"), "unknown"),
+    ])
+    def test_the_state_comes_from_the_page(self, answer, state):
+        assert asyncio.run(GamerPowerClaimer._itch_session_state(self._Stub(answer))) == state
+
+
+class TestNoFormAfterTheCheckBecauseSignedIn:
+    """Seen live on 2026-10-09: after Cloudflare a valid itch.io session showed no form, and the bot asked you to sign in."""
+
+    class _Stub:
+        def __init__(self):
+            self.resent = 0
+
+        async def _resubmit_login(self, label, email, password):
+            self.resent += 1
+            return True
+
+        async def sleep(self, seconds):
+            pass
+
+    @staticmethod
+    async def _yes():
+        return True
+
+    @staticmethod
+    async def _no():
+        return False
+
+    def test_a_session_already_there_sends_nothing(self):
+        stub = self._Stub()
+        assert asyncio.run(GamerPowerClaimer._resubmit_when_form_returns(stub, "Itch.io", "e", "p", check_fn=self._yes))
+        assert stub.resent == 0
+
+    def test_no_session_still_sends_the_form(self):
+        stub = self._Stub()
+        assert asyncio.run(GamerPowerClaimer._resubmit_when_form_returns(stub, "Itch.io", "e", "p", check_fn=self._no))
+        assert stub.resent == 1
+
+    def test_the_login_path_hands_its_check_over(self):
+        block = Path(__file__).resolve().parent.parent.joinpath("src", "stores", "gamerpower.py") \
+            .read_text(encoding="utf-8").split("async def _confirm_side_login", 1)[1].split("\n    async def ", 1)[0]
+        assert "_resubmit_when_form_returns(label, *credentials, check_fn=check_fn)" in block
 
 
 class TestItchOwnershipIsCheckedSignedIn:
@@ -545,7 +700,7 @@ class TestItchOwnershipIsCheckedSignedIn:
         # needed" while signed out, and every check after it read a signed-out page.
         session = self.SOURCE.split("async def _itch_session_ready", 1)[1].split('\n    async def ', 1)[0]
         assert 'page.get("https://itch.io/")' in session
-        assert "_itch_logged_in_after_load()" in session
+        assert "_itch_state_after_load()" in session
 
     def test_the_session_is_only_established_once(self):
         session = self.SOURCE.split("async def _itch_session_ready", 1)[1].split('\n    async def ', 1)[0]
@@ -569,7 +724,7 @@ class TestSideStorePrompts:
 
     def test_cloudflare_is_let_through_before_the_session_is_judged(self):
         ready = self.SOURCE.split("async def _itch_session_ready", 1)[1].split("\n    async def ", 1)[0]
-        assert ready.index("_human_challenge_present()") < ready.index("if await self._itch_logged_in_after_load()")
+        assert ready.index("_human_challenge_present()") < ready.index("state = await self._itch_state_after_load()")
         assert "_wait_out_challenge(" in ready
 
 

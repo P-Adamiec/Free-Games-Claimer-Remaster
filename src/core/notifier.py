@@ -133,7 +133,9 @@ async def notify(
         logger.debug("No notification service configured.")
         return
 
-    logger.debug("Dispatching notification to %d service(s): %s", len(tasks), message[:200])
+    # Only the first line: the rest can hold game codes, and the log ends up in bug reports.
+    logger.debug("Dispatching notification to %d service(s): %s (%d chars)",
+                 len(tasks), message.split("\n", 1)[0][:120], len(message))
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for result in results:
         if isinstance(result, Exception):
