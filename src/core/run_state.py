@@ -8,11 +8,15 @@ over is exactly the behaviour that lowers a session's trust score.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger("fgc.run")
 
 _unanswered: set[str] = set()
 _skipped: dict[str, int] = {}
+# Asks the scheduler when it runs the bot next, at the moment that is needed; None for a single run.
+_next_run_source = None
+_run_started: datetime | None = None
 
 
 def _key(store: str) -> str:
@@ -49,7 +53,29 @@ def waiting_for_you() -> dict:
     return dict(_skipped)
 
 
+def set_next_run_source(source) -> None:
+    """Give a function that returns when the next scheduled run starts (an aware datetime) or None."""
+    global _next_run_source
+    _next_run_source = source
+
+
+def next_run():
+    """When the next scheduled run starts, asked now; None when this run is the last one."""
+    try:
+        return _next_run_source() if _next_run_source else None
+    except Exception as e:
+        logger.debug("Could not ask the scheduler for the next run: %s", e)
+        return None
+
+
+def run_started() -> datetime | None:
+    """When this run began, so a store late in it knows how long a run takes to reach it."""
+    return _run_started
+
+
 def reset_run_state() -> None:
     """Start a run with a clean slate. The container runs for weeks, runs do not."""
+    global _run_started
     _unanswered.clear()
     _skipped.clear()
+    _run_started = datetime.now(timezone.utc)

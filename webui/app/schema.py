@@ -102,12 +102,18 @@ STORES: tuple[Store, ...] = (
         Field("AE_FLAG_WAIT", "Wachttijd na een blokkade (seconden)", INT, "480", min=0, max=7200, advanced=True),
         Field("AE_PAGE_RETRIES", "Extra pogingen bij een lege pagina", INT, "4", min=0, max=20, advanced=True),
     ), default_on=True),
+    Store("legacygames", "Legacy Games", "Wisselt de Legacy Games-codes van Prime Gaming in.",
+          _login("LG"), default_on=True),
     Store("itchio", "Itch.io", "Giveaways die GamerPower vindt.", (
         *_login("ITCHIO"),
         Field("ITCHIO_OTP_KEY", "Authenticator-sleutel", OTPKEY, help=OTP_HELP),
         Field("ITCHIO_OTP_CODES", "Herstelcodes", CODES, help=CODES_HELP, advanced=True),
     )),
-    Store("fanatical", "Fanatical", "Steam-sleutels uit giveaways.", _login("FANATICAL")),
+    Store("fanatical", "Fanatical", "Steam-sleutels uit giveaways.", (
+        *_login("FANATICAL"),
+        Field("FANATICAL_OTP_KEY", "Authenticator-sleutel", OTPKEY, help=OTP_HELP),
+        Field("FANATICAL_NEWSLETTER", "Nieuwsbrief houden na een claim", BOOL, "false"),
+    )),
     Store("indiegala", "IndieGala", "Giveaways.", _login("INDIEGALA")),
     Store("alienware", "Alienware Arena", "Alleen een melding, de sleutel claim je zelf.", ()),
 )
@@ -121,6 +127,11 @@ SCHEDULE: tuple[Field, ...] = (
           help="Bijvoorbeeld 09:00,21:30 (24-uurs notatie, gescheiden door komma's)."),
     Field("SCHEDULER_TIMEZONE", "Tijdzone", TZ, "UTC", help="Bijvoorbeeld Europe/Amsterdam."),
     Field("RUN_ON_STARTUP", "Een run starten zodra de bot opstart", BOOL, "true"),
+    Field("BROWSER_TIMEZONE", "Tijdzone van de browser", TEXT, "auto", advanced=True,
+          help="auto = waar je IP-adres is (opgezocht bij ipapi.co/ipwho.is), off = UTC, "
+               "of een eigen zone zoals Europe/Amsterdam (dan geen opzoeking)."),
+    Field("BROWSER_TIMEZONE_REFRESH", "Tijdzone opnieuw opzoeken", TEXT, "month", advanced=True,
+          help="Bij auto: run (elke run), week of month."),
 )
 
 NOTIFY: tuple[Field, ...] = (

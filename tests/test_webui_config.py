@@ -173,4 +173,4 @@ class TestStoreSelection:
     def test_default_list_matches_main(self):
         import main
         assert list(schema.DEFAULT_STORES) == main.DEFAULT_STORES
-        assert set(schema.STORE_KEYS) == set(main.ALL_CLAIMERS) | set(main.SIDE_STORES)
+        assert set(schema.STORE_KEYS) == set(main.ALL_CLAIMERS) | set(main.SIDE_STORES) | set(main.REDEEM_STORES)

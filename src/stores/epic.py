@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 from datetime import datetime, timezone
 
 import httpx
 import nodriver as uc
-import pyotp
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, CHALLENGE_JS, OTP_KEY_ATTEMPTS, now_str
+from src.core.claimer import BaseClaimer, CHALLENGE_JS, OTP_KEY_ATTEMPTS, track_missing_base
 from src.core.config import cfg
 from src.core.run_state import needs_you, waits_for_nobody
 from src.core.database import async_session, get_or_create
@@ -77,6 +77,122 @@ JSON.stringify((() => {
     return { text: '', flow: 'unknown' };
 })())
 """
+
+# A checked spot to click __FINDER__'s element at, or why not: missing, disabled, hidden, offscreen (dy) or covered.
+BOX_JS = """
+JSON.stringify((() => {
+    const el = (__FINDER__)();
+    if (!el) return { reason: 'missing' };
+    if (el.disabled) return { reason: 'disabled' };
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return { reason: 'hidden' };
+    if (r.top < 0 || r.bottom > innerHeight) return { reason: 'offscreen', dy: Math.round(r.top + r.height / 2 - innerHeight / 2) };
+    const x0 = Math.max(r.left, 1), x1 = Math.min(r.right, innerWidth - 1);
+    const y0 = Math.max(r.top, 1), y1 = Math.min(r.bottom, innerHeight - 1);
+    if (x1 <= x0 || y1 <= y0) return { reason: 'hidden' };
+    for (let i = 0; i < 8; i++) {
+        const x = Math.round(x0 + (x1 - x0) * (0.2 + Math.random() * 0.6));
+        const y = Math.round(y0 + (y1 - y0) * (0.2 + Math.random() * 0.6));
+        const hit = document.elementFromPoint(x, y);
+        const link = hit && hit.closest('a');
+        if (hit && (hit === el || el.contains(hit)) && !(link && link !== el && el.contains(link)))
+            return { x, y, key: el.tagName + '|' + (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60) };
+    }
+    return { reason: 'covered' };
+})())
+"""
+
+# The last resort when the wheel cannot move a page, e.g. inside a dialog that locks scrolling.
+SCROLL_INTO_VIEW_JS = "(() => { const el = (__FINDER__)(); if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' }); })()"
+
+# A visible, enabled element of this tag whose text is the wanted one, or (unless exact) contains it.
+TEXT_FINDER = r"""() => {
+    const norm = b => (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const usable = b => { const r = b.getBoundingClientRect(), s = getComputedStyle(b);
+        return !b.disabled && r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+    const all = [...document.querySelectorAll(__TAG__)].filter(usable);
+    return all.find(b => norm(b) === __TEXT__)__INCLUDES__;
+}"""
+
+
+def text_finder(text: str, tag: str = "button", exact: bool = False) -> str:
+    """A finder for BOX_JS: the button whose text is `text`, or contains it unless exact."""
+    want = json.dumps(text.strip().lower())
+    return (TEXT_FINDER.replace("__TAG__", json.dumps(tag)).replace("__TEXT__", want)
+            .replace("__INCLUDES__", "" if exact else f" || all.find(b => norm(b).includes({want}))"))
+
+
+FIND_CHECKOUT_FRAME = """() => [...document.querySelectorAll('iframe')]
+    .find(f => /payment|purchase/i.test(f.src || '') || f.closest('#webPurchaseContainer'))"""
+
+# The checkout frame's content corner on the page and the part of it on screen, for clicks and the wheel.
+FRAME_ORIGIN_JS = """
+JSON.stringify((() => {
+    const f = (__FRAME__)();
+    if (!f) return null;
+    const r0 = f.getBoundingClientRect();
+    if (r0.top < 0 || r0.bottom > innerHeight) f.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+    const r = f.getBoundingClientRect(), s = getComputedStyle(f);
+    return { x: r.left + f.clientLeft + parseFloat(s.paddingLeft || 0),
+             y: r.top + f.clientTop + parseFloat(s.paddingTop || 0),
+             w: f.clientWidth, top: Math.max(r.top, 0), bottom: Math.min(r.bottom, innerHeight) };
+})())
+""".replace("__FRAME__", FIND_CHECKOUT_FRAME)
+
+# True when a page point is on screen and lands on the checkout frame itself, not on a backdrop above it.
+FRAME_HIT_JS = """
+((px, py) => px > 0 && py > 0 && px < innerWidth && py < innerHeight
+    && document.elementFromPoint(px, py) === (__FRAME__)())
+""".replace("__FRAME__", FIND_CHECKOUT_FRAME)
+
+# Only what a person can see: a zero-size duplicate of a button must never be the one clicked.
+SHOWN = r"""(b => { const r = b.getBoundingClientRect(), s = getComputedStyle(b);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; })"""
+FIND_ADD_TO_LIBRARY = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b =>
+    (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase().includes('add to library'))""".replace("__SHOWN__", SHOWN)
+FIND_I_ACCEPT = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b => {
+    const t = (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return t.includes('i accept') || t.includes('i agree');
+})""".replace("__SHOWN__", SHOWN)
+FIND_PLACE_ORDER = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b => b.innerText
+    && b.innerText.toLowerCase().includes('place order') && !b.querySelector('.payment-loading--loading'))""".replace(
+    "__SHOWN__", SHOWN)
+# Only Epic's licence box: the first checkbox can be "Share my email with <publisher>". A hidden box is ticked by its label.
+FIND_LICENCE_BOX = r"""() => {
+    const cb = document.querySelector('input#agree');
+    if (!cb || cb.checked) return null;
+    const r = cb.getBoundingClientRect();
+    return (r.width > 0 && r.height > 0) ? cb : (document.querySelector('label[for="agree"]') || cb.closest('label'));
+}"""
+FIND_PURCHASE_CTA = r"""() => document.querySelector('button[data-testid="purchase-cta-button"]')"""
+# Exactly "Accept" or "I accept": a word match could tick a cookie banner's "Accept All" for you.
+FIND_ACCEPT_EXACT = r"""() => [...document.querySelectorAll('button')].find(b =>
+    ['accept', 'i accept'].includes((b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase()))"""
+FIND_CONTINUE_BROWSING = r"""() => [...document.querySelectorAll('button, a')].find(b => {
+    const t = (b.textContent || '').trim().toLowerCase();
+    return t === 'continue browsing' || t.includes('continue');
+})"""
+
+
+def offers_a_purchase(state: dict) -> bool:
+    """True when the product page's button sells the game ("Buy Now", "Pre-Purchase", a price) instead of giving it."""
+    state = state or {}
+    return state.get("flow") == "old_cta" and bool(
+        re.search(r"buy|purchase|pre-?order|cart|\d", state.get("text") or "", re.I))
+
+
+def checkout_total_is_zero(text) -> bool | None:
+    """Epic's checkout total: True when nothing is to pay, False for any price, None when no total is shown."""
+    low = str(text or "").lower()
+    at = low.rfind("total")
+    if at < 0:
+        return None
+    window = low[at + 5:at + 80]
+    # Digits win over the word "free", so "Total (VAT free) €19.99" is never read as free.
+    number = re.search(r"\d[\d.,   ]*", window)
+    if number:
+        return not re.sub(r"\D", "", number.group(0)).strip("0")
+    return True if "free" in window else None
 
 
 def is_owned(state: dict) -> bool:
@@ -490,7 +606,7 @@ class EpicGamesClaimer(BaseClaimer):
     async def _fill_code(self, code: str) -> bool:
         """Type a code into Epic's six boxes and submit. Verified live: they take all six at once."""
         try:
-            first_box = await self.page.find('input[name="code-input-0"]', timeout=5)
+            first_box = await self.page.select('input[name="code-input-0"]', timeout=5)
             if not first_box:
                 return False
             await first_box.clear_input()
@@ -499,7 +615,7 @@ class EpicGamesClaimer(BaseClaimer):
             await self.sleep(1)
             # Epic ticks "Remember device" by default; this only helps when it did not.
             await self._remember_this_browser()
-            submit = await self.page.find('button[type="submit"]', timeout=5)
+            submit = await self.page.select('button[type="submit"]', timeout=5)
             if submit:
                 await submit.click()
                 await self.sleep(3)
@@ -572,7 +688,8 @@ class EpicGamesClaimer(BaseClaimer):
 
     async def _press_sign_in(self) -> bool:
         """Send the sign-in form again, for when a human check interrupted one you had filled."""
-        button = await self.page.select("#sign-in", timeout=5) or await self.page.find("Sign in", timeout=4)
+        # No text fallback: "Sign in" also matches "Sign in with Apple" (#72).
+        button = await self.page.select("#sign-in", timeout=5)
         if not button:
             logger.debug("No sign-in button came back after the check.")
             return False
@@ -590,7 +707,7 @@ class EpicGamesClaimer(BaseClaimer):
         email = cfg.eg_email.strip() if cfg.eg_email else ""
         password = cfg.eg_password.strip() if cfg.eg_password else ""
 
-        email_input = await self.page.find("#email", timeout=10)
+        email_input = await self.page.select("#email", timeout=10)
         if email_input:
             # Click FIRST to trigger Chrome's internal credential manager autofill, then wait for it
             await email_input.click()
@@ -609,13 +726,13 @@ class EpicGamesClaimer(BaseClaimer):
             else:
                 logger.debug("Email autofill succeeded.")
 
-            continue_btn = await self.page.find("#continue", timeout=5)
+            continue_btn = await self.page.select("#continue", timeout=5)
             if continue_btn:
                 await continue_btn.click()
                 logger.debug("Clicked continue, waiting for CSS slide animation...")
                 await self.sleep(3.0)  # Wait for CSS slide transition completely
 
-        password_input = await self.page.find("#password", timeout=10)
+        password_input = await self.page.select("#password", timeout=10)
         if password_input:
             await password_input.click()
             await self.sleep(1.0)
@@ -636,14 +753,14 @@ class EpicGamesClaimer(BaseClaimer):
         try:
             is_checked = await self.page.evaluate('document.querySelector("#rememberMe")?.checked')
             if not is_checked:
-                remember_label = await self.page.find("label[for='rememberMe']", timeout=2)
+                remember_label = await self.page.select("label[for='rememberMe']", timeout=2)
                 if remember_label:
                     await remember_label.click()
                     await self.sleep(0.5)
         except Exception:
             pass
             
-        sign_in_btn = await self.page.find("#sign-in", timeout=5)
+        sign_in_btn = await self.page.select("#sign-in", timeout=5)
         if sign_in_btn:
             await sign_in_btn.click()
             await self.sleep(3)
@@ -908,6 +1025,7 @@ class EpicGamesClaimer(BaseClaimer):
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=3, max=15), reraise=True)
     async def _claim_game(self, url: str) -> None:
         """Claim a single free game by navigating to its page and clicking through the purchase flow."""
+        self._click_counts = {}
         # Extract the game identifier from the URL (e.g. "fortnite" from ".../p/fortnite")
         game_id = url.rstrip("/").split("/")[-1]
 
@@ -984,10 +1102,12 @@ class EpicGamesClaimer(BaseClaimer):
                 return
 
             if "requires base game" in btn_text:
-                logger.warning("'%s' requires base game.", title)
-                # Same tag as Steam, so one setting silences both (issue #48).
-                obj.status = "failed:missing_base"
-                notify_game["status"] = "failed:missing_base"
+                # Same tag as Steam, so one setting silences both (issue #48); told once, then weeks later (#78).
+                notify_game["status"] = track_missing_base(obj, remember=not cfg.dryrun)
+                if notify_game["status"] == "failed:missing_base":
+                    logger.warning("'%s' requires base game.", title)
+                else:
+                    logger.info("'%s' still requires its base game (already reported).", title)
                 await session.commit()
                 return
 
@@ -995,6 +1115,13 @@ class EpicGamesClaimer(BaseClaimer):
                 logger.warning("No purchase/claim button found for '%s'.", title)
                 obj.status = "failed"
                 await self.take_screenshot(f"epic_nobutton_{game_id}")
+                await session.commit()
+                return
+
+            # A page that sells the game (an ended GamerPower giveaway, next week's game) is never checked out.
+            if offers_a_purchase(state):
+                logger.info("'%s' is not free on Epic right now (button: %s), skipping.", title, btn_text)
+                obj.status = notify_game["status"] = "skipped:not-free"
                 await session.commit()
                 return
 
@@ -1012,9 +1139,7 @@ class EpicGamesClaimer(BaseClaimer):
 
             # ── OLD FLOW: purchase-cta-button + payment iframe ──
             elif flow_type == "old_cta":
-                await self.page.evaluate(
-                    """document.querySelector('button[data-testid="purchase-cta-button"]')?.click()"""
-                )
+                await self._cdp_click_found(FIND_PURCHASE_CTA, "purchase button", allow_script=True, tries=2)
                 await self.sleep(2)
 
                 # Handle intermediate dialogs
@@ -1022,20 +1147,15 @@ class EpicGamesClaimer(BaseClaimer):
                 await self._click_page_button_by_text("Yes, buy now", timeout=1, log="already own partial")
 
                 # Handle End User License Agreement
-                await self.page.evaluate(
-                    """
-                    (() => {
-                        const cb = document.querySelector('input#agree');
-                        if (cb && !cb.checked) cb.click();
-                        const btns = [...document.querySelectorAll('button')];
-                        const accept = btns.find(b => b.textContent.includes('Accept'));
-                        if (accept) accept.click();
-                    })()
-                    """
-                )
+                await self._cdp_click_found(FIND_LICENCE_BOX, "licence box", allow_script=True, tries=2)
+                await self._cdp_click_found(FIND_ACCEPT_EXACT, "Accept", allow_script=True, tries=2)
 
                 await self.sleep(3)
                 checkout_ok = await self._handle_purchase_iframe(title)
+                if checkout_ok == "not-free":
+                    obj.status = notify_game["status"] = "skipped:not-free"
+                    await session.commit()
+                    return
             else:
                 logger.warning("Unknown checkout flow '%s' for '%s'.", flow_type, title)
                 checkout_ok = False
@@ -1142,17 +1262,9 @@ class EpicGamesClaimer(BaseClaimer):
                 await self.sleep(2)
 
             # EULA / Terms acceptance (check before Add to library)
-            # Only Epic's licence box: the first checkbox can be "Share my email with <publisher>".
-            await self.page.evaluate(
-                """
-                (() => {
-                    const cb = document.querySelector('input#agree');
-                    if (cb && !cb.checked) cb.click();
-                })()
-                """
-            )
-            await self._cdp_click_element_by_text("accept", timeout=1)
-            await self._cdp_click_element_by_text("i agree", timeout=1)
+            await self._cdp_click_found(FIND_LICENCE_BOX, "licence box", allow_script=True, tries=2)
+            await self._cdp_click_element_by_text("accept", timeout=1, exact=True)
+            await self._cdp_click_element_by_text("i agree", timeout=1, exact=True)
 
             # ── Step 3: If we clicked "Get", wait for checkout overlay ──
             if flow_type == "new_get":
@@ -1192,7 +1304,8 @@ class EpicGamesClaimer(BaseClaimer):
                     """)
                     if needs_accept and not accepted:
                         logger.debug("Found 'I accept' (Right of Withdrawal) on main page. Clicking...")
-                        accepted = await self._cdp_click_element_by_text("accept", timeout=2)
+                        accepted = (await self._cdp_click_element_by_text("i accept", timeout=2, exact=True)
+                                    or await self._cdp_click_element_by_text("i agree", timeout=1, exact=True))
                         await self.sleep(2)
 
                     # Also check inside the iframe for 'I accept' or 'Place Order' (just in case)
@@ -1206,41 +1319,19 @@ class EpicGamesClaimer(BaseClaimer):
                                 grant_univeral_access=True,
                             )
                         )
-                        # Check "Add to library" inside iframe
-                        if not add_clicked:
-                            did_add = await self._eval_in_frame(ctx_id, """
-                                (() => {
-                                    const btns = [...document.querySelectorAll('button')];
-                                    const btn = btns.find(b => {
-                                        const t = (b.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                                        return t.includes('add to library');
-                                    });
-                                    if (btn) { btn.click(); return true; }
-                                    return false;
-                                })()
-                            """)
-                            if did_add:
-                                logger.debug("✓ Found and clicked 'Add to library' inside iframe.")
-                                add_clicked = True
-                                await self.sleep(2)
+                        # The frame is cross-origin, so a script click there was the one click Epic could tell from a hand.
+                        last_try = attempt == 24
+                        if not add_clicked and await self._cdp_click_in_frame(
+                                ctx_id, FIND_ADD_TO_LIBRARY, "add to library", allow_script=last_try):
+                            logger.debug("✓ Found and clicked 'Add to library' inside iframe.")
+                            add_clicked = True
+                            await self.sleep(2)
 
-                        # Check "I accept" inside iframe
-                        if not accepted:
-                            did_accept = await self._eval_in_frame(ctx_id, """
-                                (() => {
-                                    const btns = [...document.querySelectorAll('button')];
-                                    const btn = btns.find(b => {
-                                        const t = (b.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                                        return t.includes('i accept') || t.includes('i agree');
-                                    });
-                                    if (btn) { btn.click(); return true; }
-                                    return false;
-                                })()
-                            """)
-                            if did_accept:
-                                logger.debug("✓ Found and clicked 'I accept' inside iframe.")
-                                accepted = True
-                                await self.sleep(2)
+                        if not accepted and await self._cdp_click_in_frame(
+                                ctx_id, FIND_I_ACCEPT, "i accept", allow_script=last_try):
+                            logger.debug("✓ Found and clicked 'I accept' inside iframe.")
+                            accepted = True
+                            await self.sleep(2)
 
                     if add_clicked and accepted:
                         # Once we've clicked Add and explicitly handled Accept, we can wait for verification
@@ -1325,134 +1416,163 @@ class EpicGamesClaimer(BaseClaimer):
             logger.exception("Error in new checkout flow for '%s'.", title)
             return False
 
-    async def _cdp_click_element_by_text(
-        self, text: str, *, tag: str = "button", timeout: int = 1
-    ) -> bool:
-        """Click an element using CDP Input.dispatchMouseEvent (real mouse click).
+    async def _read_box(self, run_js, finder: str) -> dict:
+        """BOX_JS for this finder in the page or the checkout frame; an unreadable page says so."""
+        try:
+            raw = await run_js(BOX_JS.replace("__FINDER__", finder))
+        except Exception as e:
+            return {"reason": f"unreadable ({e})"}
+        try:
+            return json.loads(raw) if isinstance(raw, str) else {"reason": "unreadable"}
+        except ValueError:
+            return {"reason": "unreadable"}
 
-        This is the most reliable click method, it sends actual browser-level
-        mouse input at the element's pixel coordinates, bypassing all
-        JavaScript event handling (including React synthetic events).
+    async def _page_wheel_point(self) -> tuple:
+        """A spot over the middle of the page for the mouse wheel."""
+        try:
+            vw, vh = json.loads(await self.page.evaluate("JSON.stringify([innerWidth, innerHeight])"))
+        except Exception:
+            vw, vh = 1280, 720
+        return vw * random.uniform(0.35, 0.65), vh * random.uniform(0.35, 0.65)
 
-        Sends: mouseMoved → mousePressed → mouseReleased (like a real human).
+    async def _bring_into_view(self, read, run_js, wheel_point, finder: str, label: str) -> dict:
+        """Scroll an off-screen element into view with the mouse wheel, the jump only when the wheel moves nothing."""
+        box = await read()
+        for _ in range(6):
+            if box.get("reason") != "offscreen":
+                return box
+            point = await wheel_point()
+            if not point:
+                break
+            await self._wheel_scroll(point[0], point[1], box["dy"])
+            moved = await read()
+            if moved.get("reason") == "offscreen" and abs(moved.get("dy", 0) - box["dy"]) < 5:
+                break
+            box = moved
+        if box.get("reason") == "offscreen":
+            logger.debug("The wheel does not move '%s' into view, scrolling to it directly.", label)
+            await run_js(SCROLL_INTO_VIEW_JS.replace("__FINDER__", finder))
+            box = await read()
+        return box
+
+    async def _click_took(self, read, label: str, key: str = "", before: str = "") -> bool:
+        """True after two reads in a row show the clicked element gone, disabled, covered or replaced by another one.
+
+        A script-clicked hidden element must change, not just stay hidden, to count.
         """
-        import asyncio
-
-        for attempt in range(max(1, timeout)):
-            # Step 1: Find element recursively in main doc and all iframes
-            coords_raw = await self.page.evaluate(
-                """
-                JSON.stringify((() => {
-                    function findEl(doc, ox, oy) {
-                        try {
-                            const btns = [...doc.querySelectorAll('%s')];
-                            const candidates = btns.filter(b => {
-                                const t = (b.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                                const rect = b.getBoundingClientRect();
-                                const style = (b.ownerDocument.defaultView || window).getComputedStyle(b);
-                                return !b.disabled && rect.width > 0 && rect.height > 0
-                                    && style.visibility !== 'hidden' && style.display !== 'none'
-                                    && (t === '%s' || t.includes('%s'));
-                            });
-                            const btn = candidates.find(b => (b.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase() === '%s')
-                                || candidates[0];
-                            if (btn) {
-                                btn.scrollIntoView({ block: 'center', behavior: 'instant' });
-                                const rect = btn.getBoundingClientRect();
-                                const left = Math.max(rect.left, 1);
-                                const right = Math.min(rect.right, window.innerWidth - 1);
-                                const topEdge = Math.max(rect.top, 1);
-                                const bottom = Math.min(rect.bottom, window.innerHeight - 1);
-                                if (right <= left || bottom <= topEdge) return null;
-                                const x = left + (right - left) / 2;
-                                const y = topEdge + (bottom - topEdge) / 2;
-                                const top = doc.elementFromPoint(x, y);
-                                if (!top || (!btn.contains(top) && top !== btn)) return null;
-                                return {
-                                    x: ox + x,
-                                    y: oy + y,
-                                    w: rect.width, h: rect.height
-                                };
-                            }
-                            // Search iframes
-                            const frames = [...doc.querySelectorAll('iframe')];
-                            for (const f of frames) {
-                                try {
-                                    if (f.contentDocument) {
-                                        const fRect = f.getBoundingClientRect();
-                                        const res = findEl(f.contentDocument, ox + fRect.x, oy + fRect.y);
-                                        if (res) return res;
-                                    }
-                                } catch(e) {}
-                            }
-                        } catch(e) {}
-                        return null;
-                    }
-                    return findEl(document, 0, 0);
-                })())
-                """ % (tag, text, text, text)
-            )
-
-            try:
-                coords = json.loads(coords_raw) if isinstance(coords_raw, str) else None
-            except (json.JSONDecodeError, TypeError):
-                coords = None
-
-            if not coords:
-                await self.sleep(1)
-                continue
-
-            x, y = coords["x"], coords["y"]
-            logger.debug("Found '%s' at (%.0f, %.0f) size %.0fx%.0f", text, x, y, coords.get("w", 0), coords.get("h", 0))
-
-            # Step 2: Send CDP mouse events (mouseMoved → mousePressed → mouseReleased)
-            try:
-                # First move the mouse to the target (required for proper event routing)
-                await self.page.send(
-                    uc.cdp.input_.dispatch_mouse_event(
-                        type_="mouseMoved",
-                        x=x,
-                        y=y,
-                    )
-                )
-                await asyncio.sleep(0.05)
-
-                # Press
-                await self.page.send(
-                    uc.cdp.input_.dispatch_mouse_event(
-                        type_="mousePressed",
-                        x=x,
-                        y=y,
-                        button=uc.cdp.input_.MouseButton("left"),
-                        click_count=1,
-                    )
-                )
-                await asyncio.sleep(0.1)
-
-                # Release
-                await self.page.send(
-                    uc.cdp.input_.dispatch_mouse_event(
-                        type_="mouseReleased",
-                        x=x,
-                        y=y,
-                        button=uc.cdp.input_.MouseButton("left"),
-                        click_count=1,
-                    )
-                )
-                logger.debug("CDP click OK at (%.0f, %.0f) for '%s'.", x, y, text)
+        settled = 0
+        for _ in range(8):
+            await self.sleep(0.5)
+            box = await read()
+            reason = box.get("reason", "")
+            replaced = "x" in box and key and box.get("key") != key
+            gone = reason in ("missing", "disabled", "hidden", "covered") or reason.startswith("unreadable")
+            settled = settled + 1 if replaced or (gone and reason != before) else 0
+            if settled >= 2:
                 return True
-            except Exception as exc:
-                logger.warning("CDP click failed for '%s': %s", text, exc)
-                await self.sleep(1)
-
+        logger.debug("'%s' is still there and clickable after the click, it did not take.", label)
         return False
+
+    async def _click_until_taken(self, read, run_js, wheel_point, to_page, finder: str, label: str,
+                                 tries: int = 1, allow_script: bool = False) -> bool:
+        """Click with the mouse until the click takes, at most twice per button in one checkout.
+
+        A covered element (an overlay or the captcha) is waited out and never clicked through; a script click is only
+        for a hidden element, or, when allowed, for one two mouse clicks could not move.
+        """
+        clicks = self.__dict__.setdefault("_click_counts", {})
+        reason, key = "missing", ""
+        for attempt in range(max(1, tries)):
+            if attempt:
+                await self.sleep(1)
+            box = await self._bring_into_view(read, run_js, wheel_point, finder, label)
+            if "x" not in box:
+                reason = box.get("reason", "missing")
+                if reason == "hidden":
+                    break
+                continue
+            if clicks.get(label, 0) >= 2:
+                reason = "not taken"
+                break
+            point = await to_page(box)
+            if not point:
+                reason = "covered on the page"
+                continue
+            key = box.get("key", "")
+            await self._human_click(*point)
+            clicks[label] = clicks.get(label, 0) + 1
+            if await self._click_took(read, label, key):
+                logger.debug("Clicked '%s' with the mouse.", label)
+                return True
+            reason = "not taken"
+        if reason == "hidden" or (allow_script and reason == "not taken"):
+            if await run_js(self._script_click_js(finder)) is True and await self._click_took(read, label, key, reason):
+                logger.debug("'%s' is %s, clicked by script.", label, reason)
+                return True
+        logger.debug("'%s' not clicked: %s.", label, reason)
+        return False
+
+    @staticmethod
+    def _script_click_js(finder: str) -> str:
+        return f"(() => {{ const el = ({finder})(); if (el && !el.disabled) {{ el.click(); return true; }} return false; }})()"
+
+    async def _cdp_click_found(self, finder: str, label: str, allow_script: bool = False, tries: int = 1) -> bool:
+        """Click on the page with the mouse until it takes, see _click_until_taken."""
+        run_js = self.page.evaluate
+
+        async def read():
+            return await self._read_box(run_js, finder)
+
+        async def as_is(box):
+            return box["x"], box["y"]
+
+        return await self._click_until_taken(read, run_js, self._page_wheel_point, as_is, finder, label,
+                                             tries=tries, allow_script=allow_script)
+
+    async def _cdp_click_element_by_text(self, text: str, *, tag: str = "button", timeout: int = 1,
+                                         exact: bool = False) -> bool:
+        """Click the button with this text with the mouse until it takes, waiting up to `timeout` tries for it."""
+        return await self._cdp_click_found(text_finder(text, tag, exact), text, tries=timeout)
+
+    async def _cdp_click_in_frame(self, ctx_id: int, finder: str, label: str, allow_script: bool = False,
+                                  tries: int = 1) -> bool:
+        """Click inside the cross-origin checkout frame with the mouse: the spot inside it plus where it sits on the page."""
+
+        async def run_js(expression):
+            return await self._eval_in_frame(ctx_id, expression)
+
+        async def read():
+            return await self._read_box(run_js, finder)
+
+        async def frame():
+            try:
+                return json.loads(await self.page.evaluate(FRAME_ORIGIN_JS) or "null")
+            except Exception:
+                return None
+
+        async def wheel_point():
+            f = await frame()
+            if not f or f["bottom"] - f["top"] < 40:
+                return None
+            return (f["x"] + f["w"] * random.uniform(0.3, 0.7),
+                    f["top"] + (f["bottom"] - f["top"]) * random.uniform(0.3, 0.7))
+
+        async def to_page(box):
+            f = await frame()
+            if not f:
+                return None
+            px, py = round(f["x"] + box["x"]), round(f["y"] + box["y"])
+            return (px, py) if await self.page.evaluate(f"({FRAME_HIT_JS})({px}, {py})") is True else None
+
+        return await self._click_until_taken(read, run_js, wheel_point, to_page, finder, f"{label} (checkout frame)",
+                                             tries=tries, allow_script=allow_script)
 
     # ------------------------------------------------------------------
     # Purchase iframe handling (via CDP), OLD flow
     # ------------------------------------------------------------------
 
-    async def _handle_purchase_iframe(self, title: str) -> bool:
-        """Complete the purchase inside Epic's payment iframe.
+    async def _handle_purchase_iframe(self, title: str) -> bool | str:
+        """Complete the purchase inside Epic's payment iframe, or answer "not-free" when its total is not zero.
 
         Epic's checkout is inside a cross-origin iframe (payment-store.epicgames.com).
         Normal JavaScript can't reach inside cross-origin iframes, so we use CDP:
@@ -1492,8 +1612,6 @@ class EpicGamesClaimer(BaseClaimer):
             )
             logger.debug("Created isolated world in purchase iframe, ctx=%s", ctx_id)
 
-            text_content = await self._eval_in_frame(ctx_id, "document.body?.innerText || ''")
-
             # Check for "unavailable in your region" using innerText to ignore hidden script tags
             unavailable = await self._eval_in_frame(ctx_id, """
                 document.body?.innerText?.toLowerCase()?.includes('unavailable in your region') || false
@@ -1525,20 +1643,28 @@ class EpicGamesClaimer(BaseClaimer):
                     """)
                     await self.sleep(2)
 
+            # The same window sells games, so only a total of zero is ever ordered; an unreadable one is not.
+            free = None
+            for _ in range(5):
+                text = await self._eval_in_frame(ctx_id, "document.body?.innerText || ''")
+                free = checkout_total_is_zero(text)
+                if free is not None:
+                    break
+                await self.sleep(2)
+            # Only the total itself: the rest of the checkout can show your e-mail address.
+            at = str(text or "").lower().rfind("total")
+            logger.debug("Checkout total for '%s' reads as free=%s: %r", title, free,
+                         str(text)[at:at + 80].replace("\n", " | ") if at >= 0 else f"no total in {len(str(text or ''))} chars")
+            if free is False:
+                logger.warning("'%s' costs money in Epic's checkout, nothing was ordered.", title)
+                return "not-free"
+            if free is None:
+                logger.warning("Could not read the checkout total for '%s', nothing was ordered.", title)
+                return False
+
             # Click "Place Order" (wait for it to not be in loading state)
             for attempt in range(8):
-                clicked = await self._eval_in_frame(ctx_id, """
-                    (() => {
-                        const btns = [...document.querySelectorAll('button')];
-                        const po = btns.find(b =>
-                            b.innerText &&
-                            b.innerText.toLowerCase().includes('place order') &&
-                            !b.querySelector('.payment-loading--loading')
-                        );
-                        if (po && !po.disabled) { po.click(); return true; }
-                        return false;
-                    })()
-                """)
+                clicked = await self._cdp_click_in_frame(ctx_id, FIND_PLACE_ORDER, "place order", allow_script=attempt == 7)
                 if clicked:
                     logger.debug("Clicked 'Place Order' for '%s'", title)
                     break
@@ -1547,19 +1673,7 @@ class EpicGamesClaimer(BaseClaimer):
             await self.sleep(2)
 
             # Handle "I Accept" / "I Agree" button (EU accounts only)
-            # JS: const btnAgree = iframe.locator('button:has-text("I Accept")');
-            await self._eval_in_frame(ctx_id, """
-                (() => {
-                    const btns = [...document.querySelectorAll('button')];
-                    const agree = btns.find(b =>
-                        b.innerText && (
-                            b.innerText.toLowerCase().includes('i accept') ||
-                            b.innerText.toLowerCase().includes('i agree')
-                        )
-                    );
-                    if (agree) agree.click();
-                })()
-            """)
+            await self._cdp_click_in_frame(ctx_id, FIND_I_ACCEPT, "i accept", allow_script=True, tries=2)
 
             # Wait for order confirmation on the MAIN page
             # Epic shows either "Thanks for your order!" or "It's all yours" dialog
@@ -1575,16 +1689,7 @@ class EpicGamesClaimer(BaseClaimer):
                 """)
                 if confirmed:
                     # Click "Continue browsing" to dismiss the success dialog
-                    await self.page.evaluate("""
-                        (() => {
-                            const btns = [...document.querySelectorAll('button, a')];
-                            const cb = btns.find(b => {
-                                const t = (b.textContent || '').trim().toLowerCase();
-                                return t === 'continue browsing' || t.includes('continue');
-                            });
-                            if (cb) cb.click();
-                        })()
-                    """)
+                    await self._cdp_click_found(FIND_CONTINUE_BROWSING, "continue browsing", allow_script=True, tries=2)
                     await self.sleep(1)
                     return True
 
@@ -1632,28 +1737,14 @@ class EpicGamesClaimer(BaseClaimer):
     async def _click_page_button_by_text(
         self, text: str, *, timeout: int = 3, log: str = ""
     ) -> bool:
-        """Find and click a button on the main page by its text content.
-
-        Uses page.evaluate() instead of nodriver's find() to avoid issues
-        with Playwright-style pseudo-selectors like :has-text() which nodriver
-        does not support.
-        """
-        for _ in range(max(1, timeout)):
-            clicked = await self.page.evaluate(f"""
-                (() => {{
-                    const btns = [...document.querySelectorAll('button')];
-                    const btn = btns.find(b => b.textContent.includes('{text}'));
-                    if (btn) {{ btn.click(); return true; }}
-                    return false;
-                }})()
-            """)
-            if clicked:
-                if log:
-                    logger.debug("Clicked '%s' button (%s)", text, log)
-                await self.sleep(1)
-                return True
-            await self.sleep(1)
-        return False
+        """Click the page button whose text contains `text`, waiting up to `timeout` tries for it to appear."""
+        finder = f"() => [...document.querySelectorAll('button')].filter({SHOWN}).find(b => b.textContent.includes({json.dumps(text)}))"
+        if not await self._cdp_click_found(finder, text, allow_script=True, tries=max(1, timeout)):
+            return False
+        if log:
+            logger.debug("Clicked '%s' button (%s)", text, log)
+        await self.sleep(1)
+        return True
 
 
 async def claim_epic(extra_games: list | None = None) -> dict:

@@ -62,3 +62,18 @@ class TestACodeGOGSaysIsBeingRedeemed:
 
     def test_it_stays_out_of_the_summary_and_the_database(self):
         assert "notify_games" not in self.LOCKED and "obj.status" not in self.LOCKED
+
+
+class TestADryRunRedeemsNothing:
+    """TODO 49: a dry run redeemed Prime's GOG codes left over from an earlier run."""
+
+    REDEEM = TestACodeGOGSaysIsBeingRedeemed.REDEEM
+
+    def test_it_stops_before_the_first_button(self):
+        stop = self.REDEEM.index("if cfg.dryrun:")
+        assert stop < self.REDEEM.index("return", stop) < self.REDEEM.index("t === 'continue'")
+        assert self.REDEEM.index("t === 'continue'") < self.REDEEM.index("'activate'")
+
+    def test_it_is_listed_as_a_dry_run(self):
+        block = self.REDEEM.split("if cfg.dryrun:", 1)[1].split("return", 1)[0]
+        assert '"available (dry run)"' in block

@@ -19,6 +19,11 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
 
 ## 2026-10-12
 
+- Upstream `dev` gemerged (v1.12, Fanatical-2FA en v1.13). De Prime-fix zit nu in upstream; `prime.py` is weer gelijk
+  aan upstream. De GOG-nieuwsbrief-fix blijft (upstream opent nog alleen de pagina). Webui bijgewerkt voor de nieuwe
+  instellingen: winkel Legacy Games (standaard aan, codes van Prime), Fanatical-sleutel en -nieuwsbrief, tijdzone van
+  de browser. Eén upstream-test (`test_two_factor` met spaties in de sleutel) faalt ook op upstream zelf.
+
 - DLC waarvan je het basisspel niet hebt, telt niet meer als mislukt: op de website staat het als "Geen basisspel"
   (grijs), het telt niet mee in "mislukt" in de takenlijst en de waarschuwingen ervan staan niet bij de problemen van
   de run. Een melding erover staat standaard uit (`NOTIFY_MISSING_BASE`, aan te zetten onder de geavanceerde

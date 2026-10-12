@@ -219,6 +219,12 @@ class Config:
 
     scheduler_hours: int = _int("SCHEDULER_HOURS", 12)
     scheduler_timezone: str = os.getenv("SCHEDULER_TIMEZONE", "UTC").strip() or "UTC"
+    # The browser's own time zone: "auto" asks where your IP is, "off" keeps UTC, or an IANA name such as Europe/Warsaw.
+    browser_timezone: str = (os.getenv("BROWSER_TIMEZONE") or "auto").strip()
+    # How often "auto" asks again: run, week or month. A zone you name, off, or TZ asks nothing at all.
+    browser_timezone_refresh: str = (os.getenv("BROWSER_TIMEZONE_REFRESH") or "month").strip().lower()
+    # The container's own TZ, read once here: the browser zone code sets TZ for a moment while Chrome starts.
+    tz: str | None = os.getenv("TZ") or None
     scheduler_fixed_times: str = os.getenv("SCHEDULER_FIXED_TIMES", "")
     run_on_startup: bool = _bool("RUN_ON_STARTUP", default=True)
     # One pass, then the container stops, for people who schedule it from outside (cron, Ofelia).
@@ -281,6 +287,9 @@ class Config:
     pg_password: str | None = os.getenv("PG_PASSWORD") or os.getenv("PASSWORD")
     pg_otp_key: str | None = _secret("PG_OTP_KEY", "PG_OTPKEY")
     pg_force_check_collected: bool = _bool("PG_FORCE_CHECK_COLLECTED")
+    # Legacy Games account that Prime's Legacy Games codes are redeemed into.
+    lg_email: str | None = os.getenv("LG_EMAIL")
+    lg_password: str | None = _secret("LG_PASSWORD")
 
     # --- GOG ---
     gog_email: str | None = os.getenv("GOG_EMAIL") or os.getenv("EMAIL")
@@ -325,6 +334,9 @@ class Config:
     # Switched on by naming it in STORES, like every side store.
     fanatical_email: str | None = os.getenv("FANATICAL_EMAIL") or os.getenv("EMAIL")
     fanatical_password: str | None = os.getenv("FANATICAL_PASSWORD") or os.getenv("PASSWORD")
+    fanatical_otp_key: str | None = _secret("FANATICAL_OTP_KEY")
+    # Keep the newsletter a claim signed you up for (false = unsubscribe, like GOG_NEWSLETTER).
+    fanatical_newsletter: bool = _bool("FANATICAL_NEWSLETTER")
 
     # --- Itch.io ---
     itchio_email: str | None = os.getenv("ITCHIO_EMAIL") or os.getenv("EMAIL")

@@ -7,13 +7,14 @@ from datetime import datetime, timezone
 import logging
 
 import nodriver as uc
-import pyotp
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, open_first_tab, now_str, filenamify
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, open_first_tab, filenamify, mask_code
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
+from src.core.run_state import needs_you
 from src.core.selection import is_store_active
+from src.stores.legacygames import legacy_redeem_link
 from src.stores.microsoft import CODE_STORES as MICROSOFT_CODE_STORES
 
 logger = logging.getLogger("fgc.prime")
@@ -76,6 +77,8 @@ def is_code_screen(state: dict) -> bool:
 
 class PrimeGamingClaimer(BaseClaimer):
     store_name = "prime"
+    # Set when a sign-in lost mid-run could not be restored, so the claim loop stops.
+    _signed_out = False
 
     async def run(self) -> None:
         """Main entry point: find and claim free games from Prime Gaming."""
@@ -117,13 +120,18 @@ class PrimeGamingClaimer(BaseClaimer):
             await self.sleep(4)
 
             # Step 2: Make sure we are logged into Amazon
-            # [fork:fix] stop here when signing in failed, instead of trying to claim while signed out.
             if not await self._ensure_logged_in():
-                logger.warning("Not signed in to Prime Gaming – skipping claiming this run.")
+                logger.error("Aborting Prime Gaming flow due to login failure.")
+                logger.debug("Prime sign-in gave up on %s", await self._page_brief())
+                needs_you(self.store_name)
+                if cfg.notify_errors:
+                    await self.notify("prime-gaming: could not sign in, no games were claimed.")
                 return
 
             # Step 3: Find and claim all available free games
             await self._claim_internal_games()
+            if self._signed_out and cfg.notify_errors:
+                await self.notify("prime-gaming: signed out during the run, the rest is left for the next run.")
 
             # Note: GOG codes extracted here are redeemed later by main.py
             # to avoid browser profile conflicts (GOG needs its own browser).
@@ -251,14 +259,10 @@ class PrimeGamingClaimer(BaseClaimer):
         logger.debug("Luna signed-in check: no account first name on the page")
         return False
 
-    async def _ensure_logged_in(self, silent_if_logged_in: bool = False) -> bool:  # [fork:fix] returns success
-        """Check if logged in; if not, click 'Sign in' in a loop until logged in.
+    async def _ensure_logged_in(self, silent_if_logged_in: bool = False) -> bool:
+        """Signed in, clicking 'Sign in' again until Luna agrees; False only after the VNC wait ran out.
 
-        Returns True when signed in, False when signing in failed (also after a VNC timeout).
-
-        Matches the JS pattern: sometimes after Amazon login completes,
-        Prime Gaming still shows 'Sign in' and needs another click to finalize.
-        This while loop keeps clicking and re-checking.
+        Sometimes after Amazon login completes, Prime Gaming still shows 'Sign in' and needs another click.
         """
         await self.sleep(3)
 
@@ -294,12 +298,16 @@ class PrimeGamingClaimer(BaseClaimer):
                 # No sign in button, but also not logged in, wait a moment and recheck
                 await self.sleep(3)
                 if await self._is_signed_in():
-                    break
+                    if not silent_if_logged_in:
+                        self.log_signed_in()
+                    return True
                 # Maybe page hasn't loaded yet, reload
                 await self.page.get(URL_CLAIM)
                 await self.sleep(4)
                 if await self._is_signed_in():
-                    break
+                    if not silent_if_logged_in:
+                        self.log_signed_in()
+                    return True
                 continue
 
             logger.warning("'Sign in' button found (attempt %d/%d) – clicking…",
@@ -868,7 +876,7 @@ class PrimeGamingClaimer(BaseClaimer):
 
         # --- Claim each game ---
         logger.info("Claiming/Checking %d game(s)…", len(filtered_games))
-        for game_info in filtered_games:
+        for index, game_info in enumerate(filtered_games):
             # Note: For checking already collected codes, the 'type' might default to external due to lack of standard 'href' layout.
             # But we can route them all to _claim_single_external which will scrape the external code properly.
             # Actually, "How to play" doesn't strictly have a href, so it falls to 'internal'. 
@@ -881,6 +889,11 @@ class PrimeGamingClaimer(BaseClaimer):
                     await self._claim_single_internal(game_info)
                 else:
                     await self._claim_single_external(game_info)
+            if self._signed_out:
+                left = len(filtered_games) - index
+                logger.error("Prime Gaming signed out mid-run, %d game(s) left for the next run.", left)
+                needs_you(self.store_name, left)
+                break
 
     async def _claim_single_internal(self, game_info: dict) -> None:
         """Claim a single internal Prime Gaming game via button click."""
@@ -894,8 +907,8 @@ class PrimeGamingClaimer(BaseClaimer):
             return
             
         # Ensure session hasn't expired mid-loop before processing the card
-        if not await self._ensure_logged_in(silent_if_logged_in=True):  # [fork:fix]
-            logger.warning("Not signed in – skipping '%s'.", title)
+        if not await self._ensure_logged_in(silent_if_logged_in=True):
+            self._signed_out = True
             return
 
         try:
@@ -960,8 +973,8 @@ class PrimeGamingClaimer(BaseClaimer):
             return
 
         # Ensure session hasn't expired mid-loop before processing the card
-        if not await self._ensure_logged_in(silent_if_logged_in=True):  # [fork:fix]
-            logger.warning("Not signed in – skipping '%s'.", title)
+        if not await self._ensure_logged_in(silent_if_logged_in=True):
+            self._signed_out = True
             return
 
         try:
@@ -979,8 +992,8 @@ class PrimeGamingClaimer(BaseClaimer):
                     # Navigate back to claims page and re-authenticate
                     await self.page.get(URL_CLAIM)
                     await self.sleep(3)
-                    if not await self._ensure_logged_in():  # [fork:fix]
-                        logger.warning("Re-login failed – skipping '%s'.", title)
+                    if not await self._ensure_logged_in():
+                        self._signed_out = True
                         return
                     # Navigate back to the detail page after re-login
                     await self.page.get(full_detail_url)
@@ -1194,7 +1207,21 @@ class PrimeGamingClaimer(BaseClaimer):
                     await session.commit()
                 return
 
-            logger.info("Code for '%s': %s", title, code)
+            logger.info("Code for '%s': %s (the whole code is in your notification and data/prime-gaming.json)",
+                        title, mask_code(code))
+
+            extra = {"external_store": store}
+            if str(store).strip().lower() == "legacy games":
+                # Each Legacy Games offer has its own redeem page, linked here as "Click here".
+                try:
+                    hrefs = await self.page.evaluate("JSON.stringify([...document.querySelectorAll('a[href]')].map(a => a.href))")
+                    link = legacy_redeem_link(json.loads(hrefs) if isinstance(hrefs, str) else [])
+                except Exception as e:
+                    link = ""
+                    logger.debug("Could not read the Legacy Games link for '%s': %s", title, e)
+                if link:
+                    extra["redeem_url"] = link
+                logger.debug("Legacy Games redeem page for '%s': %s", title, link or "not on the page")
 
             # Save to DB
             async with async_session() as session:
@@ -1203,7 +1230,7 @@ class PrimeGamingClaimer(BaseClaimer):
                     game_id=title, title=title, url=url, status="claimed", code=code,
                 )
                 obj.code = code
-                obj.extra = json.dumps({"external_store": store})
+                obj.extra = json.dumps(extra)
                 await session.commit()
 
             _save_to_json(title, code=code, store=store, url=url, status="claimed")
@@ -1213,13 +1240,12 @@ class PrimeGamingClaimer(BaseClaimer):
                 "gog": "https://www.gog.com/redeem",
                 "microsoft store": "https://account.microsoft.com/billing/redeem",
                 "xbox": "https://account.microsoft.com/billing/redeem",
-                "legacy games": "https://www.legacygames.com/primedeal",
             }
-            redeem_url = redeem_urls.get(store, "")
+            redeem_url = extra.get("redeem_url") or redeem_urls.get(store, "")
             if redeem_url:
-                logger.info("Redeem '%s' at: %s (code: %s)", title, redeem_url, code)
+                logger.info("Redeem '%s' at: %s (code: %s)", title, redeem_url, mask_code(code))
             else:
-                logger.info("Redeem '%s' manually on %s (code: %s)", title, store, code)
+                logger.info("Redeem '%s' manually on %s (code: %s)", title, store, mask_code(code))
 
             # GOG and Microsoft redeem their own codes after the stores run, but only when they run at all.
             if "gog" in str(store).lower():
@@ -1228,6 +1254,11 @@ class PrimeGamingClaimer(BaseClaimer):
             elif str(store).strip().lower() in MICROSOFT_CODE_STORES:
                 note = "Microsoft, pending auto-redeem" if is_store_active("microsoft") else "Microsoft"
                 self.notify_games.append({"title": title, "url": url, "status": f"code: {code} ({note})"})
+            elif str(store).strip().lower() == "legacy games":
+                auto = is_store_active("legacygames") and cfg.lg_email and cfg.lg_password
+                note = "Legacy Games, pending auto-redeem" if auto else "Legacy Games"
+                self.notify_games.append({"title": title, "url": extra.get("redeem_url") or url,
+                                          "status": f"code: {code} ({note})"})
             else:
                 self.notify_games.append({"title": title, "url": url, "status": f"code: {code} ({store})"})
 

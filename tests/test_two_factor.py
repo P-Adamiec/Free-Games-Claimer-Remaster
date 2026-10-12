@@ -63,6 +63,20 @@ class TestFreshCode:
         assert asyncio.run(claimer._fresh_totp("SECRET", "333333")) == "333333"
 
 
+class TestAKeyPastedInGroups:
+    """TODO 44: "JBSW Y3DP …" as a site shows it crashed the store with "Non-base32 digit found"."""
+
+    @pytest.mark.parametrize("pasted", ["JBSW Y3DP EHPK 3PXP", "jbswy3dpehpk3pxp", " JBSWY3DP\tEHPK3PXP "])
+    def test_it_gives_the_same_code_as_the_plain_key(self, pasted, monkeypatch):
+        from src.core import claimer as claimer_module
+
+        clock = 1_760_000_000
+        monkeypatch.setattr(claimer_module.pyotp.TOTP, "now", lambda self: self.at(clock))
+        claimer = BaseClaimer.__new__(BaseClaimer)
+        expected = claimer_module.pyotp.TOTP("JBSWY3DPEHPK3PXP").at(clock)
+        assert asyncio.run(claimer._fresh_totp(pasted)) == expected
+
+
 class TestEveryStoreUsesTheSharedCode:
     """A store generating its own code would skip the wait and repeat a refused one."""
 

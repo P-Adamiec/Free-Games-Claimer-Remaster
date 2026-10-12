@@ -264,6 +264,16 @@ STORE_HELP: dict[str, dict] = {
              FIRST_LOGIN_VNC],
         twofa=["De bot kan geen AliExpress-codes zelf invullen."],
         notes=["Lukt het ophalen vaak niet, haal de munten dan in de AliExpress-app."]),
+    "legacygames": _h(
+        "auto",
+        "Wisselt de Legacy Games-codes van Prime Gaming in op je Legacy Games-account.",
+        bot=["Logt in met e-mail en wachtwoord.",
+             "Vult per code het formulier van Legacy Games in, met het vinkje voor de nieuwsbrief uit.",
+             "Doet dat in dezelfde run als Prime Gaming: de codes verlopen binnen een paar dagen."],
+        you=["Lukt het inloggen niet vanzelf, dan vraagt de bot je in te loggen via het scherm van de bot.",
+             FIRST_LOGIN_VNC],
+        notes=["Werkt alleen samen met Prime Gaming: zonder Prime zijn er geen codes.",
+               "Zonder e-mail en wachtwoord meldt de bot alleen hoeveel codes er klaarstaan."]),
     "itchio": _h(
         "auto",
         "Met sleutel of herstelcodes automatisch.",
@@ -281,15 +291,19 @@ STORE_HELP: dict[str, dict] = {
                "Sommige giveaways zijn alleen een download; die meldt de bot zonder te claimen."]),
     "fanatical": _h(
         "approve",
-        "De bot logt in; vaak vraagt Fanatical om een \"ben je een mens\"-controle die je zelf doet.",
+        "De bot logt in en vult met de sleutel de code zelf in; een \"ben je een mens\"-controle doe je zelf.",
         bot=["Vult e-mail en wachtwoord in via het inlogvenster.",
-             "Haalt de Steam-sleutel van een giveaway op en activeert die op Steam als Steam ook aan staat."],
+             "Vult de code in met de authenticator-sleutel.",
+             "Haalt de Steam-sleutel van een giveaway op en activeert die op Steam als Steam ook aan staat.",
+             "Zegt na een claim de nieuwsbrief op, tenzij je die wilt houden."],
         you=["Captchas rond je zelf af via het scherm van de bot.",
-             "Heb je tweestapsverificatie aan bij Fanatical, dan typ je die code ook zelf over: de bot kan "
-             "Fanatical-codes niet invullen.",
+             "Zonder sleutel: typ de code zelf over in het scherm van de bot.",
              FIRST_LOGIN_VNC],
-        twofa=["Fanatical biedt een authenticator-app (My Account > Account Settings > Login Details), maar de "
-               "bot heeft daar geen sleutel-veld voor; elke code typ je zelf."],
+        twofa=["Fanatical kent een authenticator-app; met de sleutel vult de bot de code zelf in."],
+        key_steps=["Log in op fanatical.com en ga naar My Account > Account Settings > Login Details.",
+                   "Zet tweestapsverificatie aan. Onder de QR-code staat \"Or enter this code\": kopieer die "
+                   "code naar het veld hieronder en scan de QR-code ook met je eigen app. " + KEY_NO_TEXT,
+                   KEY_TRADEOFF],
         notes=["Fanatical staat standaard uit.",
                "Sommige acties vragen een gekoppeld Steam-account bij Fanatical.",
                "Staat Steam uit, dan blijft de sleutel in je Fanatical-bibliotheek staan."]),

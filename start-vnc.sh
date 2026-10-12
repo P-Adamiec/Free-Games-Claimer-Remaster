@@ -29,10 +29,13 @@ rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.tX${DISPLAY_NUM}-lock" "/tmp/.X11-unix
 if [ -z "${VNC_PASSWORD:-}" ]; then
 	pw="-SecurityTypes None"
 	pwt="no password!"
+	echo "WARNING: VNC_PASSWORD is empty, so anyone who can reach port $NOVNC_PORT can use this browser and every" \
+		"store it is signed in to. Set VNC_PASSWORD in .env unless only you can reach this machine."
 else
 	pw="-rfbauth $HOME/.vnc/passwd"
 	pwt="with password"
-	mkdir -p "$HOME/.vnc/"
+	# Under /tmp (a read-only container's home) TurboVNC accepts this folder only with mode 700.
+	mkdir -p "$HOME/.vnc/" && chmod 700 "$HOME/.vnc"
 	# TurboVNC refuses a password file that anyone else can read (issue #67).
 	if ! echo "$VNC_PASSWORD" | /opt/TurboVNC/bin/vncpasswd -f >"$HOME/.vnc/passwd" || ! chmod 600 "$HOME/.vnc/passwd"; then
 		echo "Could not write the VNC password file in $HOME/.vnc, check who this container runs as."

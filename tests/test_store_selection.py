@@ -14,13 +14,19 @@ import pytest
 MAIN_PY = Path(__file__).resolve().parent.parent / "main.py"
 SOURCE = MAIN_PY.read_text(encoding="utf-8")
 
-EXPECTED_DEFAULT = ["steam", "epic", "prime", "gog", "microsoft", "ubisoft", "aliexpress"]
+EXPECTED_DEFAULT = ["steam", "epic", "prime", "gog", "microsoft", "ubisoft", "aliexpress", "legacygames"]
 
 
 def _default_stores() -> list[str]:
     match = re.search(r"^DEFAULT_STORES: list\[str\] = (\[[^\]]*\])", SOURCE, re.M)
     assert match, "DEFAULT_STORES not found in main.py"
     return ast.literal_eval(match.group(1))
+
+
+def _redeem_keys() -> list[str]:
+    match = re.search(r"^REDEEM_STORES: dict\[str, str\] = (\{[^}]*\})", SOURCE, re.M)
+    assert match, "REDEEM_STORES not found in main.py"
+    return list(ast.literal_eval(match.group(1)))
 
 
 def _registry_keys() -> list[str]:
@@ -34,7 +40,7 @@ class TestDefaultSelection:
         assert _default_stores() == EXPECTED_DEFAULT
 
     def test_every_default_is_a_real_store(self):
-        unknown = sorted(set(_default_stores()) - set(_registry_keys()))
+        unknown = sorted(set(_default_stores()) - set(_registry_keys()) - set(_redeem_keys()))
         assert not unknown, f"DEFAULT_STORES names stores that do not exist: {unknown}"
 
     def test_new_stores_are_not_silently_left_out(self):

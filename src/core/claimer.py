@@ -3,19 +3,13 @@
 This file contains the BaseClaimer class which provides shared functionality
 that every store claimer (Steam, Epic, Prime Gaming, GOG) inherits:
 
-  - Browser management: Launches Google Chrome with stealth anti-detection patches
-    so websites don't realise they're talking to an automated bot.
+  - Browser management: Launches Google Chrome through nodriver, which hides the
+    automation flags itself.
   - Session persistence: Each store gets its own browser profile directory, so
     cookies and login sessions survive Docker container restarts.
   - Screenshot capture: Can save screenshots for debugging or notifications.
   - VNC login fallback: If automatic login fails, waits for you to log in
     manually through the VNC web interface.
-
-The stealth JavaScript patches (injected before any page loads) spoof:
-  - navigator.webdriver (hides automation flag)
-  - WebGL renderer (fakes a real GPU to avoid captcha)
-  - Browser plugins, languages, hardware specs (mimics a real desktop PC)
-  - Passkeys (prevents passkey dialogs from blocking login forms)
 """
 
 from __future__ import annotations
@@ -23,13 +17,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import random
 import re
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import nodriver as uc
 import pyotp
 
+from src.core.browser_timezone import chrome_timezone
 from src.core.config import cfg
 from src.core.display import (
     free_memory,
@@ -58,6 +55,35 @@ def mask_account(name) -> str:
     return f"{local[:1]}***@{domain}"
 
 
+def mask_code(code) -> str:
+    """A game code cut for the log, like Steam keys: the whole code is only in your notification."""
+    text = str(code or "").strip()
+    return f"{text[:5]}…" if text else ""
+
+
+def chrome_binary() -> str | None:
+    """The Chrome or Chromium the bot starts, None when neither is installed."""
+    import shutil
+
+    return (shutil.which("google-chrome-stable") or shutil.which("google-chrome")
+            or shutil.which("chromium-browser") or shutil.which("chromium"))
+
+
+def chrome_version(path: str | None = None) -> str:
+    """The full version of that browser, e.g. "155.0.8059.39", empty when it cannot tell."""
+    import subprocess
+
+    path = path or chrome_binary()
+    if not path:
+        return ""
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return ""
+    match = re.search(r"\d+\.\d+\.\d+\.\d+", out or "")
+    return match.group(0) if match else ""
+
+
 async def open_first_tab(browser, url: str = "about:blank", attempts: int = 10, delay: float = 1.0):
     """Hand back a usable tab, even when Chrome has not registered one yet (issue #38).
 
@@ -80,6 +106,65 @@ async def open_first_tab(browser, url: str = "about:blank", attempts: int = 10, 
         # "no browser is open": there is no window to put a tab in, so open one.
         logger.debug("New tab refused (%s), opening a window instead.", exc)
         return await browser.get(url, new_window=True)
+
+
+WHEEL_NOTCH = 120
+
+# A DLC whose base game you lack is told once, then again only if it is still free this many days later (#78).
+MISSING_BASE_REPEAT_DAYS = 21
+
+
+def missing_base_due(previous_status: str | None, reported_at: str | None, now: datetime | None = None,
+                     days: int = MISSING_BASE_REPEAT_DAYS) -> bool:
+    """True when a DLC without its base game is worth telling you about: new, newly in this state, or told weeks ago."""
+    if previous_status != "failed:missing_base" or not reported_at:
+        return True
+    try:
+        told = datetime.fromisoformat(str(reported_at))
+    except ValueError:
+        return True
+    if told.tzinfo is None:
+        told = told.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - told >= timedelta(days=days)
+
+
+def missing_base_status(due: bool) -> str:
+    """The summary status: shown when due, else "skipped:missing_base", which the summary always leaves out."""
+    return "failed:missing_base" if due else "skipped:missing_base"
+
+
+def track_missing_base(row, now: datetime | None = None, remember: bool = True) -> str:
+    """Mark a database row as a DLC without its base game and return its summary status, keeping when it was told."""
+    try:
+        extra = json.loads(row.extra or "{}")
+    except (TypeError, ValueError):
+        extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+    due = missing_base_due(row.status, extra.get("missing_base_reported"), now)
+    # A dry run shows it without using up the one report the real run will make.
+    if due and remember:
+        extra["missing_base_reported"] = (now or datetime.now(timezone.utc)).isoformat()
+        row.extra = json.dumps(extra)
+    row.status = "failed:missing_base"
+    return missing_base_status(due)
+
+
+def mouse_path(start: tuple, end: tuple, rng=random) -> list:
+    """The points a hand passes from start to end: a slight curve, slow at both ends, ending exactly on end."""
+    (sx, sy), (tx, ty) = start, end
+    steps = max(8, min(40, int(math.hypot(tx - sx, ty - sy) / 18)))
+    # One control point beside the straight line bends the path a little, a different way every time.
+    bend = rng.uniform(-0.25, 0.25)
+    cx = (sx + tx) / 2 - (ty - sy) * bend
+    cy = (sy + ty) / 2 + (tx - sx) * bend
+    points = []
+    for i in range(1, steps + 1):
+        t = i / steps
+        e = t * t * (3 - 2 * t)
+        points.append(((1 - e) ** 2 * sx + 2 * (1 - e) * e * cx + e * e * tx,
+                       (1 - e) ** 2 * sy + 2 * (1 - e) * e * cy + e * e * ty))
+    return points
 
 
 def filenamify(s: str) -> str:
@@ -138,9 +223,6 @@ class BaseClaimer:
     # Profile to reuse when a store rides another's session (Fab on Epic); empty means own profile.
     profile_name: str = ""
 
-    # Off by default: the hand-rolled desktop _STEALTH_JS mismatches the real container and triggered captchas (see CHANGELOG 1.4).
-    inject_base_stealth: bool = False
-
     @property
     def logger(self):
         return logging.getLogger(f"fgc.{self.store_name}")
@@ -155,91 +237,6 @@ class BaseClaimer:
     # Browser lifecycle
     # ------------------------------------------------------------------
 
-    # Stealth JS injected BEFORE every page load via CDP
-    # (addScriptToEvaluateOnNewDocument ensures it runs before any site JS)
-    _STEALTH_JS = """
-    // navigator.webdriver: only patch when truly true, and spoof false (real Chrome never reports undefined).
-    if (navigator.webdriver === true) {
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => false,
-        });
-    }
-
-    // All navigator spoofs use configurable:true so per-store modules can override them without a TypeError.
-    Object.defineProperty(navigator, 'plugins', {
-        configurable: true,
-        get: () => [
-            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
-            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-            { name: 'Native Client', filename: 'internal-nacl-plugin' },
-        ],
-    });
-
-    // --- Languages (sometimes empty in headless) ---
-    Object.defineProperty(navigator, 'languages', {
-        configurable: true,
-        get: () => ['en-US', 'en'],
-    });
-
-    // --- Hardware concurrency (must be realistic) ---
-    Object.defineProperty(navigator, 'hardwareConcurrency', {
-        configurable: true,
-        get: () => 4,
-    });
-
-    // --- Device memory (must be realistic) ---
-    Object.defineProperty(navigator, 'deviceMemory', {
-        configurable: true,
-        get: () => 8,
-    });
-
-    // --- Platform (must match a real desktop) ---
-    Object.defineProperty(navigator, 'platform', {
-        configurable: true,
-        get: () => 'Win32',
-    });
-
-    // --- WebGL vendor/renderer spoofing ---
-    // Epic's anti-bot checks WebGL capabilities; software renderers trigger captcha.
-    const _getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(param) {
-        // UNMASKED_VENDOR_WEBGL
-        if (param === 0x9245) return 'Google Inc. (NVIDIA)';
-        // UNMASKED_RENDERER_WEBGL
-        if (param === 0x9246) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-        return _getParameter.call(this, param);
-    };
-    if (typeof WebGL2RenderingContext !== 'undefined') {
-        const _getParameter2 = WebGL2RenderingContext.prototype.getParameter;
-        WebGL2RenderingContext.prototype.getParameter = function(param) {
-            if (param === 0x9245) return 'Google Inc. (NVIDIA)';
-            if (param === 0x9246) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-            return _getParameter2.call(this, param);
-        };
-    }
-
-    // --- Disable passkeys (prevents passkey dialogs blocking login) ---
-    if (navigator.credentials) {
-        navigator.credentials.create = async () => Promise.reject(
-            new Error('Passkeys disabled')
-        );
-        navigator.credentials.get = async () => Promise.reject(
-            new Error('Passkeys disabled')
-        );
-    }
-
-    // --- Permissions API (hide "denied" automation fingerprint) ---
-    const _query = window.Permissions?.prototype?.query;
-    if (_query) {
-        window.Permissions.prototype.query = function(params) {
-            if (params?.name === 'notifications') {
-                return Promise.resolve({ state: Notification.permission });
-            }
-            return _query.call(this, params);
-        };
-    }
-    """
-
     async def start_browser(
         self,
         *,
@@ -253,8 +250,6 @@ class BaseClaimer:
                            (Epic needs this to avoid captcha).
             extra_args: Additional Chromium flags.
         """
-        import shutil
-
         # Ensure persistent browser profile directory exists (per store)
         store_browser_dir = cfg.browser_dir / (self.profile_name or self.store_name)
         store_browser_dir.mkdir(parents=True, exist_ok=True)
@@ -302,13 +297,7 @@ class BaseClaimer:
         # Remove stale singleton lock files that a crashed instance leaves behind (session data untouched).
         self._clear_profile_locks(store_browser_dir)
 
-        # Auto-detect chrome binary
-        chrome_path = (
-            shutil.which("google-chrome-stable")
-            or shutil.which("google-chrome")
-            or shutil.which("chromium-browser")
-            or shutil.which("chromium")
-        )
+        chrome_path = chrome_binary()
         self.logger.debug("Chrome: %s", chrome_path)
 
         headless = False if force_headful else (not cfg.show)
@@ -363,13 +352,14 @@ class BaseClaimer:
         launch_error: Exception | None = None
         for attempt in range(1, 4):
             try:
-                self.browser = await uc.start(
-                    headless=headless,
-                    sandbox=False,  # required when running as root in Docker
-                    browser_executable_path=chrome_path,
-                    browser_args=args,
-                    user_data_dir=str(store_browser_dir),
-                )
+                with chrome_timezone():
+                    self.browser = await uc.start(
+                        headless=headless,
+                        sandbox=False,  # required when running as root in Docker
+                        browser_executable_path=chrome_path,
+                        browser_args=args,
+                        user_data_dir=str(store_browser_dir),
+                    )
                 self.logger.debug("Chrome started (headless=%s, profile=%s, extra args=%s)",
                                   headless, store_browser_dir, extra_args or [])
                 # A missing first tab is a launch failure too, so it gets the same sweep and retry.
@@ -394,29 +384,11 @@ class BaseClaimer:
                 f"Chrome failed to start after 3 attempts (a container restart may help): {launch_error}"
             ) from launch_error
 
-        # --- Inject stealth patches via CDP (runs BEFORE any page JS) ---
-        # Unlike page.evaluate(), addScriptToEvaluateOnNewDocument ensures
-        # our patches are active when the WAF/anti-bot first evaluates the
-        # browser fingerprint on navigation.
+        # Store scripts added later (AliExpress) need the Page domain on, or they are silently ignored.
         try:
-            # Page domain MUST be enabled first, else addScriptToEvaluateOnNewDocument is silently ignored.
             await self.page.send(uc.cdp.page.enable())
-            if self.inject_base_stealth:
-                await self.page.send(
-                    uc.cdp.page.add_script_to_evaluate_on_new_document(
-                        source=self._STEALTH_JS,
-                    )
-                )
-                self.logger.debug("Stealth JS injected via CDP.")
-            else:
-                self.logger.debug(
-                    "Base stealth JS skipped (store injects its own fingerprint)."
-                )
-        except Exception:
-            # Fallback: inject directly on current page
-            self.logger.debug("CDP injection failed, using evaluate fallback.")
-            if self.inject_base_stealth:
-                await self.page.evaluate(self._STEALTH_JS)
+        except Exception as e:
+            self.logger.debug("Page.enable failed: %s", e)
 
         self.log_browser_ready()
         return self.browser
@@ -697,13 +669,66 @@ class BaseClaimer:
     # The last code sent from an authenticator secret, so a retry never repeats it.
     _last_totp: str = ""
 
+    # Where the cursor was left, so the next move starts there the way a real pointer does.
+    _mouse_xy: tuple = ()
+
+    async def _move_mouse(self, tx: int, ty: int) -> None:
+        """Move the cursor to (tx, ty) along a curve from where it was, in whole pixels like a real mouse."""
+        if self._mouse_xy:
+            sx, sy = self._mouse_xy
+        else:
+            try:
+                vw, vh = json.loads(await self.page.evaluate("JSON.stringify([innerWidth, innerHeight])"))
+            except Exception:
+                vw, vh = 1280, 720
+            sx, sy = random.uniform(0.2, 0.8) * vw, random.uniform(0.2, 0.8) * vh
+        last = None
+        for px, py in mouse_path((sx, sy), (tx, ty)):
+            point = (round(px), round(py))
+            if point == last:
+                continue
+            last = point
+            await self.page.send(uc.cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=point[0], y=point[1]))
+            await asyncio.sleep(random.uniform(0.006, 0.02))
+        self._mouse_xy = (tx, ty)
+
+    async def _wheel_scroll(self, x: float, y: float, dy: float) -> None:
+        """Scroll by about dy pixels with the mouse wheel over (x, y), notch by notch at a hand's uneven pace."""
+        x, y = round(x), round(y)
+        await self._move_mouse(x, y)
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+        # A real wheel under TurboVNC gives exactly 120 px a notch (measured with xdotool on 2026-10-11).
+        notch = int(math.copysign(WHEEL_NOTCH, dy))
+        for _ in range(max(1, round(abs(dy) / WHEEL_NOTCH))):
+            await self.page.send(uc.cdp.input_.dispatch_mouse_event(
+                type_="mouseWheel", x=x, y=y, delta_x=0, delta_y=notch))
+            await asyncio.sleep(random.uniform(0.06, 0.18))
+        # Smooth scrolling keeps moving for a moment after the last notch.
+        await asyncio.sleep(random.uniform(0.3, 0.5))
+
+    async def _human_click(self, x: float, y: float, w: float = 0, h: float = 0) -> None:
+        """Click a box centred on (x, y) like a hand: a curved move to a random spot of it, then an uneven press."""
+        # A real mouse reports whole pixels and a pressure of 0.5 while pressed; CDP sends fractions and 0 otherwise.
+        tx = round(x + random.uniform(-0.3, 0.3) * w)
+        ty = round(y + random.uniform(-0.3, 0.3) * h)
+        await self._move_mouse(tx, ty)
+        await asyncio.sleep(random.uniform(0.08, 0.25))
+        left = uc.cdp.input_.MouseButton("left")
+        await self.page.send(uc.cdp.input_.dispatch_mouse_event(
+            type_="mousePressed", x=tx, y=ty, button=left, click_count=1, force=0.5))
+        await asyncio.sleep(random.uniform(0.05, 0.14))
+        await self.page.send(uc.cdp.input_.dispatch_mouse_event(
+            type_="mouseReleased", x=tx, y=ty, button=left, click_count=1))
+        self._mouse_xy = (tx, ty)
+
     async def _fresh_totp(self, secret: str, previous: str = "") -> str:
         """A code from the authenticator secret, never the same one twice in a row.
 
         Codes come from 30-second windows, so a refused code stays refused until the window
         turns over. Waiting for a new one is what makes a second attempt worth making.
         """
-        totp = pyotp.TOTP(secret)
+        # Sites show the key in groups of four, and pyotp refuses the spaces (TODO 44).
+        totp = pyotp.TOTP("".join(str(secret or "").split()).upper())
         code = totp.now()
         waited = 0
         while previous and code == previous and waited < 35:
@@ -816,6 +841,14 @@ class BaseClaimer:
             return bool(await self.page.evaluate(CHALLENGE_JS))
         except Exception:
             return False
+
+    async def _page_brief(self) -> str:
+        """The page's address and title, for a debug line about a page the bot could not read."""
+        try:
+            # No query string: a redirect can carry an e-mail address there.
+            return str(await self.page.evaluate("location.origin + location.pathname + ' (' + document.title + ')'"))[:160]
+        except Exception as e:
+            return f"unreadable page ({e})"
 
     async def _wait_out_challenge(self, label: str, settle: int = 12, store_key: str | None = None,
                                   present_fn=None) -> bool:

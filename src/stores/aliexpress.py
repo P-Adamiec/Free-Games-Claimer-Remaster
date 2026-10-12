@@ -11,21 +11,27 @@ import json
 import logging
 import random
 import re
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import nodriver as uc
 
 from browserforge.fingerprints import FingerprintGenerator
 from browserforge.injectors.utils import InjectFunction
 
-from src.core.claimer import BaseClaimer
+from src.core.claimer import BaseClaimer, chrome_version
 from src.core.config import cfg
+from src.core.run_state import next_run, run_started
+from src.core.url_security import url_has_allowed_host
 
 logger = logging.getLogger("fgc.aliexpress")
 
 URL_LOGIN = "https://www.aliexpress.com/p/ug-login-page/login.html?fromMsite=true"
-URL_COINS = "https://m.aliexpress.com/p/coin-index/index.html"
-URL_HOME = "https://www.aliexpress.com/"
-URL_MHOME = "https://m.aliexpress.com/"
+COIN_PATH = "/p/coin-index/index.html"
+
+# A country account's global coin page redirects to its home; its coins live on m.<site> (#73).
+SITE_CACHE = "fgc_site.json"
 
 # Coin balance comes from this mtop API (the DOM shows only animated digits).
 COIN_API_PREFIX = "https://acs.aliexpress.com/h5/mtop.aliexpress.coin.execute/"
@@ -60,6 +66,59 @@ _COIN_CAPTURE_JS = r"""
 # Filename (inside the AliExpress browser profile dir) where the generated
 # Android fingerprint is cached so the bot presents the SAME device every day.
 FINGERPRINT_CACHE = "fgc_fingerprint.json"
+
+
+def chrome_grease_brands(major: int, full: str) -> tuple[list, list]:
+    """Chrome's brand lists for a version; the made-up "Not…Brand" entry and the order follow Chromium's own rule."""
+    chars = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"]
+    grease = (f"Not{chars[major % 11]}A{chars[(major + 1) % 11]}Brand", ["8", "99", "24"][major % 3])
+    order = [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)][major % 6]
+    slots, full_slots = [None] * 3, [None] * 3
+    for place, (brand, short, long) in zip(order, [(grease[0], grease[1], f"{grease[1]}.0.0.0"),
+                                                 ("Chromium", str(major), full),
+                                                 ("Google Chrome", str(major), full)]):
+        slots[place] = {"brand": brand, "version": short}
+        full_slots[place] = {"brand": brand, "version": long}
+    return slots, full_slots
+
+
+def with_chrome_version(fp: dict, full: str) -> dict:
+    """The same phone with the Chrome version the browser really runs, in its UA, client hints and script alike."""
+    match = re.fullmatch(r"(\d+)\.\d+\.\d+\.\d+", str(full or ""))
+    md = dict(fp.get("ua_metadata") or {})
+    old_full = str(md.get("uaFullVersion") or "")
+    if not match or not old_full or old_full == full:
+        return fp
+    major, old_major = int(match.group(1)), old_full.split(".", 1)[0]
+    brands, full_list = chrome_grease_brands(major, full)
+    ua = re.sub(rf"Chrome/{old_major}\.0\.0\.0", f"Chrome/{major}.0.0.0", fp["ua"])
+    js = re.sub(rf"Chrome/{old_major}\.0\.0\.0", f"Chrome/{major}.0.0.0", fp["inject_js"])
+    js = js.replace(f'"uaFullVersion": "{old_full}"', f'"uaFullVersion": "{full}"')
+    js = re.sub(r'"brands": \[[^\]]*\]', lambda m: '"brands": ' + json.dumps(brands), js)
+    js = re.sub(r'"fullVersionList": \[[^\]]*\]', lambda m: '"fullVersionList": ' + json.dumps(full_list), js)
+    header = ", ".join(f'"{b["brand"]}";v="{b["version"]}"' for b in brands)
+    js = re.sub(r'"sec-ch-ua": "(?:[^"\\]|\\.)*"', lambda m: '"sec-ch-ua": ' + json.dumps(header), js)
+    # A phone moved only halfway is worse than an old one, so anything left behind keeps the old bundle.
+    stale = [f"Chrome/{old_major}.", f'"version": "{old_major}"', f'v=\\"{old_major}\\"'] if old_major != str(major) else []
+    if any(s in js + ua for s in [old_full] + stale):
+        return fp
+    md.update(brands=brands, fullVersionList=full_list, uaFullVersion=full)
+    return {**fp, "ua": ua, "ua_metadata": md, "inject_js": js}
+
+
+def aliexpress_country_site(url: str) -> str:
+    """The country site a coin page load was sent to ("it" for it.aliexpress.com), empty for the global one."""
+    url = str(url or "")
+    if not url_has_allowed_host(url, "aliexpress.com", allow_subdomains=True):
+        return ""
+    match = re.fullmatch(r"([a-z]{2})\.aliexpress\.com", (urlsplit(url).hostname or "").lower())
+    return match.group(1) if match else ""
+
+
+def aliexpress_mobile_url(site: str, path: str = "/") -> str:
+    """The mobile address on a country site, or on the global m.aliexpress.com when there is none."""
+    return f"https://m.{site}.aliexpress.com{path}" if site else f"https://m.aliexpress.com{path}"
+
 
 # Field names the check-in APIs use for the day streak and tomorrow's reward.
 # Deliberately strict: showing the wrong number is worse than showing none, so a
@@ -252,11 +311,75 @@ def today_from_payloads(payloads) -> dict:
     return out
 
 
+def day_start_from_payloads(payloads) -> int | None:
+    """When today's check-in day began (ms), from the calendar's node for today; None when the API did not say."""
+    for payload in payloads or []:
+        if "sign.list" not in str((payload or {}).get("api") or ""):
+            continue
+        try:
+            data = (json.loads(payload["body"]).get("data") or {}).get("data") or {}
+            nodes = [n for seq in (data.get("signQuerySequenceNodeList") or [])
+                     for n in (seq.get("dailySignNodeList") or [])]
+        except Exception:
+            continue
+        for node in nodes:
+            if node.get("calendarDayDistance") == 0 and _as_int(node.get("calendarDayStartTimeMill")):
+                return _as_int(node.get("calendarDayStartTimeMill"))
+    return None
+
+
+# The check-in day turns at midnight in California: the calendar's day starts read 07:00 UTC in October 2026.
+AE_DAY_ZONE = ZoneInfo("America/Los_Angeles")
+
+
+def ae_day_end(day_start_ms: int | None, now: datetime) -> datetime:
+    """When today's AliExpress check-in day ends: its start in the API plus a day, else the next midnight in California."""
+    if day_start_ms:
+        # A day is added on California's clock, so the day the clocks change ends at midnight too.
+        end = (datetime.fromtimestamp(day_start_ms / 1000, tz=AE_DAY_ZONE) + timedelta(days=1)).astimezone(timezone.utc)
+        if end > now:
+            return end
+    local = now.astimezone(AE_DAY_ZONE)
+    midnight = datetime(local.year, local.month, local.day, tzinfo=AE_DAY_ZONE) + timedelta(days=1)
+    return midnight.astimezone(timezone.utc)
+
+
+def retry_later(next_run_at: datetime | None, day_start_ms: int | None = None, now: datetime | None = None,
+                started: datetime | None = None, spare_hours: int = 2) -> bool:
+    """True when the next run reaches the check-in with hours of today left, so a miss now is not the last chance.
+
+    A trigger due while this run still works is dropped by the scheduler, so it does not count.
+    """
+    if next_run_at is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    if next_run_at <= now + timedelta(minutes=20):
+        return False
+    # The next run gets to AliExpress as late into it as this one did.
+    reach = now - started if started and started <= now else timedelta(0)
+    return next_run_at + reach <= ae_day_end(day_start_ms, now) - timedelta(hours=spare_hours)
+
+
+def signed_in_from_payloads(payloads) -> bool | None:
+    """True when the coin API answered with this account's check-in calendar, None when it did not say."""
+    for payload in payloads or []:
+        payload = payload or {}
+        if "sign.list" not in str(payload.get("api") or ""):
+            continue
+        try:
+            data = (json.loads(payload["body"]).get("data") or {}).get("data") or {}
+            nodes = [n for seq in (data.get("signQuerySequenceNodeList") or [])
+                     for n in (seq.get("dailySignNodeList") or [])]
+        except Exception:
+            continue
+        if nodes:
+            return True
+    # Never "signed out": that is only the login form's call to make.
+    return None
+
+
 class AliExpressClaimer(BaseClaimer):
     store_name = "aliexpress"
-
-    # Ships its own full browserforge fingerprint, so the desktop base stealth must NOT layer on top.
-    inject_base_stealth = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -264,6 +387,7 @@ class AliExpressClaimer(BaseClaimer):
         self._user_coins: int | None = None
         self._coin_reqs: dict = {}  # requestId -> url, for coin/check-in mtop responses
         self._coin_payloads: list[dict] = []  # flattened coin/check-in responses (streak, tomorrow, balance)
+        self._site = self._load_site()
 
     async def run(self) -> None:
         """Main entry point for the AliExpress daily check-in flow."""
@@ -274,7 +398,7 @@ class AliExpressClaimer(BaseClaimer):
 
             # Step 2: warm up on the mobile home with organic activity before touching anything sensitive.
             self.logger.debug("Warming up session on mobile home page...")
-            await self.page.get(URL_MHOME)
+            await self.page.get(aliexpress_mobile_url(self._site))
             await self._human_pause(3, 6)
             await self._dismiss_cookie_banner()
             await self._simulate_human_activity()
@@ -288,7 +412,7 @@ class AliExpressClaimer(BaseClaimer):
             if await self._is_logged_in():
                 self.log_signed_in(cfg.ae_email or "AliExpress User")
             else:
-                self.logger.info("Not logged in (login form shown on coin page) – authenticating...")
+                self.logger.info("Not signed in on the coin page – signing in...")
                 if not await self._ensure_logged_in():
                     logger.error("Aborting AliExpress flow due to login failure.")
                     return
@@ -369,19 +493,11 @@ class AliExpressClaimer(BaseClaimer):
         except Exception as e:
             self.logger.debug("CDP emulation override exception: %s", e)
 
-        # Block app-scheme requests (aliexpress://, intent://…) that pop 'Open xdg-open?' dialogs.
+        # Network events feed the coin listener; app-scheme dialogs are stopped by Chrome's policy and _APP_BLOCK_JS.
         try:
             await self.page.send(uc.cdp.network.enable())
-            await self.page.send(uc.cdp.network.set_blocked_urls(urls=[
-                "*aliexpress://*", "*aliexpresshd://*", "*aecmd://*", "*alibaba://*",
-                "*intent://*", "*market://*", "*android-app://*",
-                "*alipay://*", "*alipays://*", "*tmall://*", "*taobao://*",
-                "aliexpress:*", "aliexpresshd:*", "aecmd:*", "alibaba:*",
-                "intent:*", "market:*", "android-app:*",
-                "alipay:*", "alipays:*", "tmall:*", "taobao:*",
-            ]))
         except Exception as e:
-            self.logger.debug("CDP set_blocked_urls exception: %s", e)
+            self.logger.debug("CDP network.enable exception: %s", e)
 
         # Inject fingerprint + app-block + coin-capture at document-start (Page.enable first, else it's a no-op).
         try:
@@ -426,7 +542,7 @@ class AliExpressClaimer(BaseClaimer):
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and data.get("inject_js") and data.get("ua"):
                     self.logger.debug("Loaded cached AliExpress fingerprint (%s).", data.get("ua"))
-                    return data
+                    return self._match_chrome(data, cache_path)
         except Exception as e:
             self.logger.debug("Fingerprint cache read failed (%s), regenerating.", e)
 
@@ -455,6 +571,8 @@ class AliExpressClaimer(BaseClaimer):
             # The full navigator/screen/WebGL override script for this device.
             "inject_js": InjectFunction(fp),
         }
+        # browserforge's newest phone can be versions behind the Chrome in this image.
+        data = with_chrome_version(data, chrome_version())
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps(data), encoding="utf-8")
@@ -462,6 +580,22 @@ class AliExpressClaimer(BaseClaimer):
         except Exception as e:
             self.logger.debug("Fingerprint cache write failed: %s", e)
         return data
+
+    def _match_chrome(self, data: dict, cache_path) -> dict:
+        """The cached phone after a Chrome update, saved so every later run shows the same one."""
+        full = chrome_version()
+        moved = with_chrome_version(data, full)
+        if moved is data:
+            if full and full != data.get("ua_metadata", {}).get("uaFullVersion"):
+                self.logger.debug("Could not move the AliExpress phone to Chrome %s, keeping it as it was.", full)
+            return data
+        self.logger.debug("AliExpress phone moved from Chrome %s to %s.",
+                          data.get("ua_metadata", {}).get("uaFullVersion"), full)
+        try:
+            cache_path.write_text(json.dumps(moved), encoding="utf-8")
+        except Exception as e:
+            self.logger.debug("Fingerprint cache write failed: %s", e)
+        return moved
 
     # ------------------------------------------------------------------
     # Coin-balance API interception
@@ -522,46 +656,51 @@ class AliExpressClaimer(BaseClaimer):
         except Exception as e:
             self.logger.debug("Coin API body parse failed: %s", e)
 
-    async def _read_coin_api(self) -> None:
-        """Read coin/check-in mtop responses captured in-page by _COIN_CAPTURE_JS.
+    async def _read_coin_api(self, quiet: bool = False) -> list[dict]:
+        """Keep the coin/check-in responses this page captured (window.__fgcCoin) and return them.
 
-        Sets the wallet balance (userCoinsNum) and keeps every payload flattened in
-        ``self._coin_payloads`` so the streak / tomorrow fields can be read from the
-        API instead of the animated DOM. Must be called while still on the coin page
-        (window.__fgcCoin resets on navigation).
+        Must run while still on the coin page: window.__fgcCoin resets on navigation. ``quiet`` skips the diagnostics.
         """
+        here: list[dict] = []
         try:
             raw = await self.page.evaluate("JSON.stringify(window.__fgcCoin || [])")
             items = json.loads(raw) if isinstance(raw, str) else []
         except Exception as e:
             self.logger.debug("Coin capture read failed: %s", e)
-            return
+            return here
         if not items:
-            self.logger.debug("🔬 Coin API: nothing captured by in-page interceptor.")
-            return
+            if not quiet:
+                self.logger.debug("🔬 Coin API: nothing captured by in-page interceptor.")
+            return here
         for it in items:
             url = it.get("url", "")
             body = it.get("body", "")
             try:
                 payload = json.loads(body)
             except Exception:
-                self.logger.debug("🔬 Coin API (non-JSON): url=%s body=%s", url, body[:200])
+                if not quiet:
+                    self.logger.debug("🔬 Coin API (non-JSON): url=%s body=%s", url, body[:200])
                 continue
             api = payload.get("api") if isinstance(payload, dict) else None
             fields = _flatten_payload(payload.get("data") if isinstance(payload, dict) else payload)
+            if fields:
+                here.append({"api": api or url, "url": url, "fields": fields, "body": body})
             # __fgcCoin keeps every response, so the same one is re-read on the next call.
             if fields and not any(p["api"] == (api or url) and p["body"] == body for p in self._coin_payloads):
                 self._coin_payloads.append({"api": api or url, "url": url, "fields": fields, "body": body})
-            self.logger.debug(
-                "🔬 Coin API: api=%s fields=%s",
-                api,
-                json.dumps(fields, ensure_ascii=False, default=str)[:1500],
-            )
+            if not quiet:
+                self.logger.debug(
+                    "🔬 Coin API: api=%s fields=%s",
+                    api,
+                    json.dumps(fields, ensure_ascii=False, default=str)[:1500],
+                )
             coins = _as_int(_field_by_leaf(fields, "userCoinsNum"))
             if coins is not None and self._user_coins is None:
                 self._user_coins = coins
                 self.logger.debug("🪙 Wallet balance (userCoinsNum): %s", self._user_coins)
-        self._dump_coin_payloads()
+        if not quiet:
+            self._dump_coin_payloads()
+        return here
 
     def _dump_coin_payloads(self) -> None:
         """Write the captured check-in/coin responses to data/ae_coin_api.json (last run only)."""
@@ -749,7 +888,37 @@ class AliExpressClaimer(BaseClaimer):
             url = ""
         if "/p/coin-index/" not in url:
             self.logger.debug("Organic tap did not reach the coin page (url=%s), loading it directly", url or "?")
-            await self.page.get(URL_COINS)
+            await self._load_coin_page()
+
+    def _load_site(self) -> str:
+        """The country site remembered from an earlier run, empty for the global one."""
+        try:
+            data = json.loads((cfg.browser_dir / self.store_name / SITE_CACHE).read_text(encoding="utf-8"))
+            site = str(data.get("site") or "")
+            return site if re.fullmatch(r"[a-z]{2}", site) else ""
+        except Exception:
+            return ""
+
+    async def _load_coin_page(self) -> None:
+        """Load the coin page, following a country account from its desktop site to that site's mobile coins."""
+        await self.page.get(aliexpress_mobile_url(self._site, COIN_PATH))
+        await self._human_pause(2, 4)
+        url = str(await self.page.evaluate("window.location.href") or "")
+        site = aliexpress_country_site(url)
+        if not site or site == self._site or "/p/coin-index/" in url:
+            return
+        self.logger.debug("Coin page went to %s, so this account uses the %s site.", url, site)
+        self._site = site
+        try:
+            path = cfg.browser_dir / self.store_name / SITE_CACHE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"site": site}), encoding="utf-8")
+        except Exception as e:
+            self.logger.debug("Could not remember the AliExpress site: %s", e)
+        # The country's mobile home first, so the coin page is not a cold jump.
+        await self.page.get(aliexpress_mobile_url(site))
+        await self._human_pause(3, 6)
+        await self.page.get(aliexpress_mobile_url(site, COIN_PATH))
 
     async def _diagnose_page(self) -> None:
         """Log what an anti-bot layer can observe. Diagnostic aid while tuning stealth.
@@ -812,29 +981,19 @@ class AliExpressClaimer(BaseClaimer):
     # ------------------------------------------------------------------
 
     async def _is_logged_in(self) -> bool:
-        """Return True only on a POSITIVE logged-in signal.
+        """True only on a positive signal: the coin API answered for this account, or a known label; a login form means no.
 
-        AliExpress renders its login form INLINE on the coin URL (the URL stays
-        `/p/coin-index/index.html`) when the session is invalid, with a
-        'Kontynuuj'/'Continue' button rather than 'Sign in'. The old check
-        defaulted to "logged in" for any aliexpress.com URL that wasn't
-        literally `/login`, so it false-positived on that inline form (and on
-        the logged-out home page) and skipped login entirely. This version
-        detects the login form explicitly and, when uncertain, returns False so
-        login is attempted, a false negative self-corrects because login.html
-        just redirects away when we're already signed in.
+        Uncertain means no, so login is attempted; login.html redirects straight back when the session is valid.
         """
         try:
-            res = await self.page.evaluate(r"""
+            raw = await self.page.evaluate(r"""
                 (() => {
                     const url = window.location.href.toLowerCase();
                     const text = (document.body ? (document.body.textContent || '') : '').toLowerCase();
                     const visible = (el) => !!el && el.offsetParent !== null;
 
-                    // Explicit login page URL
-                    if (url.includes('/login') || url.includes('login.html') || url.includes('ug-login-page')) return false;
-
-                    // Inline login form (email/phone input, or a welcome prompt + Continue/Sign-in button).
+                    // Login page, or the login form AliExpress renders inline on the coin URL when the session is gone.
+                    const onLoginPage = url.includes('/login') || url.includes('login.html') || url.includes('ug-login-page');
                     const hasLoginInput = !!document.querySelector(
                         'input[type="email"], input[placeholder*="mail" i], input[placeholder*="phone" i], input[placeholder*="telefon" i]'
                     );
@@ -842,28 +1001,27 @@ class AliExpressClaimer(BaseClaimer):
                     const hasLoginBtn = [...document.querySelectorAll('button, div[role="button"], a')].some(el =>
                         /^(kontynuuj|continue|log in|sign in|zaloguj( si[eę])?)$/i.test((el.textContent || '').trim()) && visible(el)
                     );
-                    if (hasLoginInput || (loginPrompt && hasLoginBtn)) return false;
+                    const loginForm = onLoginPage || hasLoginInput || (loginPrompt && hasLoginBtn);
 
-                    // Positive authenticated coin-page signals
-                    if (/day streak|seria|coins tomorrow|check-in coins|monety za zameldowanie|moje monety|earn more coins|zdob[aą]d[źz] wi[eę]cej/i.test(text)) return true;
-
-                    // A visible Collect / check-in button also implies an authenticated coin page
-                    const collectBtn = [...document.querySelectorAll('button, div[role="button"], span, a')].some(el =>
-                        /^(collect|odbierz|check[- ]?in|zamelduj)/i.test((el.textContent || '').trim()) && visible(el)
-                    );
-                    if (collectBtn) return true;
-
-                    // Signed-in store homepage: only sign-out / "My AliExpress" labels (never "my orders"/"wishlist", which show logged-out too).
-                    if (location.hostname.toLowerCase().endsWith('aliexpress.com') &&
-                        /wyloguj|sign out|log out|moje aliexpress|my aliexpress/i.test(text)) {
-                        return true;
-                    }
-
-                    // Uncertain → treat as NOT logged in so authentication is attempted.
-                    return false;
+                    // Known labels: coin-page words, a Collect / check-in button, or the signed-in store header.
+                    const known = /day streak|seria|coins tomorrow|check-in coins|monety za zameldowanie|moje monety|earn more coins|zdob[aą]d[źz] wi[eę]cej/i.test(text)
+                        || [...document.querySelectorAll('button, div[role="button"], span, a')].some(el =>
+                            /^(collect|odbierz|raccogli|check[- ]?in|zamelduj)/i.test((el.textContent || '').trim()) && visible(el))
+                        || (location.hostname.toLowerCase().endsWith('aliexpress.com') &&
+                            /wyloguj|sign out|log out|moje aliexpress|my aliexpress/i.test(text));
+                    return JSON.stringify({loginForm, known});
                 })()
             """)
-            return bool(res)
+            state = json.loads(raw) if isinstance(raw, str) else {}
+            if state.get("loginForm"):
+                self.logger.debug("Login check: login form on the page.")
+                return False
+            # This page's own coin API answered with the account's check-in calendar: signed in, in any language.
+            if signed_in_from_payloads(await self._read_coin_api(quiet=True)):
+                self.logger.debug("Signed in according to the coin API.")
+                return True
+            self.logger.debug("Login check: no calendar from the coin API, known labels: %s", bool(state.get("known")))
+            return bool(state.get("known"))
         except Exception as e:
             self.logger.debug("Error checking login state: %s", e)
             return False
@@ -1219,7 +1377,7 @@ class AliExpressClaimer(BaseClaimer):
                     const els = [...document.querySelectorAll('button, div[role="button"], span, a, div')];
                     // Match only real check-in button labels like "Collect", "Collect 70",
                     // "Odbierz monety" – NOT promo texts like "Odbierz kupon 5$".
-                    const collectRe = /^(collect|odbierz|claim|check[- ]?in|zamelduj si[eę])(\s+\+?\d+)?(\s+(coins?|monet\w*))?$/i;
+                    const collectRe = /^(collect|odbierz|raccogli|claim|check[- ]?in|zamelduj si[eę])(\s+\+?\d+)?(\s+(coins?|monet\w*))?$/i;
                     const earnRe = /^(earn more coins|zdob[aą]d[źz] wi[eę]cej)/i;
 
                     let btnText = null;
@@ -1443,24 +1601,32 @@ class AliExpressClaimer(BaseClaimer):
             parts.append(f"balance {total:,} 🪙")
         return ", ".join(parts)
 
+    def _leave_to_next_run(self, why: str) -> bool:
+        """When a later run can still collect today, say so quietly instead of raising the alarm."""
+        upcoming = next_run()
+        if not retry_later(upcoming, day_start_from_payloads(self._coin_payloads), started=run_started()):
+            return False
+        try:
+            shown = upcoming.astimezone(ZoneInfo(cfg.scheduler_timezone))
+        except Exception:
+            shown = upcoming.astimezone(timezone.utc)
+        self.logger.info("Not collected this run (%s); the next run at %s still has today's AliExpress day "
+                         "ahead of it, so it tries again.", why, shown.strftime("%H:%M %Z"))
+        self._report("skipped, next run tries again ⏳")
+        return True
+
     def _report(self, status: str) -> None:
         """Append the AliExpress check-in result to the notification list."""
         self.notify_games.append({
             "title": "AliExpress Daily Check-in",
-            "url": URL_COINS,
+            "url": aliexpress_mobile_url(self._site, COIN_PATH),
             "status": status,
         })
 
     async def _rewarm_to_coins(self) -> None:
-        """Re-approach the coin page organically (home → activity → coins).
-
-        A cold `page.get(URL_COINS)` on every retry is exactly the kind of
-        cold-jump-to-sensitive-URL that raises AliExpress' risk score. When we
-        retry a suspected bot-flag, we instead re-do the human-like warm-up that
-        earns a healthier trust score on the next coin-page load.
-        """
+        """Re-approach the coin page through home and some activity; a cold jump on retry raises the risk."""
         try:
-            await self.page.get(URL_MHOME)
+            await self.page.get(aliexpress_mobile_url(self._site))
             await self._human_pause(3, 6)
             await self._simulate_human_activity()
         except Exception as e:
@@ -1518,7 +1684,7 @@ class AliExpressClaimer(BaseClaimer):
         current_url = await self.page.evaluate("window.location.href")
         if "/p/coin-index/" not in str(current_url):
             self.logger.debug("Navigating to coins page to trigger daily check-in...")
-            await self.page.get(URL_COINS)
+            await self._load_coin_page()
             await self._human_pause(4, 7)
 
         await self._dismiss_overlays()
@@ -1540,12 +1706,14 @@ class AliExpressClaimer(BaseClaimer):
             health = await self._page_health()
 
         if page_is_dead(health):
+            await self._dump_failure_state()
+            if self._leave_to_next_run("the coin page did not render"):
+                return
             self.logger.error(
                 "AliExpress served an empty coin page (%s of %s characters rendered), so the check-in "
                 "could not be read this time. This comes and goes: the same page works in other runs. "
                 "Collect in the mobile app if it keeps happening.",
                 health.get("innerTextLen"), health.get("textContentLen"))
-            await self._dump_failure_state()
             self._report("failed, the coin page did not render 🚫")
             return
 
@@ -1606,7 +1774,7 @@ class AliExpressClaimer(BaseClaimer):
                 await self.sleep(wait_s)
                 await self._rewarm_to_coins()
             else:
-                self.logger.error("🚫 Gave up after %d retries: %s.", attempts - 1, reason)
+                self.logger.warning("🚫 Gave up after %d retries: %s.", attempts - 1, reason)
 
         # --- Collect -------------------------------------------------------
         if collect_ready:
@@ -1653,6 +1821,8 @@ class AliExpressClaimer(BaseClaimer):
             # A collect button existed but the reward was capped at < min_coins:
             # a persistent bot-flag. Skip per user policy (never collect 1 coin).
             coins = state.get("todayCoins")
+            if self._leave_to_next_run("the check-in did not complete"):
+                return
             self.logger.error(
                 "🚫 Session flagged as low-trust: only %s coin(s) offered instead of the "
                 "full amount, NOT collecting (policy). Collect on your phone to keep the streak.", coins)
@@ -1662,6 +1832,8 @@ class AliExpressClaimer(BaseClaimer):
 
         # No button the bot can read, so hand over via VNC: the page is there,
         # only its labels are ones this parser does not know.
+        if self._leave_to_next_run("no check-in button was found"):
+            return
         self.logger.error("⚠️ AliExpress check-in widget did not render, offering manual VNC collection.")
 
         async def _collected_manually() -> bool:

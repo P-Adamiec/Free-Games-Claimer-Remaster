@@ -2,9 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project does not follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): every release raises the number after the dot (1.10, 1.11), and a development build carries the same number with a `d` suffix (`v1.11d`).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project does not follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): every release raises the number after the dot (1.10, 1.11), and a development build carries the same number with a `d` suffix (`v1.11d`). The version being worked on stays at the top without a date until it is released.
 
-## [Unreleased]
+## [1.13] - 2026-10-12
+
+### Added
+- **Legacy Games codes from Prime are redeemed for you** – set `LG_EMAIL`/`LG_PASSWORD` and `src/stores/legacygames.py`, on by default, signs in to your Legacy Games account and redeems Prime's codes in the same run, as they expire within days. Without them it only says how many codes wait. The newsletter stays unticked.
+- **The browser's time zone matches your IP address** – instead of UTC, `src/core/browser_timezone.py` gives Chrome the zone your IP address is in, asking ipapi.co (or ipwho.is), which sees your IP, on the first run and then monthly (`BROWSER_TIMEZONE_REFRESH` sets run, week or month). `TZ` or `BROWSER_TIMEZONE` picks one yourself, `off` keeps UTC.
+
+### Changed
+- **DLC without its base game is reported once, not every run ([#78](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/78))** – Steam now keeps these DLC in the database like Epic (`track_missing_base()` in `src/core/claimer.py`), and both list them once, then again every three weeks while they stay free. `NOTIFY_MISSING_BASE=false` still hides them for good.
+- **Epic's checkout is clicked like a hand** – `src/stores/epic.py` clicked the buttons in Epic's checkout frame by script, which a page can tell from a person. They are now real mouse clicks along a curve, a button off screen is reached with the mouse wheel, and every click is checked and made again if the page did not react.
+- **Library updates can no longer break the image on their own** – `requirements.txt` caps APScheduler, nodriver, httpx and SQLAlchemy below their next breaking version, so a rebuild cannot pull APScheduler 4, which drops the scheduler the bot uses. Dependabot still proposes each update.
+- **The tests run on GitHub too** – `.github/workflows/dependency-check.yml` now runs `python -m pytest tests/ -q` and starts on every change to `main.py`, `src/` or `tests/`, not only on dependency updates, so a pull request that breaks them shows a red check.
+
+### Removed
+- **The unused desktop stealth script** – `_STEALTH_JS` and `inject_base_stealth` in `src/core/claimer.py` had not run since 1.4, when they were switched off for causing captchas. They are gone, and so is the AliExpress URL blocking call that failed every run (`set_blocked_urls`). The bot does nothing differently.
+
+### Fixed
+- **AliExpress no longer raises the alarm when the next run can still collect** – an empty coin page, a capped reward or a missing button used to ask you to collect by hand at once. `src/stores/aliexpress.py` now leaves it to the next run when that run still has hours of AliExpress's day left.
+- **Itch.io no longer asks you to sign in when its page did not load ([#59](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/59))** – `_itch_session_ready()` in `src/stores/gamerpower.py` took any page without a logout link, even an error page, as signed out and asked you to sign in over VNC. It now loads itch.io again; if it still shows nothing, it marks the giveaway `failed:itch-unreachable` and tries next run.
+- **Prime stops when the sign-in fails ([#77](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/77))** – `_ensure_logged_in()` in `src/stores/prime.py` now says whether it worked. When nobody finishes the sign-in over VNC, the run ends with one message and a "Needed you" line in the summary instead of a "failed" line for every game; a session lost mid-run leaves the rest for the next run.
+- **A dry run no longer adds or redeems anything** – with `DRYRUN=true`, `_ensure_base_game()` in `src/stores/steam.py` still clicked "Add to Library" for a DLC's free base game, and `_redeem_gog_code()` in `src/stores/gog.py` redeemed Prime codes left from an earlier run. Both now stop before the click and list it as `available (dry run)`.
+- **Steam checks your library before it reports a claim** – `_claim_game()` and `_ensure_base_game()` in `src/stores/steam.py` reported "claimed" right after the click. They now reload the store page and report it only when Steam shows the game in your library, otherwise `failed:unconfirmed` with a screenshot.
+- **Epic never orders a game that costs money** – a product page that sells the game ("Buy Now", a price) went through Epic's old checkout like a giveaway, which could charge a saved card. `_claim_game()` in `src/stores/epic.py` now skips such a page, and `_handle_purchase_iframe()` orders only when the checkout total reads zero.
+- **A two-factor key pasted with spaces works** – `_fresh_totp()` in `src/core/claimer.py` refused a key copied in groups of four (`JBSW Y3DP …`) and the store stopped with an error. Spaces are now dropped, for every `*_OTP_KEY`.
+- **`RESET_DB_GAMES` keeps codes still to redeem** – it runs at every start and also erased Prime codes waiting for GOG, Microsoft or Legacy Games and Steam keys waiting for activation. `reset_recent_games()` in `main.py` now leaves those rows alone, and the README says to switch it off after one start.
+- **Steam stops when the sign-in fails** – `_ensure_logged_in()` in `src/stores/steam.py` now says whether it worked, like Prime's. When nobody finishes the sign-in over VNC, the run ends with one message and a "Needed you" line instead of a failure for every game, and waiting Steam keys stay queued.
+- **AliExpress's phone runs the Chrome the browser runs** – the saved phone (`fgc_fingerprint.json`) said Chrome 148 while the image runs Chrome 155, which a page can tell apart. `_load_or_make_fingerprint()` in `src/stores/aliexpress.py` now moves it to the real version in the user agent, client hints and script alike; the phone stays the same.
+- **The account in the summary no longer breaks its formatting** – the masked address (`p***@gmail.com`) put three asterisks into the notification, which Discord and Telegram read as bold, so the line turned bold and a stray `**` showed by the game. `main.py` now passes it through `markdown_safe()`, like game titles.
+
+### Security
+- **Game codes no longer appear whole in the log** – `src/stores/prime.py`, `src/stores/gog.py` and a debug line in `main.py` logged each Prime code in full, and logs end up in bug reports. The log now shows the first five characters, like Steam keys; the whole code stays in your notification and in `data/prime-gaming.json`.
+- **A missing VNC password is said out loud** – without `VNC_PASSWORD` anyone who reaches the noVNC port can use the browser and every store it is signed in to. `start-vnc.sh` now warns at every start, and the README explains it.
+
+## [1.12] - 2026-10-08
+
+### Added
+- **The container runs with a read-only filesystem ([#58](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/58))** – with `read_only: true` and `/tmp` as tmpfs, `docker-entrypoint.sh` no longer writes a user into `/etc` and keeps its home folder in `/tmp`, also with `PUID`. The README shows a hardened compose.
+- **The Fanatical newsletter is taken back out** – when a claim signs you up for Fanatical's newsletter, `_claim_fanatical_game()` in `src/stores/gamerpower.py` unsubscribes you again afterwards; a newsletter you already had stays. Set `FANATICAL_NEWSLETTER=true` to keep it, like `GOG_NEWSLETTER`.
+- **Fanatical fills in its two-factor code ([#75](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/75))** – set `FANATICAL_OTP_KEY` to the key Fanatical shows beside the QR code, and `src/stores/gamerpower.py` types the code and presses "Authenticate" instead of waiting for you over VNC. Without it nothing changes.
+- **A way to support the project** – the README has a Buy Me a Coffee button under "Support the project", and `.github/FUNDING.yml` puts a Sponsor button on the repository page. The bot stays free for everyone; support helps cover its costs and the time that goes into it.
+
+### Fixed
+- **Fanatical giveaways are claimed to the end ([#71](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/71))** – `_claim_fanatical_game()` in `src/stores/gamerpower.py` no longer takes a valid session for a logged-out one and finishes the free checkout; the key of the completed order is activated on Steam. Link Steam on Fanatical once: a giveaway that needs it shows as `failed:steam-not-linked`.
+- **Epic sign-in no longer ends on "Sign in with Apple" ([#72](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/72), PR [#74](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/pull/74) by @privatepenguinzero)** – `_press_sign_in()` in `src/stores/epic.py` lost its text search for "Sign in", which could pick the Apple link. Epic's and Fab's sign-in page lookups (`epic.py`, `epic_fab.py`) now use exact CSS selectors.
+- **AliExpress accounts on a country site work ([#73](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/73), PR [#74](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/pull/74) by @privatepenguinzero)** – `src/stores/aliexpress.py` notices when the coin page redirects to a country site such as it.aliexpress.com, remembers it in the browser profile and uses that country's mobile coin page next time. "Raccogli" now counts as the check-in button. No setting needed.
+- **AliExpress knows you are signed in, in any language ([#73](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/73))** – `_is_logged_in()` in `src/stores/aliexpress.py` now reads the check-in calendar the coin page loads for your account, so a page in Italian or any other language no longer sends the bot to the login page. The page's words stay as a fallback.
+- **A hardened container starts again after a hard stop ([#58](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/58))** – with `PUID` and `cap_drop: ALL`, `docker-entrypoint.sh` could not delete a profile lock Chrome left behind and the container restarted forever. It now leaves that lock to the bot, which clears it itself.
+- **Itch.io no longer asks you to sign in right after Cloudflare's check ([#59](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/59))** – `_itch_session_ready()` in `src/stores/gamerpower.py` looked for your session the moment the check cleared, while itch.io was still loading, and sent a needless "login needs you". It now asks again for a few seconds first.
 
 ## [1.11] - 2026-10-05
 
@@ -335,7 +381,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - ❌ `unrealengine.js` – Out of scope
 - ❌ `steam-games.js` – Only scraped profiles, never claimed games
 
-[unreleased]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.11...dev
+[1.13]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.12...v1.13
+[1.12]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.11...v1.12
 [1.11]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.10...v1.11
 [1.10]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.9...v1.10
 [1.9]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.8...v1.9

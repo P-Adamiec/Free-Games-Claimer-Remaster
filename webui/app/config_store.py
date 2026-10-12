@@ -68,7 +68,8 @@ def selected_stores(values: dict[str, str]) -> list[str]:
     if not raw:
         return list(schema.DEFAULT_STORES)
     aliases = {"ae": "aliexpress", "amazon": "prime", "ms": "microsoft", "xbox": "microsoft",
-               "itch": "itchio", "itch.io": "itchio", "awa": "alienware", "ubi": "ubisoft"}
+               "itch": "itchio", "itch.io": "itchio", "awa": "alienware", "ubi": "ubisoft",
+               "legacy": "legacygames", "legacy-games": "legacygames", "lg": "legacygames"}
     picked = {aliases.get(s.strip().lower(), s.strip().lower()) for s in raw.split(",")}
     return [k for k in schema.STORE_KEYS if k in picked]
 

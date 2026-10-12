@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 
 import httpx
 import nodriver as uc
-import pyotp
 
 from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
 from src.core.config import cfg

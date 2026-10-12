@@ -5,11 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-import pyotp
-import nodriver as uc
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, now_str
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, mask_code
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -17,6 +15,19 @@ from src.core.url_security import url_has_allowed_host
 logger = logging.getLogger("fgc.gog")
 
 URL_CLAIM = "https://www.gog.com/en"
+
+
+def is_gog_code(code: str, extra: str | None) -> bool:
+    """Tagged as GOG, or untagged and shaped like one (18 uppercase letters and digits); another store's code never is."""
+    try:
+        tag = str(json.loads(extra or "{}").get("external_store", "") or "").strip().lower()
+    except (TypeError, ValueError, AttributeError):
+        tag = ""
+    if "gog" in tag:
+        return True
+    code = str(code or "")
+    shaped = len(code) == 18 and code.isalnum() and code.isupper()
+    return shaped and tag in ("", "unknown")
 
 
 class GOGClaimer(BaseClaimer):
@@ -61,7 +72,6 @@ class GOGClaimer(BaseClaimer):
 
     async def _ensure_logged_in(self) -> bool:
         """Check if we are logged in to GOG. If not, try automatic login or wait for VNC."""
-        import json
         await self.sleep(3)  # Give GOG time to fully render the page
         
         # GOG shows a cookie consent popup (CookieBot) that blocks the page.
@@ -164,7 +174,6 @@ class GOGClaimer(BaseClaimer):
             await self.page.find("#login_username", timeout=15)
             await self.page.find("#login_login", timeout=5)
             
-            import json
             js_email = json.dumps(email)
             js_password = json.dumps(password)
 
@@ -504,26 +513,13 @@ class GOGClaimer(BaseClaimer):
         if old_games:
             logger.debug("Checking for pending GOG codes: %d total external codes in DB", len(old_games))
         
-        import json
         # Filter the results to only include GOG codes (not Legacy Games, Epic, etc.)
         gog_games = []
         for g in old_games:
-            is_gog = False
-            # Check the "extra" JSON field for the external store identifier
-            if g.extra:
-                try:
-                    ext_store = json.loads(g.extra).get("external_store", "")
-                    if "gog" in ext_store.lower():
-                        is_gog = True
-                except Exception:
-                    pass
-            
-            # A GOG code is either explicitly tagged as GOG, or matches the pattern:
-            # exactly 18 uppercase alphanumeric characters with no hyphens
-            if is_gog or (len(g.code) == 18 and "-" not in g.code and g.code.isalnum() and g.code.isupper()):
+            if is_gog_code(g.code, g.extra):
                 gog_games.append(g)
             else:
-                logger.debug("Skipped non-GOG code: '%s' code=%s extra=%s", g.title, g.code, g.extra)
+                logger.debug("Skipped non-GOG code: '%s' code=%s extra=%s", g.title, mask_code(g.code), g.extra)
 
         if not gog_games:
             # Silent exit if nothing to do
@@ -553,7 +549,7 @@ class GOGClaimer(BaseClaimer):
         # GOG has a direct redemption URL: gog.com/redeem/XXXXXXXXXXXXX
         # Force English locale via /en/ path to get predictable button labels
         redeem_url = f"https://www.gog.com/en/redeem/{code}"
-        logger.info("Redeeming GOG code for '%s' at %s", title, redeem_url)
+        logger.info("Redeeming GOG code %s for '%s'.", mask_code(code), title)
 
         try:
             await self.page.get(redeem_url)
@@ -568,7 +564,7 @@ class GOGClaimer(BaseClaimer):
                     return isinstance(cur, str) and "redeem" in cur
                 logged_in = await self._wait_for_vnc_login(_gog_logged_in)
                 if not logged_in:
-                    logger.warning("GOG login timed out – code not redeemed: %s", code)
+                    logger.warning("GOG login timed out – code not redeemed: %s", mask_code(code))
                     self.notify_games.append({"title": title, "url": url, "status": f"code: {code} (GOG, not redeemed)"})
                     return
 
@@ -594,6 +590,11 @@ class GOGClaimer(BaseClaimer):
                 })()
             """)
             await self.sleep(1)
+
+            if cfg.dryrun:
+                logger.info("DRYRUN – skipped redeeming '%s' on GOG.", title)
+                self.notify_games.append({"title": title, "url": redeem_url, "status": "available (dry run)"})
+                return
 
             # Click the "Continue" button on the redemption page.
             # We use JavaScript to find and click it because GOG has overlay elements
@@ -684,7 +685,7 @@ class GOGClaimer(BaseClaimer):
                 logger.warning("GOG still says the code for '%s' is being redeemed, it stays pending for the next run.",
                                title)
             else:
-                logger.warning("GOG redeem result unclear for '%s'. Code: %s", title, code)
+                logger.warning("GOG redeem result unclear for '%s'. Code: %s", title, mask_code(code))
                 self.notify_games.append({"title": title, "url": redeem_url, "status": f"code: {code} (GOG, check manually)"})
 
         except Exception:

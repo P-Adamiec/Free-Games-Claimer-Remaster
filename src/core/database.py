@@ -9,7 +9,7 @@ any redemption codes, and timestamps.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import String, DateTime, Text, func
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker

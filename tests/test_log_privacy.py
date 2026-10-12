@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from src.core.claimer import mask_account
+from src.core.claimer import mask_account, mask_code
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -94,9 +94,32 @@ class TestNoCodeReachesTheLog:
                 if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
                     assert "code" not in node.value.id.lower(), f"{path.name}: {ast.unparse(node)}"
 
+    @pytest.mark.parametrize("path", STORES + [ROOT / "main.py"], ids=lambda p: p.name)
+    def test_no_whole_game_code_is_logged(self, path):
+        # A pasted log is enough to lose an unused code; mask_code() keeps only its start (TODO 52).
+        for arg in self._logged_arguments(path.read_text(encoding="utf-8")):
+            bare = (isinstance(arg, ast.Name) and arg.id in ("code", "key", "notify_game")) or \
+                   (isinstance(arg, ast.Attribute) and arg.attr in ("code", "key", "notify_games"))
+            # A store's result entries carry Prime's codes in their statuses and links.
+            whole_results = ast.unparse(arg).endswith(".get('games')")
+            assert not bare and not whole_results, f"{path.name}: {ast.unparse(arg)}"
+
+    def test_a_game_code_keeps_only_its_start(self):
+        assert mask_code("ABCDE-FGHIJ-KLMNO") == "ABCDE…"
+        assert mask_code("") == mask_code(None) == mask_code("  ") == ""
+
+    def test_the_notification_line_in_the_log_is_only_its_header(self):
+        # The summary below the header carries whole codes, the log gets its first line.
+        notifier = (ROOT / "src" / "core" / "notifier.py").read_text(encoding="utf-8")
+        assert "message[:200]" not in notifier and 'message.split("\\n", 1)[0]' in notifier
+
+    def test_the_log_says_where_the_whole_code_is(self):
+        prime = (ROOT / "src" / "stores" / "prime.py").read_text(encoding="utf-8")
+        assert "the whole code is in your notification and data/prime-gaming.json" in prime
+
     @pytest.mark.parametrize("path", STORES, ids=lambda p: p.name)
     def test_no_whole_two_factor_code_is_logged(self, path):
-        # Game keys are logged on purpose, you need them to redeem by hand. Sign-in codes are not.
+        # Sign-in codes never reach the log, not even cut.
         banned = ("raw_code", "code_to_use", "otp_code", "backup_code", "recovery_code", "totp")
         for arg in self._logged_arguments(path.read_text(encoding="utf-8")):
             for node in ast.walk(arg):

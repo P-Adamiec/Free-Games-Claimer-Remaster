@@ -17,6 +17,7 @@ GAMES = [
     {"title": "Checked in", "url": "", "status": "already claimed today ✨"},
     {"title": "F2P", "url": "", "status": "skipped:f2p"},
     {"title": "Missing base", "url": "", "status": "failed:missing_base"},
+    {"title": "Missing base again", "url": "", "status": "skipped:missing_base"},
     {"title": "Broken", "url": "", "status": "failed"},
     {"title": "Dry", "url": "", "status": "available (dry run)"},
     {"title": "Download once", "url": "", "status": "download only, nothing to claim 📥"},
@@ -84,7 +85,8 @@ def test_a_download_only_giveaway_is_reported_once(summary_filter):
 
 
 def test_both_switches_on_show_everything(summary_filter):
-    assert set(summary_filter(_Cfg(fails=True, owned=True))) == {g["title"] for g in GAMES}
+    # Except a DLC already reported as missing its base game (#78): told once, then weeks later.
+    assert set(summary_filter(_Cfg(fails=True, owned=True))) == {g["title"] for g in GAMES} - {"Missing base again"}
 
 
 def test_dry_run_entries_are_never_filtered_out(summary_filter):
@@ -112,6 +114,14 @@ class TestTheRepeatingOutcomesCanBeSilenced:
         without = summary_filter(_Cfg(fails=True, missing_base=False))
         assert "Missing base" not in without
         assert "Broken" in without
+
+    def test_a_missing_base_game_told_before_stays_out_until_weeks_later(self, summary_filter):
+        # #78: the first run tells you, the next ones park it under "skipped" until three weeks have passed.
+        assert "Missing base again" not in summary_filter(_Cfg())
+        assert "Missing base again" not in summary_filter(_Cfg(owned=True, missing_base=False))
+        # Showing skipped items must not bring it back every run, nor the other way round with failures off.
+        assert "Missing base again" not in summary_filter(_Cfg(owned=True))
+        assert not {"Missing base", "Missing base again"} & set(summary_filter(_Cfg(fails=False, owned=True)))
 
     def test_a_download_only_giveaway_can_be_silenced_from_the_first_run(self, summary_filter):
         assert "Download once" in summary_filter(_Cfg())
