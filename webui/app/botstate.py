@@ -196,7 +196,8 @@ def job_view(job: dict) -> dict:
 # ------------------------------------------------------------------ games, log
 
 STATUS_LABELS = (("claimed", "Geclaimd", "ok"), ("existed", "Had je al", "muted"),
-                 ("already", "Had je al", "muted"), ("failed", "Mislukt", "bad"),
+                 ("already", "Had je al", "muted"),
+                 ("failed:missing_base", "Geen basisspel", "muted"), ("failed", "Mislukt", "bad"),
                  ("skipped", "Overgeslagen", "muted"), ("free_to_play", "Free-to-play", "muted"),
                  ("notified", "Gemeld", "muted"))
 STORE_NAMES = {s.key: s.name for s in schema.STORES}

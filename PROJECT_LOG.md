@@ -14,10 +14,16 @@ De claimer op de eigen Proxmox-server laten draaien voor Bjorn, met een eigen we
 
 Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) voor de takenlijst.
 
-- **Bereikbaarheid voor Bjorn** — nu alleen op het thuisnetwerk. Of het via de reverse proxy en een
-  hostnaam moet, met HTTPS, is nog niet besloten.
 - **Eerste logins** — een aantal winkels vraagt de eerste keer een handmatige login of 2FA via het scherm van de bot (noVNC, op de website onder 'Scherm').
   Dat moet Bjorn zelf doen, of Sjoerd samen met Bjorn.
+
+## 2026-10-12
+
+- DLC waarvan je het basisspel niet hebt, telt niet meer als mislukt: op de website staat het als "Geen basisspel"
+  (grijs), het telt niet mee in "mislukt" in de takenlijst en de waarschuwingen ervan staan niet bij de problemen van
+  de run. Een melding erover staat standaard uit (`NOTIFY_MISSING_BASE`, aan te zetten onder de geavanceerde
+  meldingen). Alles in `webui/`; de bot zelf slaat zulke DLC al over.
+- Backup van de server geregeld en restore getest (#1). Issues #1–#6, #9 en #10 gesloten; open blijft #8 (upstream).
 
 ## 2026-10-11
 

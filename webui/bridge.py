@@ -72,8 +72,17 @@ class PlainFormatter(logging.Formatter):
         return text
 
 
+# DLC whose base game you do not own cannot be claimed; that is not a problem of the run.
+MISSING_BASE_MESSAGES = ("required base game is missing", "base game is not free or could not be added",
+                         "requires base game")
+
+
+def is_missing_base(status: str) -> bool:
+    return "missing_base" in (status or "").lower()
+
+
 class ProblemCollector(logging.Handler):
-    """Remembers warnings and errors while a run is in progress."""
+    """Remembers warnings and errors while a run is in progress (not DLC without its base game)."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.WARNING)
@@ -83,6 +92,8 @@ class ProblemCollector(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if self.active:
             try:
+                if any(m in record.getMessage().lower() for m in MISSING_BASE_MESSAGES):
+                    return
                 self.items.append({"level": record.levelname, "message": plain(record)[:500]})
             except Exception:
                 pass
@@ -211,7 +222,7 @@ class Bridge:
                     st = (st or "").lower()
                     if st.startswith("claimed"):
                         out["claimed"] += n
-                    elif st.startswith("failed"):
+                    elif st.startswith("failed") and not is_missing_base(st):
                         out["failed"] += n
             finally:
                 con.close()
@@ -347,6 +358,9 @@ def attach(scheduler, run_job, lock) -> None:
     try:
         from src.core.config import cfg
         from src.version import __version__
+        # No message about DLC without its base game unless the user asks for it (upstream default: on).
+        if not (os.environ.get("NOTIFY_MISSING_BASE") or "").strip():
+            cfg.notify_missing_base = False
         queue = None
         try:
             queue = jobqueue.open_queue(os.environ.get("FGC_QUEUE_DIR", "").strip())

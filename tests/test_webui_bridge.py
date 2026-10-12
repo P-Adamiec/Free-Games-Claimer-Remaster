@@ -63,6 +63,37 @@ class TestStatus:
         assert bridge.plain(rec) == "[Steam] password=*** ok"
 
 
+class TestMissingBaseGame:
+    """DLC whose base game you do not own cannot be claimed: skipped, not a failure."""
+
+    def test_its_warnings_are_not_problems_of_the_run(self):
+        c = bridge.ProblemCollector()
+        c.active = True
+        for msg in ("Skipping DLC 'X' because required base game is missing.",
+                    "Base game is not free or could not be added.", "'X' requires base game.", "Login failed"):
+            c.emit(logging.makeLogRecord({"msg": msg, "levelno": logging.WARNING, "levelname": "WARNING"}))
+        assert [p["message"] for p in c.items] == ["Login failed"]
+
+    def test_it_does_not_count_as_failed(self, tmp_path, monkeypatch):
+        import sqlite3
+        from datetime import datetime, timedelta
+        b, _, _ = make(tmp_path, monkeypatch)
+        con = sqlite3.connect(b.data_dir / "fgc.db")
+        con.execute("CREATE TABLE claimed_games (status TEXT, created_at TEXT, updated_at TEXT)")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        con.executemany("INSERT INTO claimed_games VALUES (?, ?, ?)",
+                        [("claimed", now, now), ("failed:missing_base", now, now), ("failed", now, now)])
+        con.commit()
+        con.close()
+        out = b.summary(datetime.now() - timedelta(minutes=1))
+        assert out["claimed"] == 1 and out["failed"] == 1
+
+    def test_the_web_interface_shows_it_as_no_base_game(self):
+        from webui.app import botstate
+        assert botstate.status_label("failed:missing_base") == ("Geen basisspel", "muted")
+        assert botstate.status_label("failed") == ("Mislukt", "bad")
+
+
 class TestRestart:
     def test_restart_waits_for_a_running_claim(self, tmp_path, monkeypatch):
         b, _, lock = make(tmp_path, monkeypatch)
