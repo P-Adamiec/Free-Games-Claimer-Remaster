@@ -80,6 +80,7 @@ Alle eigen code staat in `webui/`. Daarbuiten, gemarkeerd met `[fork:webui]`:
 | `.env.example` | sectie *WEB INTERFACE* met de nieuwe variabelen |
 | `.gitignore`, `.dockerignore` | gegenereerde override en VNC-wachtwoorden buiten git en image |
 | `tests/test_docs_env.py` | de nieuwe variabelen gelden als Docker-instellingen |
+| `.github/workflows/fork-tests.yml` | nieuw: alle tests (ook de webui) op GitHub-runners bij een push naar `devel` en `sync/**` |
 | `src/stores/gog.py` | `[fork:fix]`: vinkt de GOG-nieuwsbrieven echt uit bij `GOG_NEWSLETTER=false` (upstream opende alleen de pagina) |
 
 `docker-compose.yml` is **niet** aangepast. `bots.sh` schrijft een `docker-compose.override.yml`,

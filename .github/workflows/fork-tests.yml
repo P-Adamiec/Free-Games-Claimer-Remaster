@@ -1,0 +1,33 @@
+# [fork:webui] Tests of the fork, including the web interface, on GitHub's runners (this is a public repo).
+# Upstream's own CI only runs on main and dev and leaves out webui/requirements.txt.
+name: Fork tests
+
+on:
+  push:
+    branches: [devel, "sync/**"]
+  pull_request:
+    branches: [devel]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            webui/requirements.txt
+      - run: python -m pip install -r requirements.txt -r webui/requirements.txt pytest pytest-asyncio
+      - run: python -m pytest tests/ -q
