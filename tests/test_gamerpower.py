@@ -7,10 +7,12 @@ field, so every giveaway whose URL hid its destination landed in "unknown".
 import asyncio
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from src.core.selection import reset_active_stores, set_active_stores
 from src.stores.gamerpower import (COVERED_ELSEWHERE, FAN_GIVEAWAY_JS, FAN_MARK_MAIN_JS, FAN_MARK_PAY_JS,
                                    FAN_NEWSLETTER_JS, FAN_ORDER_JS, FAN_ORDERS_JS, FAN_REVEAL_JS, FAN_UNSUBSCRIBE_JS,
                                    GamerPowerClaimer, classify_target, download_only_status, fanatical_game_id,
@@ -18,8 +20,8 @@ from src.stores.gamerpower import (COVERED_ELSEWHERE, FAN_GIVEAWAY_JS, FAN_MARK_
                                    fanatical_receipt_order,
                                    counts_as_done, fanatical_next_step, fanatical_should_unsubscribe,
                                    find_fanatical_item, is_product_page,
-                                   is_wanted, itch_game_id, login_help_message, needs_otp,
-                                   steam_key_in, wanted_types)
+                                   dlc_store_guess, dlc_wanted, is_wanted, itch_game_id, login_help_message, needs_otp,
+                                   route_is_fresh, steam_key_in, takes_dlc, title_key, wanted_types)
 
 
 class TestRoutingByHost:
@@ -897,10 +899,12 @@ class TestFanaticalAccount:
         assert "const atok = localStorage.getItem('bsatok') || '';" in FAN_REVEAL_JS
 
     def test_fanaticals_error_text_is_masked_in_the_log(self):
-        # Release review: the reveal's error body may quote the account e-mail.
+        # Release review: the reveal's error body may quote the account e-mail; the log mask covers every address now.
+        from src.core.redact import redact
         source = TestFanaticalClaimHonesty.SOURCE
         reveal = source.split("async def _fanatical_reveal_key", 1)[1].split("\n    async def ", 1)[0]
-        assert r'r"\1***@", detail)' in reveal and "detail[:120]" in reveal
+        assert "detail[:120]" in reveal
+        assert redact("account pawel.a@gmail.com is not confirmed") == "account p***@gmail.com is not confirmed"
 
     def test_existed_never_overwrites_a_row(self):
         # Release review: a later "existed" wiped Steam's outcome for the key (claimed and activated, failed:key-*).
@@ -979,6 +983,38 @@ class TestFanaticalCheckout:
         # ProductAddToCartButton also sits on every paid add-to-cart on the page.
         assert ".GiveawaySteps__steps__action button" in FAN_MARK_MAIN_JS
         assert "ProductAddToCartButton" not in FAN_MARK_MAIN_JS
+
+    def test_paying_needs_a_zero_total_in_the_same_read(self):
+        # A later read without the total once let the pay button go on an earlier "free".
+        cart = "https://www.fanatical.com/en/cart"
+        reads = [
+            {"path": cart, "total": "€0.00", "proceed": True},
+            {"path": cart, "total": None, "pay": "Complete order"},
+            {"path": cart, "total": "€0.00", "pay": "Complete order"},
+            {"path": "https://www.fanatical.com/en/receipt?authResult=AUTHORISED"},
+        ]
+        clicks = []
+
+        class Stub:
+            page = None
+
+            async def sleep(self, seconds):
+                pass
+
+            async def _fanatical_click(self, script, label):
+                clicks.append((label, 4 - len(reads)))
+                return True
+
+        stub = Stub()
+
+        class Page:
+            async def evaluate(self, script):
+                return json.dumps(reads.pop(0))
+
+        stub.page = Page()
+        outcome = asyncio.run(GamerPowerClaimer._fanatical_checkout(stub, "Game"))
+        assert outcome[0] == "receipt"
+        assert clicks == [("Proceed to checkout", 1), ("Complete order", 3)]
 
     def test_a_claim_that_never_reaches_the_cart_does_not_ask_you(self):
         # A refused claim used to wait minutes and then tell you the game was in your cart.
@@ -1108,3 +1144,196 @@ class TestFanaticalOutcomes:
 
     def test_a_checkout_you_finish_is_checked_against_the_account(self):
         assert 'elif outcome == "stuck" and orders is not None:' in self.BLOCK
+
+
+class TestDlcPerStore:
+    """GP_CLAIM_DLC was one switch for every store; each store now decides on DLC giveaways itself."""
+
+    @pytest.fixture(autouse=True)
+    def _all_off(self, monkeypatch):
+        import src.stores.gamerpower as gp
+        for name in gp.DLC_SWITCHES.values():
+            monkeypatch.setattr(gp.cfg, name, False)
+        self.gp, self.monkeypatch = gp, monkeypatch
+
+    def test_each_store_follows_its_own_switch(self):
+        self.monkeypatch.setattr(self.gp.cfg, "eg_claim_dlc", True)
+        assert takes_dlc("epic") and not takes_dlc("steam") and not takes_dlc("microsoft")
+
+    @pytest.mark.parametrize("store", ["alienware", "gog", "unknown", ""])
+    def test_a_store_without_a_switch_never_takes_dlc(self, store):
+        for name in self.gp.DLC_SWITCHES.values():
+            self.monkeypatch.setattr(self.gp.cfg, name, True)
+        assert not takes_dlc(store)
+
+    @pytest.mark.parametrize("entry,store", [
+        ({"instructions": "Log in to Alienware Arena and get your key", "platforms": "PC, Steam"}, "alienware"),
+        ({"platforms": "PC, Steam"}, "steam"),
+        ({"platforms": "PC, Epic Games Store"}, "epic"),
+        ({"platforms": "Xbox One, Xbox Series X|S"}, "microsoft"),
+        ({"platforms": "PC, Itch.io"}, "itchio"),
+        ({"platforms": "PC, Nintendo Switch"}, "unknown"),
+        ({"platforms": "PC"}, "unknown"),
+        ({}, "unknown"),
+    ])
+    def test_where_a_dlc_most_likely_ends_before_any_lookup(self, entry, store):
+        assert dlc_store_guess(entry) == store
+
+    @pytest.mark.parametrize("store", ["itchio", "indiegala", "fanatical"])
+    def test_sites_you_switch_on_yourself_take_dlc_without_a_switch(self, store):
+        assert takes_dlc(store)
+
+    def test_a_dlc_is_looked_up_only_with_a_price_and_its_store_in_the_run(self, monkeypatch):
+        import src.core.selection as selection
+        monkeypatch.setattr(selection, "_active", None)
+        self.monkeypatch.setattr(self.gp.cfg, "steam_claim_dlc", True)
+        priced = {"type": "DLC", "platforms": "PC, Steam", "worth": "$4.99"}
+        # 13.10: every DLC free for good and every code for an item inside a game had no price.
+        assert dlc_wanted(priced) and not dlc_wanted({**priced, "worth": "N/A"}) and not dlc_wanted({**priced, "worth": None})
+        set_active_stores(["epic"])
+        try:
+            assert not dlc_wanted(priced)
+        finally:
+            reset_active_stores()
+
+
+class TestRememberedRoutes:
+    """A giveaway's link is looked up once in two weeks: 47 of 82 DLC on 13.10 were Alienware keys."""
+
+    NOW = datetime(2026, 10, 13, tzinfo=timezone.utc)
+    FEED = [
+        {"title": "Space Game", "open_giveaway_url": "https://www.gamerpower.com/open/space-game", "type": "Game",
+         "platforms": "PC, Steam"},
+        {"title": "Skin Pack", "open_giveaway_url": "https://www.gamerpower.com/open/skin-pack", "type": "DLC",
+         "platforms": "PC, Steam", "worth": "$4.99", "instructions": "Log in to Alienware Arena to get your key"},
+        {"title": "Liveries", "open_giveaway_url": "https://www.gamerpower.com/open/liveries", "type": "DLC",
+         "platforms": "PC, Steam", "worth": "$1.99"},
+        {"title": "Starter Kit", "open_giveaway_url": "https://www.gamerpower.com/open/starter-kit", "type": "DLC",
+         "platforms": "PC, Steam", "worth": "N/A"},
+        {"title": "Stove Game", "open_giveaway_url": "https://www.gamerpower.com/open/stove-game", "type": "Game",
+         "platforms": "PC"},
+    ]
+    ROUTES = {
+        "Space Game": ("steam", "https://store.steampowered.com/app/1/space_game/"),
+        "Liveries": ("steam", "https://store.steampowered.com/app/2/liveries/"),
+        "Stove Game": ("unknown", "https://store.onstove.com/en/games/1"),
+    }
+
+    @pytest.mark.parametrize("route,fresh", [
+        ({"store": "alienware", "url": "https://x", "at": "2026-10-01T00:00:00+00:00"}, True),
+        ({"store": "alienware", "url": "https://x", "at": "2026-09-28T00:00:00+00:00"}, False),
+        ({"store": "alienware", "url": "https://x"}, False),
+        ({"store": "", "url": "https://x", "at": "2026-10-12T00:00:00+00:00"}, False),
+        ({"store": "steam", "url": "https://x", "at": "not a date"}, False),
+        (None, False),
+        ("garbage", False),
+    ])
+    def test_a_route_is_trusted_for_two_weeks(self, route, fresh):
+        assert route_is_fresh(route, self.NOW) is fresh
+
+    def _discover(self, monkeypatch, tmp_path, routes_to, on=("steam_claim_dlc",), claimed=frozenset()):
+        import src.core.selection as selection
+        import src.stores.gamerpower as gp
+        monkeypatch.setattr(gp.cfg, "_data_dir", tmp_path)
+        monkeypatch.setattr(selection, "_active", None)
+        for name in gp.DLC_SWITCHES.values():
+            monkeypatch.setattr(gp.cfg, name, name in on)
+        looked_up, feed = [], self.FEED
+
+        class Answer:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return feed
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url):
+                return Answer()
+
+        async def resolve(game):
+            looked_up.append(game["title"])
+            return routes_to[game["title"]]
+
+        async def nothing_claimed():
+            return set(claimed)
+
+        monkeypatch.setattr(gp.httpx, "AsyncClient", Client)
+        monkeypatch.setattr(gp, "_resolve_target", resolve)
+        monkeypatch.setattr(gp, "_claimed_titles", nothing_claimed)
+        routed = asyncio.run(gp.discover_giveaways())
+        return {store: [g["title"] for g in games] for store, games in routed.items()}, looked_up
+
+    def test_a_link_is_looked_up_once_and_an_alienware_dlc_not_at_all(self, monkeypatch, tmp_path):
+        routed, looked_up = self._discover(monkeypatch, tmp_path, self.ROUTES)
+        assert sorted(looked_up) == ["Liveries", "Space Game", "Stove Game"]
+        assert routed["steam"] == ["Space Game", "Liveries"] and routed["unknown"] == ["Stove Game"]
+        again, looked_up = self._discover(monkeypatch, tmp_path, self.ROUTES)
+        assert looked_up == [] and again == routed
+
+    def test_a_dlc_goes_only_where_its_store_takes_dlc(self, monkeypatch, tmp_path):
+        routes = {**self.ROUTES, "Liveries": ("epic", "https://store.epicgames.com/p/liveries")}
+        routed, _ = self._discover(monkeypatch, tmp_path, routes)
+        assert "Liveries" not in sum(routed.values(), [])
+        # Switching Epic's DLC on later takes effect at once, from the remembered route.
+        routed, looked_up = self._discover(monkeypatch, tmp_path, routes, on=("steam_claim_dlc", "eg_claim_dlc"))
+        assert routed["epic"] == ["Liveries"] and looked_up == []
+
+    def test_a_failed_lookup_is_tried_again_next_run(self, monkeypatch, tmp_path):
+        failed = {**self.ROUTES, "Space Game": ("unknown", self.FEED[0]["open_giveaway_url"].lower())}
+        self._discover(monkeypatch, tmp_path, failed)
+        _, looked_up = self._discover(monkeypatch, tmp_path, self.ROUTES)
+        assert looked_up == ["Space Game"]
+
+    def test_a_skip_is_told_once_then_kept_quiet(self, monkeypatch, tmp_path, caplog):
+        routes = {**self.ROUTES, "Liveries": ("epic", "https://store.epicgames.com/p/liveries")}
+        with caplog.at_level("INFO", logger="fgc.gamerpower"):
+            self._discover(monkeypatch, tmp_path, routes)
+            first = caplog.text
+            caplog.clear()
+            self._discover(monkeypatch, tmp_path, routes)
+        assert "takes no DLC giveaways" in first and "extra game(s)" in first
+        assert "takes no DLC giveaways" not in caplog.text and "extra game(s)" not in caplog.text
+
+    def test_only_a_whole_title_already_done_hides_a_giveaway(self, monkeypatch, tmp_path):
+        routed, _ = self._discover(monkeypatch, tmp_path, self.ROUTES, claimed={"space"})
+        assert "Space Game" in routed["steam"]
+        routed, _ = self._discover(monkeypatch, tmp_path, self.ROUTES, claimed={title_key("Space Game")})
+        assert "Space Game" not in routed.get("steam", [])
+
+
+class TestDuplicateTitles:
+    """TODO 39: titles were matched by fragment, so a claimed "DOOM" hid "Doomtrooper CCG Card Pack" on 13.10."""
+
+    @pytest.mark.parametrize("owned,giveaway", [
+        ("DOOM", "DOOM 3"),
+        ("Pony Island", "Pony Island 2: Panda Circuit"),
+        ("Far Cry 3", "Far Cry 3 Blood Dragon (Steam) Giveaway"),
+        ("DOOM", "Doomtrooper CCG Card Pack"),
+    ])
+    def test_another_part_of_a_series_is_its_own_game(self, owned, giveaway):
+        assert title_key(owned) != title_key(giveaway)
+
+    @pytest.mark.parametrize("owned,giveaway", [
+        ("TerraScape", "TerraScape (Epic Games)"),
+        ("Leaper (IndieGala)", "Leaper (IndieGala)"),
+        ("Sausage Hunter", "Sausage Hunter (Indiegala)"),
+        ("Dual Chroma: Academy Carols", "Dual Chroma: Academy Carols (itch.io)"),
+        ("Gear.Club Unlimited 3 - Gear.Club Signature Pack", "Gear.Club Unlimited 3 - Gear.Club Signature Pack Steam Giveaway"),
+        ("Rotwood: Drakin Armoury Pack", "Rotwood: Drakin Armoury Pack (Steam) Giveaway"),
+    ])
+    def test_the_same_game_with_gamerpowers_tags_still_matches(self, owned, giveaway):
+        assert title_key(owned) == title_key(giveaway)
+
+    def test_a_title_with_no_latin_letters_never_matches(self):
+        # It normalises to nothing, and nothing used to be a fragment of every title.
+        assert title_key("東方紅魔郷") == "" and title_key(None) == ""

@@ -36,6 +36,7 @@ from src.core.display import (
     screen_is_managed,
     screen_state,
 )
+from src.core.redact import hide_account, mask_account
 from src.core.run_state import mark_answered, mark_unanswered, waits_for_nobody
 
 logger = logging.getLogger("fgc.claimer")
@@ -44,21 +45,6 @@ logger = logging.getLogger("fgc.claimer")
 def now_str() -> str:
     """Return a human-readable UTC timestamp string."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def mask_account(name) -> str:
-    """Account label safe for a log someone pastes into a bug report: a.n.other@mail.com -> a***@mail.com."""
-    text = str(name or "")
-    local, at, domain = text.partition("@")
-    if not at:
-        return text          # a nickname is not personal data, leave it readable
-    return f"{local[:1]}***@{domain}"
-
-
-def mask_code(code) -> str:
-    """A game code cut for the log, like Steam keys: the whole code is only in your notification."""
-    text = str(code or "").strip()
-    return f"{text[:5]}…" if text else ""
 
 
 def chrome_binary() -> str | None:
@@ -114,18 +100,37 @@ WHEEL_NOTCH = 120
 MISSING_BASE_REPEAT_DAYS = 21
 
 
+def older_than(stamp: str | None, days: float, now: datetime | None = None) -> bool:
+    """True when an ISO date is at least `days` old; a missing or unreadable one counts as long ago."""
+    if not stamp:
+        return True
+    try:
+        then = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return True
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - then >= timedelta(days=days)
+
+
+def account_key(signin: str | None, shown: str | None) -> str:
+    """What a store's rows are saved under: the sign-in setting when set, since a name read from a page can be missing."""
+    return (signin or "").strip() or shown or "unknown"
+
+
+def row_extra(row) -> dict:
+    """A database row's extra JSON as a dict, empty when there is none or it is unreadable."""
+    try:
+        extra = json.loads(row.extra or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return extra if isinstance(extra, dict) else {}
+
+
 def missing_base_due(previous_status: str | None, reported_at: str | None, now: datetime | None = None,
                      days: int = MISSING_BASE_REPEAT_DAYS) -> bool:
     """True when a DLC without its base game is worth telling you about: new, newly in this state, or told weeks ago."""
-    if previous_status != "failed:missing_base" or not reported_at:
-        return True
-    try:
-        told = datetime.fromisoformat(str(reported_at))
-    except ValueError:
-        return True
-    if told.tzinfo is None:
-        told = told.replace(tzinfo=timezone.utc)
-    return (now or datetime.now(timezone.utc)) - told >= timedelta(days=days)
+    return previous_status != "failed:missing_base" or older_than(reported_at, days, now)
 
 
 def missing_base_status(due: bool) -> str:
@@ -135,12 +140,7 @@ def missing_base_status(due: bool) -> str:
 
 def track_missing_base(row, now: datetime | None = None, remember: bool = True) -> str:
     """Mark a database row as a DLC without its base game and return its summary status, keeping when it was told."""
-    try:
-        extra = json.loads(row.extra or "{}")
-    except (TypeError, ValueError):
-        extra = {}
-    if not isinstance(extra, dict):
-        extra = {}
+    extra = row_extra(row)
     due = missing_base_due(row.status, extra.get("missing_base_reported"), now)
     # A dry run shows it without using up the one report the real run will make.
     if due and remember:
@@ -403,9 +403,10 @@ class BaseClaimer:
         self.logger.info("🌐 [bold yellow]Browser ready[/bold yellow]")
 
     def log_signed_in(self, username: str | None = None) -> None:
-        """Standardised log for successful login. The e-mail is masked, self.user keeps it whole."""
+        """Standardised log for successful login. The account is masked in every log line, self.user keeps it whole."""
         user = username or self.user or "unknown"
         self.user = user
+        hide_account(user)
         self.logger.info("🔓 [bold green]Signed in as:[/bold green] %s", mask_account(user))
 
     async def close_browser(self) -> None:
@@ -627,18 +628,20 @@ class BaseClaimer:
         p.mkdir(parents=True, exist_ok=True)
         return p.joinpath(*parts)
 
-    async def take_screenshot(self, name: str) -> Path | None:
-        """Take a screenshot and return its path."""
+    async def take_screenshot(self, name: str, failed: bool = True) -> Path | None:
+        """Take a screenshot and return its path; DEBUG_SCREENSHOTS sends it only when it shows a failure."""
         if not self.page:
             return None
         p = self.screenshot_path(f"{filenamify(name)}.png")
         try:
             await self.page.save_screenshot(str(p))
             self.logger.debug("Screenshot saved: %s", p)
-            return p
         except Exception:
             self.logger.exception("Failed to save screenshot")
             return None
+        if cfg.debug_screenshots and failed:
+            await self.notify(f"📸 {self.store_name}: `{p.name}`", screenshot_path=p)
+        return p
 
     # ------------------------------------------------------------------
     # Utilities
@@ -829,7 +832,7 @@ class BaseClaimer:
         """Return True when the current page is a Cloudflare / captcha human-check.
 
         Covers the Cloudflare "Just a moment…" / Turnstile interstitial that can
-        gate a whole domain before login (e.g. store.epicgames.com, steamdb.info)
+        gate a whole domain before login (e.g. store.epicgames.com, fab.com)
         as well as hCaptcha / Arkose (FunCaptcha) login challenges. None of these
         can be solved automatically, so detecting one lets a store notify the
         user for a one-time manual solve via VNC. Matches only known providers /
@@ -851,7 +854,7 @@ class BaseClaimer:
             return f"unreadable page ({e})"
 
     async def _wait_out_challenge(self, label: str, settle: int = 12, store_key: str | None = None,
-                                  present_fn=None) -> bool:
+                                  present_fn=None, ask: bool = True) -> bool:
         """Clear a human-check: let it auto-pass, else alert the user to solve via VNC.
 
         First waits up to ``settle`` seconds for a managed/invisible challenge to
@@ -859,6 +862,7 @@ class BaseClaimer:
         blocking, sends a single VNC alert and polls until it's gone or the login
         timeout hits. Returns True if the challenge cleared, False on timeout.
         ``present_fn`` looks somewhere other than the page itself, e.g. inside a checkout frame.
+        ``ask=False`` only waits for the auto-pass and never asks you.
         """
         present = present_fn or self._human_challenge_present
         waited = 0
@@ -867,6 +871,8 @@ class BaseClaimer:
                 return True
             await asyncio.sleep(2)
             waited += 2
+        if not ask:
+            return False
 
         self.logger.warning("%s is behind a Cloudflare / captcha human-check – requesting manual solve via VNC.", label)
         custom_msg = self._vnc_notice(

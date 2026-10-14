@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 import nodriver as uc
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, account_key
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -764,7 +764,7 @@ class UbisoftClaimer(BaseClaimer):
             result = await session.execute(
                 select(ClaimedGame).where(
                     ClaimedGame.store == self.store_name,
-                    ClaimedGame.user == (self.user or "unknown"),
+                    ClaimedGame.user == account_key(cfg.ubi_email, self.user),
                     ClaimedGame.game_id == game_id,
                 )
             )
@@ -776,7 +776,7 @@ class UbisoftClaimer(BaseClaimer):
             obj, created = await get_or_create(
                 session,
                 store=self.store_name,
-                user=self.user or "unknown",
+                user=account_key(cfg.ubi_email, self.user),
                 game_id=slug or title,
                 title=title,
                 url=url,

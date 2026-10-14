@@ -120,9 +120,119 @@ class TestTheMaskedAccountCannotBreakTheMessage:
         assert "<strong>AliExpress</strong> (p***@gmail.com):" in html
         assert '<strong><a href="https://example.com/x">' in html and "<em>" not in html
 
-    def test_the_unescaped_mask_is_what_broke_it(self):
-        assert "<em>" in self._html(self.LINES.format(mask_account("pawel@gmail.com")))
-
     def test_main_escapes_the_account_in_the_header(self):
         main = (ROOT / "main.py").read_text(encoding="utf-8")
         assert "markdown_safe(mask_account(result.get('user')))" in main
+
+
+class TestDiscordLinkPreviews:
+    """PR #81 by @ckl: DISCORD_SUPPRESS_EMBEDS sends Discord's flag 4, so links come without preview cards."""
+
+    def _sent(self, monkeypatch, tmp_path, suppress, screenshot):
+        import asyncio
+        import types
+
+        import src.core.notifier as notifier
+        sent = []
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, url, json=None, data=None, files=None):
+                sent.append(json if json is not None else data)
+                return types.SimpleNamespace(status_code=204, text="")
+
+        monkeypatch.setattr(notifier.httpx, "AsyncClient", Client)
+        monkeypatch.setattr(notifier.cfg, "discord_webhook", "https://discord.invalid/api/webhooks/1/x")
+        monkeypatch.setattr(notifier.cfg, "discord_suppress_embeds", suppress)
+        shot = tmp_path / "shot.png"
+        shot.write_bytes(b"png")
+        asyncio.run(notifier.send_discord("https://example.com", screenshot_path=shot if screenshot else None))
+        return sent[0]
+
+    @pytest.mark.parametrize("screenshot", [False, True])
+    def test_the_flag_goes_with_every_message(self, monkeypatch, tmp_path, screenshot):
+        assert self._sent(monkeypatch, tmp_path, True, screenshot)["flags"] == 4
+
+    @pytest.mark.parametrize("screenshot", [False, True])
+    def test_false_brings_the_preview_cards_back(self, monkeypatch, tmp_path, screenshot):
+        assert "flags" not in self._sent(monkeypatch, tmp_path, False, screenshot)
+
+
+class TestFailureScreenshots:
+    """DEBUG_SCREENSHOTS sends the screenshot a failure leaves, never one taken after a claim or a skip; off by default."""
+
+    def _take(self, monkeypatch, tmp_path, on, failed=True):
+        import asyncio
+        import logging
+
+        import src.core.claimer as claimer
+        monkeypatch.setattr(claimer.cfg, "debug_screenshots", on)
+
+        class Store:
+            store_name, logger = "steam", logging.getLogger("test")
+
+            def __init__(self):
+                self.page, self.sent = self, []
+
+            async def save_screenshot(self, path):
+                Path(path).write_bytes(b"png")
+
+            def screenshot_path(self, *parts):
+                return tmp_path.joinpath(*parts)
+
+            async def notify(self, message, **kwargs):
+                self.sent.append((message, kwargs.get("screenshot_path")))
+
+        store = Store()
+        shot = asyncio.run(claimer.BaseClaimer.take_screenshot(store, "steam_fail_Game", failed=failed))
+        return shot, store.sent
+
+    def test_the_screenshot_goes_out_when_asked(self, monkeypatch, tmp_path):
+        shot, sent = self._take(monkeypatch, tmp_path, True)
+        assert shot.exists() and sent == [("📸 steam: `steam_fail_Game.png`", shot)]
+
+    def test_a_screenshot_after_a_claim_stays_on_disk(self, monkeypatch, tmp_path):
+        shot, sent = self._take(monkeypatch, tmp_path, True, failed=False)
+        assert shot.exists() and sent == []
+
+    @pytest.mark.parametrize("store,name", [
+        ("steam.py", 'f"steam_paid_skip_{filenamify(page_title)}"'), ("steam.py", 'f"steam_{filenamify(page_title)}"'),
+        ("prime.py", 'f"prime_{filenamify(title)}"'), ("gamerpower.py", 'f"fanatical_{filenamify(title)}"'),
+        ("gamerpower.py", 'f"itchio_{filenamify(title)}"'), ("gamerpower.py", 'f"indiegala_{filenamify(title)}"'),
+    ])
+    def test_claims_and_skips_are_not_failures(self, store, name):
+        source = (ROOT / "src" / "stores" / store).read_text(encoding="utf-8")
+        assert f"take_screenshot({name})" not in source and f"take_screenshot({name}, failed=False)" in source
+
+    def test_nothing_is_sent_by_default(self, monkeypatch, tmp_path):
+        shot, sent = self._take(monkeypatch, tmp_path, False)
+        assert shot.exists() and sent == []
+
+    def test_apprise_gets_it_as_an_attachment(self, monkeypatch, tmp_path):
+        import asyncio
+
+        import src.core.notifier as notifier
+        calls = []
+
+        class Apprise:
+            def add(self, url):
+                pass
+
+            def notify(self, **kwargs):
+                calls.append(kwargs.get("attach"))
+
+        monkeypatch.setattr(notifier.apprise, "Apprise", Apprise)
+        monkeypatch.setattr(notifier.cfg, "notify_url", "json://localhost")
+        shot = tmp_path / "shot.png"
+        asyncio.run(notifier.send_apprise("x", attach=shot))
+        asyncio.run(notifier.send_apprise("x"))
+        assert calls == [str(shot), None]
+

@@ -5,12 +5,17 @@ only once the product page itself reports the game as owned.
 """
 
 import asyncio
+import contextlib
+import json
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from src.stores.epic import EpicGamesClaimer, text_finder
+from src.core.claimer import account_key, older_than
+from src.stores.epic import URL_CLAIM, EpicGamesClaimer, text_finder, tile_finder
 from src.stores.epic import (PAGE_STATE_JS, checkout_total_is_zero, is_owned, is_region_locked,
                              offers_a_purchase, region_locked_status, title_from_slug)
 
@@ -502,3 +507,162 @@ class TestTextFinder:
 
     def test_loose_also_takes_a_longer_label(self):
         assert 'norm(b).includes("get")' in text_finder("Get")
+
+
+class TestGamePagesAreOpenedSparingly:
+    """Issue #86: Cloudflare's "One more step" page was read as the game, and every run opened every game page again."""
+
+    URL = "https://store.epicgames.com/en-US/p/out-of-sight"
+
+    class _Stub:
+        store_name, user = "epic", "u"
+        _open_game_page = EpicGamesClaimer._open_game_page
+        _click_game_tile = EpicGamesClaimer._click_game_tile
+
+        def __init__(self, challenge=(), cleared=False, tile=False, path="/"):
+            self.challenge, self.cleared, self.tile, self.path = list(challenge), cleared, tile, path
+            self.notify_games, self._platform_labels = [], {}
+            self.loads, self.asked, self.reads = [], [], 0
+            self.page = self
+
+        async def get(self, url):
+            self.loads.append(url)
+
+        async def evaluate(self, script):
+            return self.path if "location.pathname" in script else "Out of Sight"
+
+        async def sleep(self, seconds):
+            pass
+
+        async def _human_challenge_present(self):
+            return self.challenge.pop(0) if self.challenge else False
+
+        async def _wait_out_challenge(self, label, store_key=None, ask=True):
+            self.asked.append(ask)
+            return self.cleared
+
+        async def _cdp_click_found(self, finder, label):
+            return self.tile
+
+        async def _click_page_button_by_text(self, *args, **kwargs):
+            return False
+
+        async def _page_state(self, tries=15):
+            self.reads += 1
+            return {"flow": "owned", "text": "in library"}
+
+    @pytest.fixture
+    def row(self, monkeypatch):
+        import src.stores.epic as epic
+        row = SimpleNamespace(status="unknown", title="out-of-sight", extra=None, commits=0)
+
+        class Session:
+            async def commit(self):
+                row.commits += 1
+
+        @contextlib.asynccontextmanager
+        async def session():
+            yield Session()
+
+        async def get_or_create(session, **kwargs):
+            return row, False
+
+        monkeypatch.setattr(epic, "async_session", session)
+        monkeypatch.setattr(epic, "get_or_create", get_or_create)
+        return row
+
+    @staticmethod
+    def _checked(days):
+        return json.dumps({"page_checked": (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()})
+
+    def _claim(self, stub, from_list=False):
+        asyncio.run(EpicGamesClaimer._claim_game(stub, self.URL, from_list=from_list))
+        return stub
+
+    def test_a_game_you_have_is_left_alone_for_three_days(self, row):
+        row.status, row.title, row.extra = "existed", "Out of Sight", self._checked(1)
+        stub = self._claim(self._Stub())
+        assert stub.loads == [] and stub.notify_games == [{"title": "Out of Sight", "url": self.URL, "status": "existed"}]
+
+    @pytest.mark.parametrize("days", [None, 4])
+    def test_then_its_page_is_read_again(self, row, days):
+        row.status, row.extra = "existed", self._checked(days) if days else None
+        stub = self._claim(self._Stub())
+        assert stub.loads == [self.URL] and stub.reads == 1
+        assert not older_than(json.loads(row.extra)["page_checked"], 1)
+
+    def test_a_game_blocked_in_your_region_is_left_alone_quietly(self, row):
+        row.status, row.extra = "skipped:region", self._checked(1)
+        stub = self._claim(self._Stub())
+        assert stub.loads == [] and stub.notify_games == []
+
+    def test_a_check_on_a_game_you_have_never_asks_you(self, row):
+        row.status, row.title, row.extra = "existed", "Out of Sight", self._checked(4)
+        stub = self._claim(self._Stub(challenge=[True]))
+        assert stub.asked == [False] and stub.reads == 0
+        assert stub.notify_games == [{"title": "Out of Sight", "url": self.URL, "status": "existed"}]
+        assert row.commits == 1 and not older_than(json.loads(row.extra)["page_checked"], 1)
+
+    def test_an_unsolved_check_names_the_game_not_the_check(self, row):
+        # Earlier runs stored the check page's heading as the game's name.
+        row.status, row.title = "failed", "One more step"
+        stub = self._claim(self._Stub(challenge=[True]))
+        assert stub.asked == [True] and stub.reads == 0
+        assert stub.notify_games == [{"title": "Out Of Sight", "url": self.URL, "status": "failed"}]
+
+    def test_a_cleared_check_is_not_followed_by_a_second_load(self, row):
+        # Cloudflare reloads the page itself once its check passes.
+        stub = self._claim(self._Stub(challenge=[True], cleared=True))
+        assert stub.loads == [self.URL] and stub.reads == 1
+        assert row.status == "existed" and row.title == "Out of Sight"
+
+    def test_the_ownership_check_stops_at_an_unsolved_check(self):
+        stub = self._Stub(challenge=[True])
+        assert asyncio.run(EpicGamesClaimer._confirm_in_library(stub, self.URL)) is False
+        assert stub.loads == [self.URL]
+
+    def test_a_game_on_the_list_is_opened_from_its_tile(self, row):
+        stub = self._claim(self._Stub(tile=True, path="/en-US/p/out-of-sight"), from_list=True)
+        assert stub.loads == [] and stub.reads == 1
+
+    def test_without_a_tile_the_list_is_tried_then_the_address(self, row):
+        stub = self._claim(self._Stub(), from_list=True)
+        assert stub.loads == [URL_CLAIM, self.URL]
+
+    def test_a_tile_that_leads_elsewhere_falls_back_to_the_address(self, row):
+        stub = self._claim(self._Stub(tile=True, path="/en-US/p/something-else"), from_list=True)
+        assert stub.loads == [self.URL]
+
+    def test_mobile_games_skip_the_list(self):
+        # Checked live: the free games list has no tile for them, so looking only cost a page load.
+        run = (Path(__file__).resolve().parent.parent / "src" / "stores" / "epic.py").read_text(encoding="utf-8")
+        assert 'from_list=game["url"] not in self._platform_labels' in run
+
+    def test_a_game_from_gamerpower_is_opened_by_its_address(self, row):
+        stub = self._claim(self._Stub(tile=True, path="/en-US/p/out-of-sight"))
+        assert stub.loads == [self.URL]
+
+    def test_the_slug_cannot_break_out_of_the_script(self):
+        slug = 'x"); alert(1); ("'
+        assert json.dumps("/" + slug) in tile_finder(slug)
+
+
+class TestOneAccountKey:
+    """Epic did not always show the profile name, and each time it was missing every owned game looked new (2026-10-14)."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_the_sign_in_setting_wins(self):
+        assert account_key(" pawel@gmail.com ", "Not Weak.") == account_key("pawel@gmail.com", None) == "pawel@gmail.com"
+
+    def test_without_one_the_name_on_the_page_is_used(self):
+        assert account_key(None, "Not Weak.") == "Not Weak." and account_key("", None) == "unknown"
+
+    @pytest.mark.parametrize("store,setting,count", [
+        ("epic.py", "eg_email", 1), ("epic_fab.py", "eg_email", 2),
+        ("steam.py", "steam_username", 5), ("ubisoft.py", "ubi_email", 2),
+    ])
+    def test_every_store_with_a_name_from_the_page_saves_under_its_setting(self, store, setting, count):
+        source = (self.ROOT / "src" / "stores" / store).read_text(encoding="utf-8")
+        assert source.count(f"account_key(cfg.{setting}, self.user)") == count
+        assert 'user=self.user or "unknown"' not in source and '(self.user or "unknown")' not in source

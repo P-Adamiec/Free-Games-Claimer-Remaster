@@ -16,6 +16,7 @@ import nodriver as uc
 from sqlalchemy import select
 
 from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, mask_account
+from src.core.redact import hide_account
 from src.core.config import cfg
 from src.core.database import async_session, ClaimedGame, get_or_create
 from src.core.run_state import needs_you, waits_for_nobody
@@ -28,8 +29,19 @@ logger = logging.getLogger("fgc.gamerpower")
 
 GAMERPOWER_API_URL = "https://www.gamerpower.com/api/giveaways"
 
-# Full games and Early Access are worth claiming; DLC needs a per-game account (GP_CLAIM_DLC).
+# Full games and Early Access are worth claiming; DLC only for a store that takes it.
 CLAIMABLE_TYPES = ("game", "early access")
+
+# Each store decides on DLC giveaways itself; a store in neither list never takes them.
+DLC_SWITCHES = {"steam": "steam_claim_dlc", "epic": "eg_claim_dlc", "microsoft": "ms_claim_dlc"}
+# Sites you switch on yourself in STORES take their DLC giveaways too (GOG claims its own on gog.com).
+DLC_ALWAYS = {"itchio", "indiegala", "fanatical"}
+# GamerPower's platform words, read before any lookup to guess where a DLC giveaway ends.
+_DLC_PLATFORMS = (("steam", "steam"), ("epic", "epic"), ("microsoft", "xbox"), ("itchio", "itch.io"))
+
+# Where each giveaway link led, kept two weeks so a giveaway for a store you don't run is looked up once, not every run.
+ROUTES_FILE = "gamerpower_routes.json"
+ROUTE_DAYS = 14
 
 # Host to store key. Order matters only for readability, hosts never overlap.
 _STORE_HOSTS = (
@@ -68,6 +80,52 @@ def wanted_types(claim_dlc: bool) -> set[str]:
 def is_wanted(entry: dict, claim_dlc: bool) -> bool:
     """True when this giveaway is a type we try to claim."""
     return str((entry or {}).get("type") or "").strip().lower() in wanted_types(claim_dlc)
+
+
+def takes_dlc(store: str) -> bool:
+    """True when this store takes DLC giveaways, by its own switch or always."""
+    name = DLC_SWITCHES.get(store)
+    return store in DLC_ALWAYS or bool(name and getattr(cfg, name))
+
+
+def dlc_store_guess(entry: dict) -> str:
+    """Where a DLC giveaway most likely ends, from GamerPower's own words, so lookups go only to likely ones."""
+    hinted = classify_target("", (entry or {}).get("instructions", ""))
+    if hinted != "unknown":
+        return hinted
+    platforms = str((entry or {}).get("platforms") or "").lower()
+    return next((store for store, word in _DLC_PLATFORMS if word in platforms), "unknown")
+
+
+def dlc_wanted(entry: dict) -> bool:
+    """A DLC giveaway is looked up only with a price on GamerPower, for a store in this run that takes DLC.
+    No price means an item inside a game or something free for good: 72 of 82 DLC on 13.10, none a giveaway."""
+    store = dlc_store_guess(entry)
+    priced = str((entry or {}).get("worth") or "").strip().upper() not in ("", "N/A")
+    return priced and takes_dlc(store) and is_store_active(store)
+
+
+def route_is_fresh(route, now: datetime) -> bool:
+    """True while a remembered route is complete and younger than ROUTE_DAYS."""
+    try:
+        return bool(route["store"] and route["url"]) and now - datetime.fromisoformat(route["at"]) < timedelta(days=ROUTE_DAYS)
+    except (TypeError, KeyError, ValueError):
+        return False
+
+
+def _load_routes() -> dict:
+    try:
+        data = json.loads((cfg._data_dir / ROUTES_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_routes(routes: dict) -> None:
+    try:
+        (cfg._data_dir / ROUTES_FILE).write_text(json.dumps(routes, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.debug("Could not write %s: %s", ROUTES_FILE, e)
 
 
 def classify_target(final_url: str, instructions: str = "") -> str:
@@ -572,12 +630,21 @@ def is_product_page(store: str, final_url: str) -> bool:
 def _clean_title(title: str) -> str:
     """Drop the "(Steam) Key Giveaway" tails GamerPower puts on its titles."""
     for pattern in (r'(?i)\s*\(\s*steam\s*\)\s*(?:key\s*)?giveaway\s*$',
-                    r'(?i)\s*(?:steam\s*)?key\s*giveaway\s*$',
-                    r'(?i)\s*giveaway\s*$',
+                    r'(?i)\s*(?:steam\s*)?(?:key\s*)?giveaway\s*$',
                     r'(?i)\s*\(\s*steam\s*\)\s*key\s*$',
                     r'(?i)\s*steam\s*key\s*$'):
         title = re.sub(pattern, '', title)
     return title.strip()
+
+
+# GamerPower's store and platform tags, dropped only when titles are compared.
+_TITLE_TAG = re.compile(r"(?i)\s*\((?:steam|epic games(?: store)?|gog|indiegala|itch\.?io|fanatical|stove|"
+                        r"microsoft store|xbox|pc|mobile|android|ios|ubisoft|prime gaming)\)\s*$")
+
+
+def title_key(title: str) -> str:
+    """A title as compared for duplicates, whole, so "DOOM 3" is not taken for "DOOM"."""
+    return BaseClaimer._normalize_title(_TITLE_TAG.sub("", _clean_title(str(title or ""))))
 
 
 def counts_as_done(store: str, status: str) -> bool:
@@ -594,7 +661,7 @@ async def _claimed_titles() -> set:
         result = await session.execute(select(ClaimedGame))
         for db_game in result.scalars().all():
             if counts_as_done(db_game.store, db_game.status):
-                titles.add(BaseClaimer._normalize_title(db_game.title))
+                titles.add(title_key(db_game.title))
     return titles
 
 
@@ -634,10 +701,10 @@ async def discover_giveaways() -> dict:
             return {}
 
         # Filter before resolving redirects: every entry kept costs one extra HTTP request.
-        kept = [item for item in data if is_wanted(item, cfg.gp_claim_dlc)]
+        kept = [item for item in data if is_wanted(item, claim_dlc=dlc_wanted(item))]
         if len(data) - len(kept):
-            logger.debug("Skipped %d giveaway(s) of an unwanted type (GP_CLAIM_DLC=%s).",
-                         len(data) - len(kept), cfg.gp_claim_dlc)
+            logger.debug("Skipped %d giveaway(s) of an unwanted type, or DLC without a price or a store to take it.",
+                         len(data) - len(kept))
 
         games = [{
             "title": _clean_title(item.get("title", "Unknown")),
@@ -653,8 +720,9 @@ async def discover_giveaways() -> dict:
         db_titles = await _claimed_titles()
         unique_gp = []
         for gp in games:
-            norm = BaseClaimer._normalize_title(gp["title"])
-            if any(s in norm or norm in s for s in db_titles):
+            # Whole titles only: a fragment match took "Pony Island 2" for "Pony Island" (TODO 39).
+            key = title_key(gp["title"])
+            if key and key in db_titles:
                 logger.debug("GamerPower duplicate (already processed globally): %s", gp["title"])
             else:
                 unique_gp.append(gp)
@@ -663,23 +731,42 @@ async def discover_giveaways() -> dict:
             logger.info("No unique GamerPower giveaways found.")
             return {}
 
-        links = [f"  • [bold cyan]{g['title']}[/bold cyan] 🔗 {g.get('giveaway_url', '')}" for g in unique_gp]
-        logger.info("🎮 [bold magenta]GamerPower: %d extra game(s):[/bold magenta]\n%s",
-                    len(unique_gp), "\n".join(links))
+        # A giveaway looked up in the last two weeks was reported then, so it stays quiet now.
+        routes, now = _load_routes(), datetime.now(timezone.utc)
+        for game in unique_gp:
+            game["remembered"] = route_is_fresh(routes.get(game["giveaway_url"]), now)
+        new = [g for g in unique_gp if not g["remembered"]]
+        if new:
+            links = [f"  • [bold cyan]{g['title']}[/bold cyan] 🔗 {g.get('giveaway_url', '')}" for g in new]
+            logger.info("🎮 [bold magenta]GamerPower: %d extra game(s):[/bold magenta]\n%s",
+                        len(new), "\n".join(links))
+        logger.debug("GamerPower: %d giveaway(s) remembered from earlier runs", len(unique_gp) - len(new))
 
         routed: dict = {}
         for game in unique_gp:
-            store, final_url = await _resolve_target(game)
+            say = logger.debug if game["remembered"] else logger.info
+            route = routes[game["giveaway_url"]] if game["remembered"] else None
+            if route:
+                store, final_url = route["store"], route["url"]
+            else:
+                store, final_url = await _resolve_target(game)
+                # A lookup that never left GamerPower failed, so it is tried again next run.
+                if final_url != game["giveaway_url"].lower():
+                    routes[game["giveaway_url"]] = {"store": store, "url": final_url, "at": now.isoformat()}
             game["final_url"] = final_url
+            if game["type"].strip().lower() == "dlc" and not takes_dlc(store):
+                say("⏭️ [GamerPower] '%s' → %s takes no DLC giveaways, skipping", game["title"], store.title())
+                continue
             if not is_product_page(store, final_url):
-                logger.info("⏭️ [GamerPower] '%s' → %s URL is not a game page (%s), skipping",
-                            game["title"], store.title(), final_url)
+                say("⏭️ [GamerPower] '%s' → %s URL is not a game page (%s), skipping",
+                    game["title"], store.title(), final_url)
                 continue
             if store in COVERED_ELSEWHERE:
-                logger.info("⏭️ [GamerPower] '%s' → %s, already covered by the '%s' store, skipping",
-                            game["title"], store.title(), COVERED_ELSEWHERE[store])
+                say("⏭️ [GamerPower] '%s' → %s, already covered by the '%s' store, skipping",
+                    game["title"], store.title(), COVERED_ELSEWHERE[store])
                 continue
             routed.setdefault(store, []).append(game)
+        _save_routes({url: route for url, route in routes.items() if route_is_fresh(route, now)})
         logger.debug("GamerPower routing: %s",
                      {store: len(items) for store, items in sorted(routed.items())})
         return routed
@@ -714,8 +801,8 @@ class GamerPowerClaimer(BaseClaimer):
                     if self._side_store_selected(store):
                         work.append((store, game))
                     else:
-                        logger.info("⏭️ [GamerPower] '%s' → %s, not part of this run, skipping",
-                                    game.get("title", "Unknown"), label)
+                        (logger.debug if game.get("remembered") else logger.info)(
+                            "⏭️ [GamerPower] '%s' → %s, not part of this run, skipping", game.get("title", "Unknown"), label)
             if not work:
                 return
 
@@ -850,6 +937,7 @@ class GamerPowerClaimer(BaseClaimer):
     def _log_side_signed_in(self, label: str, account: str | None) -> None:
         """The line every store prints. `log_signed_in()` would also overwrite `self.user`,
         which this claimer keeps as the database key for all its side stores."""
+        hide_account(account)
         self.logger.info("🔓 [bold green]Signed in as:[/bold green] %s (%s)",
                          mask_account(account) or "unknown", label)
 
@@ -1126,9 +1214,7 @@ class GamerPowerClaimer(BaseClaimer):
             return ""
         data = answer.get("data")
         key = steam_key_in(data)
-        # Fanatical's error text may quote the account, so its e-mail is masked like every other one in the log.
         detail = answer.get("reason") or answer.get("error") or ""
-        detail = re.sub(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@", r"\1***@", detail)
         logger.debug("[Fanatical] Key reveal for '%s' answered %s %s, Steam key found: %s",
                      title, answer.get("status"), detail[:120], bool(key))
         if answer.get("reason") == "email-unconfirmed":
@@ -1264,7 +1350,8 @@ class GamerPowerClaimer(BaseClaimer):
                 free_seen = True
             if not free_seen or paid:
                 continue
-            if state.get("pay") and not state.get("payDisabled"):
+            # Paying needs this very read to show the total as zero, an earlier read is not enough.
+            if state.get("pay") and not state.get("payDisabled") and state.get("total") is not None:
                 paid = moved = await self._fanatical_click(FAN_MARK_PAY_JS, state["pay"])
             elif state.get("proceed"):
                 moved = await self._fanatical_click(FAN_MARK_PROCEED_JS, "Proceed to checkout") or moved
@@ -1576,7 +1663,7 @@ class GamerPowerClaimer(BaseClaimer):
                 else:
                     logger.info("✓ [Fanatical] Claimed '%s', the key is in your Fanatical library.", title)
                     notify_game["status"] = "claimed, key in your Fanatical library 🔑"
-                await self.take_screenshot(f"fanatical_{filenamify(title)}")
+                await self.take_screenshot(f"fanatical_{filenamify(title)}", failed=False)
             else:
                 logger.warning("[Fanatical] '%s' was not confirmed as claimed (checkout: %s).", title, outcome)
                 notify_game["status"] = "failed:unconfirmed" if outcome == "receipt" else "failed:checkout"
@@ -1780,7 +1867,7 @@ class GamerPowerClaimer(BaseClaimer):
                 logger.info("✓ [Itch.io] Claimed '%s'!", title)
                 await self._remember_itchio(game_id, title, url, "claimed")
                 notify_game["status"] = "claimed"
-                await self.take_screenshot(f"itchio_{filenamify(title)}")
+                await self.take_screenshot(f"itchio_{filenamify(title)}", failed=False)
             elif walked == "download-only":
                 # Plenty of itch.io giveaways are a file and nothing else: no control puts
                 # them on the account, so this is not a failed claim, it is all there is.
@@ -1956,7 +2043,7 @@ class GamerPowerClaimer(BaseClaimer):
                 logger.info("✓ [IndieGala] Claimed '%s'!", title)
                 await self._remember_indiegala(game_id, title, url, "claimed")
                 notify_game["status"] = "claimed"
-                await self.take_screenshot(f"indiegala_{filenamify(title)}")
+                await self.take_screenshot(f"indiegala_{filenamify(title)}", failed=False)
             else:
                 logger.warning("[IndieGala] '%s' is not in your library after the click.", title)
                 notify_game["status"] = "failed:unconfirmed"

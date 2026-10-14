@@ -6,9 +6,13 @@ look at the page: reloading or clicking every few seconds wipes the code you are
 """
 
 import ast
+import asyncio
+import logging
 from pathlib import Path
 
 import pytest
+
+from src.core.claimer import BaseClaimer
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = sorted((ROOT / "src").rglob("*.py"))
@@ -264,3 +268,37 @@ class TestRecaptchaOnUbisoft:
     def test_the_invisible_badge_is_not(self):
         assert "size=invisible" in self.JS
         assert "!badge(f) && seen(f)" in self.JS
+
+
+class TestAWaitThatNeverAsks:
+    """A game you already have is not worth your time on a security check, so its wait only lets the check pass by itself."""
+
+    class _Stub:
+        logger = logging.getLogger("test")
+
+        def __init__(self, present):
+            self.present, self.asked = list(present), False
+
+        async def _human_challenge_present(self):
+            return self.present.pop(0) if self.present else True
+
+        def _vnc_notice(self, *args):
+            return "notice"
+
+        async def _wait_for_vnc_login(self, check_fn, **kwargs):
+            self.asked = True
+            return True
+
+    def _wait(self, present, ask, settle=0):
+        stub = self._Stub(present)
+        cleared = asyncio.run(BaseClaimer._wait_out_challenge(stub, "Epic", settle=settle, ask=ask))
+        return cleared, stub.asked
+
+    def test_without_asking_a_check_that_stays_is_given_up(self):
+        assert self._wait([], ask=False) == (False, False)
+
+    def test_asking_is_still_the_default(self):
+        assert self._wait([], ask=True) == (True, True)
+
+    def test_a_check_that_passes_by_itself_counts_either_way(self):
+        assert self._wait([False], ask=False, settle=2) == (True, False)

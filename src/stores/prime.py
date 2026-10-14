@@ -9,7 +9,8 @@ import logging
 import nodriver as uc
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, open_first_tab, filenamify, mask_code
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, open_first_tab, filenamify
+from src.core.redact import mask_code
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.run_state import needs_you
@@ -950,7 +951,7 @@ class PrimeGamingClaimer(BaseClaimer):
                     obj.status = "claimed"
                     await session.commit()
                 self.notify_games.append({"title": title, "url": url, "status": "claimed"})
-                await self.take_screenshot(f"prime_{filenamify(title)}")
+                await self.take_screenshot(f"prime_{filenamify(title)}", failed=False)
             else:
                 logger.warning("Could not click claim for '%s'.", title)
                 self.notify_games.append({"title": title, "url": url, "status": "failed"})
@@ -1262,7 +1263,7 @@ class PrimeGamingClaimer(BaseClaimer):
             else:
                 self.notify_games.append({"title": title, "url": url, "status": f"code: {code} ({store})"})
 
-            await self.take_screenshot(f"prime_{filenamify(title)}")
+            await self.take_screenshot(f"prime_{filenamify(title)}", failed=False)
 
         except Exception:
             logger.exception("Failed to claim external '%s'", title)

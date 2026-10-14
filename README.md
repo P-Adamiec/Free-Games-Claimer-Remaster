@@ -11,7 +11,7 @@
 
 Automatically claims free games on:
 
-- <img alt="logo steam" src="https://store.steampowered.com/favicon.ico" width="20" align="middle" /> **Steam** – via [SteamDB](https://steamdb.info/upcoming/free/) scraping (only *Free to Keep*, not *Play for Free*)
+- <img alt="logo steam" src="https://store.steampowered.com/favicon.ico" width="20" align="middle" /> **Steam** – paid games and DLC that are free to keep for a while, found through GamerPower and Steam's own store search
 - <img alt="logo epic-games" src="https://github.com/user-attachments/assets/82e9e9bf-b6ac-4f20-91db-36d2c8429cb6" width="20" align="middle" /> **Epic Games Store** – weekly free games, including the weekly free Android/iOS mobile game (`EG_MOBILE`)
 - <img alt="logo fab" src="https://www.google.com/s2/favicons?domain=fab.com&sz=64" width="20" align="middle" /> **Fab** – Epic's asset marketplace, its limited-time free assets on your Epic account (opt-in, add `fab` to `STORES`)
 - <img alt="logo unity" src="https://www.google.com/s2/favicons?domain=unity.com&sz=64" width="20" align="middle" /> **Unity Asset Store** – the weekly free [Publisher of the Week](https://assetstore.unity.com/publisher-sale) asset, coupon and all (opt-in, add `unity` to `STORES`)
@@ -156,6 +156,7 @@ Options are set via environment variables in `.env`:
 | `EG_PARENTALPIN` | | Epic Games Parental Controls PIN. |
 | `EG_MOBILE` | `true` | Also claim Epic's weekly free mobile game (claimed on the same store page as the PC games). |
 | `EG_MOBILE_PLATFORMS` | `android,ios` | Which mobile versions to claim, Android and iOS are separate items of the same game. |
+| `EG_CLAIM_DLC` | `true` | Also claim the DLC giveaways GamerPower finds for Epic. Only DLC GamerPower gives a price for count, so codes for items inside a game stay out. |
 | `PG_EMAIL` | | Prime Gaming (Amazon) email. |
 | `PG_PASSWORD` | | Prime Gaming password. |
 | `PG_OTP_KEY` | | Prime Gaming authenticator (TOTP) key. |
@@ -171,9 +172,12 @@ Options are set via environment variables in `.env`:
 | `MS_EMAIL` | | Microsoft account email. |
 | `MS_PASSWORD` | | Microsoft account password. |
 | `MS_FORCE_REDEEM` | `false` | Force another pass over Microsoft codes from the last 60 days. |
+| `MS_CLAIM_DLC` | `true` | Also claim the DLC giveaways GamerPower finds for Xbox. Only DLC GamerPower gives a price for count, so codes for items inside a game stay out. |
 | `MS_OTP_KEY` | | Microsoft authenticator (TOTP) secret, auto-filled. E-mail codes and passkeys are done by you over VNC. |
 | `STEAM_USERNAME` | | Steam username. |
 | `STEAM_PASSWORD` | | Steam password. |
+| `STEAM_CLAIM_DLC` | `true` | Also claim Steam DLC at 100% off, from GamerPower and from Steam's own search. A DLC whose base game you don't own is reported once, not every run. `false` keeps Steam to full games. |
+| `STEAM_SEARCH` | `true` | Also read Steam's own store search after GamerPower. `false` leaves Steam to what GamerPower finds, a safety switch should Steam ever mind the search. |
 | `FAB_ACCEPT_EULA` | `true` | Let the bot accept Fab's licence agreement and the EU right-of-withdrawal waiver, both required to claim. Set to `false` to stop before them. Fab reuses `EG_EMAIL` / `EG_PASSWORD` / `EG_OTP_KEY`. |
 | `UNITY_EMAIL` | | Unity Asset Store login email. |
 | `UNITY_PASSWORD` | | Unity Asset Store password. |
@@ -189,7 +193,6 @@ Options are set via environment variables in `.env`:
 | `AE_PAGE_RETRIES` | `4` | How many extra approaches to make when the coin page loads but renders nothing. AliExpress serves it empty most of the time (measured: one usable page in eight looks), so each retry is a real chance at the daily check-in. `0` gives up on the first look. |
 | `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `prime`, `gog`, `microsoft`, `ubisoft`, `aliexpress` and `legacy`. Add `fab`, `unity`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
 | `RESET_DB_GAMES` | `false` | Erase the database claims recorded within the last 7 days, at every start while it is on, to clear false positives. Codes and keys still waiting to be redeemed are kept. Set it back to `false` after one start. |
-| `GP_CLAIM_DLC` | `false` | Also process GamerPower's in-game DLC giveaways. Off by default: most need an account in that specific game, and they are the bulk of the feed. |
 | `FANATICAL_EMAIL` | | Fanatical account email. |
 | `FANATICAL_PASSWORD`| | Fanatical account password. |
 | `FANATICAL_OTP_KEY` | | Fanatical authenticator (TOTP) secret, auto-filled. Fanatical offers no other kind of two-factor. |
@@ -204,9 +207,11 @@ Options are set via environment variables in `.env`:
 | `BROWSER_DIR` | `data/browser` | Browser profile directory (persists cookies/sessions). |
 | `SCREENSHOTS_DIR` | `data/screenshots` | Directory where debug/failure screenshots are saved. |
 | `DEBUG` | `true` | Shows verbose actions the bot takes. |
-| `DEBUG_LIBS` | `false` | Adds the internals of the libraries the bot uses (every CDP frame sent to Chrome, HTTP handshakes, SQL queries). Only turn this on if a bug report asks for it. |
+| `DEBUG_LIBS` | `false` | Adds the internals of the libraries the bot uses (every CDP frame sent to Chrome, HTTP handshakes, SQL queries). Only turn this on if a bug report asks for it. Your passwords, sign-in names, notification tokens and game codes should be masked in these lines too. |
+| `DEBUG_SCREENSHOTS` | `false` | Send each screenshot the bot takes when something fails (also kept in `data/screenshots/`) with a notification, to Discord and to Apprise services that take attachments. A screenshot can show your account name, e-mail or a game code, so send it only to a channel that is yours alone. |
 | `DRYRUN`| `false` | Simulate a run without claiming games. Detects available giveaways and sends a summary report. |
 | `DISCORD_WEBHOOK` | | Discord webhook URL for notifications. |
+| `DISCORD_SUPPRESS_EMBEDS` | `true` | Show the links in Discord notifications without preview cards, so a summary with many games stays short. `false` brings the cards back. |
 | `NOTIFY` | | Apprise URL(s) for Telegram, Slack, ntfy, etc. Multiple services can be separated by commas. |
 | `NOTIFY_TEST` | `false` | Send a test notification on startup to verify your setup works. |
 | `NOTIFY_SUMMARY` | `true` | Set to false to disable game claim summaries. (Applies to all services) |
@@ -336,17 +341,16 @@ The application supports three scheduling modes: running on a recurring interval
 
 ### Selective module execution
 
-Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`/`amazon`, `gog`, `ubisoft`/`ubi`, `fab`, `unity`, `microsoft`/`ms`/`xbox`, `aliexpress`/`ae`, `itchio`/`itch`, `fanatical`, `indiegala`, `alienware`):
+Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`/`amazon`, `gog`, `ubisoft`/`ubi`, `fab`, `unity`, `microsoft`/`ms`/`xbox`, `aliexpress`/`ae`, `legacy`/`lg`, `itchio`/`itch`, `fanatical`, `indiegala`, `alienware`):
 
 ```bash
 # Method 1: Via environment variable (recommended)
 # Edit .env: STORES=steam,amazon
 
-# Method 2: Temporary execution via Docker Compose
-STORES=epic,gog docker compose up -d
-
-# Method 3: One-off immediate run inside Docker (ignores scheduler)
-docker compose run --rm app python main.py steam gog --once
+# Method 2: One-off immediate run of the named stores (ignores the scheduler)
+docker compose stop      # two bots must not share the same browser profiles
+docker compose run --rm --service-ports app python main.py steam gog --once
+docker compose start
 ```
 
 To skip a store, simply exclude it from the `STORES` list. Any unrecognized settings are now reported at startup rather than being ignored silently.
@@ -389,6 +393,7 @@ free-games-claimer-remaster/
 │   │   ├── database.py     # SQLAlchemy models & SQLite engine
 │   │   ├── display.py      # The virtual screen the browser draws on, and bringing it back
 │   │   ├── notifier.py     # Modular Discord/Apprise webhooks
+│   │   ├── redact.py       # Masks passwords, sign-in names, tokens and game codes in the log
 │   │   ├── selection.py    # Which stores this run covers (GamerPower reads it)
 │   │   ├── run_state.py    # What this run learned: which store is waiting for you
 │   │   ├── updates.py      # Tells you when a newer release is published
@@ -397,7 +402,7 @@ free-games-claimer-remaster/
 │       ├── epic.py         # Epic Games Store
 │       ├── prime.py        # Amazon Prime Gaming
 │       ├── gog.py          # GOG (+ GOG code redemption from Prime)
-│       ├── steam.py        # Steam (SteamDB scraping, activating keys from Fanatical)
+│       ├── steam.py        # Steam (store search for 100% off, activating keys from Fanatical)
 │       ├── epic_fab.py     # Fab limited-time free assets (shares Epic's session)
 │       ├── unity.py        # Unity Asset Store weekly free asset
 │       ├── ubisoft.py      # Ubisoft giveaways (ubisoft.com/games/free)
@@ -415,9 +420,9 @@ free-games-claimer-remaster/
 2. Each store module **starts its own browser** with an isolated profile, securely recalling session cookies (`--restore-last-session`). A first tab that arrives late no longer takes the store down, and each profile is marked as cleanly closed before every start. Two exceptions save a login: Fab rides Epic's profile, and a GamerPower find is claimed inside the session the store already opened, rather than in a second browser of its own.
 3. **Login detection** checks the page DOM (not just cookies/DB).
 4. **Fingerprint** is the one nodriver's patched Chrome produces by itself, because a hand-written desktop spoof did not match the real container and started summoning captchas (see CHANGELOG 1.4). Only AliExpress overrides it, injecting one coherent real-device Android fingerprint (`browserforge`) over the Chrome DevTools Protocol.
-5. **Game discovery** prefers each store's own data over scraping the page: Epic's promotions API, Ubisoft's embedded news feed, Fab's free-content blade, the GamerPower API, and SteamDB for Steam.
+5. **Game discovery** prefers each store's own data over scraping the page: Epic's promotions API, Ubisoft's embedded news feed, Fab's free-content blade, the GamerPower API, and Steam's own search for items at 100% off.
 6. **Store selection** (`STORES`) is published to the run, so a GamerPower find is only claimed when this run includes the store it belongs to.
-7. **A claim counts only when the store agrees.** After the checkout the bot reads the product page or the account's own list back (Epic, Fab, Unity, Itch.io, IndieGala, Fanatical) and reports `claimed` only then, otherwise it says so instead of guessing. `fgc.db` (SQLite) remembers the outcome so runs do not trip over each other.
+7. **A claim counts only when the store agrees.** After the checkout the bot reads the product page or the account's own list back (Epic, Fab, Steam, Microsoft, Unity, Itch.io, IndieGala, Fanatical) and reports `claimed` only then, otherwise it says so instead of guessing. `fgc.db` (SQLite) remembers the outcome so runs do not trip over each other.
 8. **Clean Notifications** dispatch to you dynamically based on the toggles configured in the `.env` settings, and a daily update check tells you when a newer release is out (`NOTIFY_UPDATES`).
 9. **Two-factor sign-in follows one rule everywhere.** With an authenticator secret set (`*_OTP_KEY`) the bot sends two codes, the second one different from the first because a refused code stays refused inside its 30-second window. Then a recovery code from `*_OTP_CODES` if you gave it any, and only then the screen is left to you over VNC.
 10. **Your settings are read back to you at startup.** Anything in `.env` the bot does not understand is named in the log instead of being ignored, and account names are masked (`p***@gmail.com`) so a log is safe to share.
@@ -440,7 +445,7 @@ Both Discord and Apprise can be configured simultaneously, notifications are sen
 | Issue | Solution |
 |---|---|
 | Store not logging in | Open VNC (`http://localhost:7080`) and login manually. Your credentials or session logic persist beautifully after first login. |
-| Steam game not detected | Check that the game is listed on [SteamDB Free](https://steamdb.info/upcoming/free/). |
+| Steam game not detected | Check that it shows at -100% in [Steam's search for free items on sale](https://store.steampowered.com/search/?maxprice=free&specials=1). An item Steam keeps out of its search is found only when GamerPower lists it. |
 | GamerPower missing games | Itch.io, IndieGala, Alienware Arena and Fanatical each need an account there, so they run only when you name them: `STORES=...,itchio,indiegala`. Giveaways for Steam, Epic or GOG are claimed by those stores themselves, so they are skipped when the store is not in your `STORES` list. |
 | Unity coupon not applied | Unity blocks the coupon while its checkout form is incomplete, see [Unity, one-time setup](#unity-one-time-setup). Two other reasons it stops on purpose: a checkout rendered in a language other than English, and `UNITY_ACCEPT_TOS=false`, which halts right before the EULA. |
 | AliExpress coins not collected | The coin page often loads as an empty shell. The bot walks back to it up to `AE_PAGE_RETRIES` times (four by default), then reports it and moves on. It has been seen working again on a later run; collect in the mobile app if it persists. |
@@ -514,11 +519,9 @@ Keep this one for when you are truly stuck. You lose every saved login and the r
 
 The log already carries the bot's diagnostic detail, because `DEBUG` is on by default. With `DEBUG=false` it shows only what you act on: which store is running, who is signed in, what was found and claimed, plus every warning and error.
 
-1. **Check you are on the newest code first**, the fix may already exist. `docker logs fgc-remaster
-| head -20` prints the version in the banner. To try the development build, set `FGC_TAG=dev` in
-`.env`, then `docker compose pull` and `docker compose up -d`.
+1. **Check you are on the newest code first**, the fix may already exist. `docker logs fgc-remaster | head -20` prints the version in the banner. To try the development build, set `FGC_TAG=dev` in `.env`, then `docker compose pull` and `docker compose up -d`.
 2. If your `.env` has `DEBUG=false`, remove that line and restart (`docker compose up -d`), then reproduce the problem.
-3. Collect the log. Go to the folder that holds your `docker-compose.yml` and run `docker logs fgc-remaster --tail 500 > fgc.log.txt`. **The file appears in that folder, next to `docker-compose.yml`**, and you drag it into the GitHub comment box. Pasting the terminal output of the command itself sends us nothing, the log is inside the file. Prefer pasting? Run `docker logs fgc-remaster --tail 100` and put the output between triple backticks. Account names are masked for you (`p***@gmail.com`), so either way it is safe to share.
+3. Collect the log. Go to the folder that holds your `docker-compose.yml` and run `docker logs fgc-remaster --tail 500 > fgc.log.txt`. **The file appears in that folder, next to `docker-compose.yml`**, and you drag it into the GitHub comment box. Pasting the terminal output of the command itself sends us nothing, the log is inside the file. Prefer pasting? Run `docker logs fgc-remaster --tail 100` and put the output between triple backticks. Your passwords, two-factor secrets and notification tokens show as `***`, e-mail addresses as `p***@gmail.com`, other account names (such as your first name on Amazon) by their first letter, and game codes by their first five characters, so either way it should be safe to share, but please have a final look at it before sending.
 4. **Keep that file, then try it clean.** Leftover state explains a surprising share of these:
    ```bash
    docker compose down -v     # stops the bot and throws away logins and claim history
@@ -530,11 +533,10 @@ The log already carries the bot's diagnostic detail, because `DEBUG` is on by de
    - `data/screenshots/<store>/`, screenshots taken at every failure. A failed code redemption shows the code and the account on screen, so look before you attach one,
    - `data/ae_coin_api.json`, raw AliExpress check-in responses (streak, coins),
    - `data/TurboVNC.log`, everything the virtual screen printed, including why it refused to start,
-   - `data/steamdb_dump.html`, the SteamDB page as the bot parsed it (written only with `DEBUG=true`),
    - `data/*_fail.html`, page snapshots from failed logins/check-ins.
 6. Watch it live if it is still running: open `http://localhost:7080` (noVNC) and take over the browser.
 
-A good bug report is: what you expected, what happened, the `DEBUG=true` log around the failure, and the matching screenshot. `DEBUG=true` covers what the bot itself did; only add `DEBUG_LIBS=true` if you are asked for the raw network or browser traffic, because that turns one run into tens of thousands of lines. Please switch `DEBUG_LIBS` off again once the problem is solved.
+A good bug report is: what you expected, what happened, the `DEBUG=true` log around the failure, and the matching screenshot. `DEBUG=true` covers what the bot itself did; only add `DEBUG_LIBS=true` if you are asked for the raw network or browser traffic, because that turns one run into tens of thousands of lines. Please switch `DEBUG_LIBS` off again once the problem is solved. The [bug report form](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/new?template=bug_report.yml) asks for exactly these.
 
 ---
 
@@ -545,6 +547,11 @@ This bot started as one of my personal automations for everyday tasks, and it is
 <p align="center">
   <a href="https://www.buymeacoffee.com/padamiec"><img alt="Support the project on Buy Me a Coffee" src=".github/support-button.svg" height="50" /></a>
 </p>
+
+> [!IMPORTANT]
+> I read and answer every issue and message personally. This is a free project that I develop on my own in my spare time, so replies and new features can take a while. Features that depend on services I don't use myself need some hands-on testing before they ship, and detailed reports and ideas speed that up a lot. If it seems I haven't quite understood your report, please bear with me and explain it once more in a little more detail. My setup and the apps I use every day are probably different from yours, and after a long day I can miss a detail too. That is why you are testers of this project as much as users, and together we keep making it better.
+>
+> Opening an issue? Pick the form that fits, [a bug, a feature idea or something else](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/new/choose). Each one asks for what I need to understand it.
 
 ---
 

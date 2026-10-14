@@ -28,6 +28,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from src.core.browser_timezone import refresh as refresh_browser_timezone
 from src.core.config import cfg, settings_warnings
 from src.core.claimer import mask_account
+from src.core.redact import RedactFilter, hide_settings
 from src.core.database import init_db
 from src.core.run_state import reset_run_state, set_next_run_source, waiting_for_you
 from src.core.selection import apply_run_selection
@@ -74,6 +75,9 @@ handler = RichHandler(
     markup=True,
 )
 handler.addFilter(StorePrefixFilter())
+# Passwords, sign-in names, notification tokens and game codes are masked in every line, whoever writes it.
+hide_settings(cfg)
+handler.addFilter(RedactFilter())
 
 logging.basicConfig(
     level=logging.DEBUG if cfg.debug else logging.INFO,
@@ -86,11 +90,17 @@ logger = logging.getLogger("fgc")
 # HTTP handshake, every SQLite call. DEBUG=true is about the bot, DEBUG_LIBS about these.
 NOISY_LIBRARIES = (
     "nodriver", "uc", "websockets", "httpx", "httpcore",
-    "aiosqlite", "sqlalchemy", "apscheduler", "tzlocal", "asyncio", "apprise",
+    "aiosqlite", "sqlalchemy", "apscheduler", "tzlocal", "asyncio", "apprise", "markdown",
+    # Apprise sends through urllib3, whose request lines carry a Telegram bot token (#86).
+    "urllib3",
 )
 if not cfg.debug_libs:
     for _name in NOISY_LIBRARIES:
         logging.getLogger(_name).setLevel(logging.WARNING)
+else:
+    # Result rows can hold a game code the mask has not learned yet, so SQL shows statements only.
+    for _name in ("sqlalchemy.engine", "aiosqlite"):
+        logging.getLogger(_name).setLevel(logging.INFO)
 
 
 # asyncio warns about Chrome PIDs we deliberately reaped ourselves in close_browser().

@@ -7,7 +7,8 @@ import logging
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, mask_code
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
+from src.core.redact import mask_code
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host

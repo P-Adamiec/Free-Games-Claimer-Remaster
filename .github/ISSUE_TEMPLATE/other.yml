@@ -1,0 +1,26 @@
+name: Something else
+description: A question, a mistake in the docs, or anything that is not a bug or a feature idea.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Anything goes here. For a question about your own setup, [Discussions](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/discussions) can also help, other people often ran into the same thing.
+  - type: checkboxes
+    id: newest
+    attributes:
+      label: Before you write
+      options:
+        - label: I am on the newest version (`docker compose pull`, then `docker compose up -d`).
+          required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What it is about
+      description: Tell me what you need or what you noticed.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Anything that helps
+      description: The version from `docker logs fgc-remaster | head -20`, the store, links, screenshots. Never paste passwords, tokens or webhook addresses.

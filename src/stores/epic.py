@@ -12,7 +12,8 @@ import httpx
 import nodriver as uc
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, CHALLENGE_JS, OTP_KEY_ATTEMPTS, track_missing_base
+from src.core.claimer import (BaseClaimer, CHALLENGE_JS, OTP_KEY_ATTEMPTS, account_key, older_than, row_extra,
+                              track_missing_base)
 from src.core.config import cfg
 from src.core.run_state import needs_you, waits_for_nobody
 from src.core.database import async_session, get_or_create
@@ -29,6 +30,11 @@ URL_LOGIN = (
     "https://www.epicgames.com/id/login?lang=en-US"
     "&noHostRedirect=true&redirectUrl=" + URL_CLAIM
 )
+
+# A game you have, or one blocked in your region, has its page read again only after this many days.
+RECHECK_DAYS = 3
+# What a page said that does not change within a week's promotion.
+RECHECKED = ("claimed", "existed", "skipped:region")
 
 
 # Reads the product page's main action button. The order matters: an "In Library" chip in a
@@ -122,6 +128,11 @@ def text_finder(text: str, tag: str = "button", exact: bool = False) -> str:
             .replace("__INCLUDES__", "" if exact else f" || all.find(b => norm(b).includes({want}))"))
 
 
+def tile_finder(slug: str) -> str:
+    """A finder for BOX_JS: a shown link to this game's page, like its tile on the free games list."""
+    return TILE_FINDER.replace("__SHOWN__", SHOWN).replace("__WANT__", json.dumps("/" + slug.strip("/").lower()))
+
+
 FIND_CHECKOUT_FRAME = """() => [...document.querySelectorAll('iframe')]
     .find(f => /payment|purchase/i.test(f.src || '') || f.closest('#webPurchaseContainer'))"""
 
@@ -148,6 +159,8 @@ FRAME_HIT_JS = """
 # Only what a person can see: a zero-size duplicate of a button must never be the one clicked.
 SHOWN = r"""(b => { const r = b.getBoundingClientRect(), s = getComputedStyle(b);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; })"""
+TILE_FINDER = r"""() => [...document.querySelectorAll('a[href*="/p/"], a[href*="/bundles/"]')].filter(__SHOWN__)
+    .find(a => (a.getAttribute('href') || '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase().endsWith(__WANT__))"""
 FIND_ADD_TO_LIBRARY = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b =>
     (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase().includes('add to library'))""".replace("__SHOWN__", SHOWN)
 FIND_I_ACCEPT = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b => {
@@ -276,7 +289,8 @@ class EpicGamesClaimer(BaseClaimer):
 
             # --- Claim each game, then whatever GamerPower found for Epic ---
             for game in free_games:
-                await self._claim_game(game["url"])
+                # Mobile games have no tile on the free games list, so they are opened by their address.
+                await self._claim_game(game["url"], from_list=game["url"] not in self._platform_labels)
             handled = {url.rstrip("/").split("/")[-1] for url in (g["url"] for g in free_games)}
             for game in (extra_games or []):
                 if game["final_url"].rstrip("/").split("/")[-1] in handled:
@@ -977,6 +991,39 @@ class EpicGamesClaimer(BaseClaimer):
             await self.sleep(1)
         return state
 
+    async def _click_game_tile(self, url: str) -> bool:
+        """Open a game from its tile with the mouse, as a person would; False when there is no tile to click."""
+        slug = url.rstrip("/").split("/")[-1]
+        finder, label = tile_finder(slug), f"tile of {slug}"
+        try:
+            if not await self._cdp_click_found(finder, label):
+                await self.page.get(URL_CLAIM)
+                await self.sleep(3)
+                if not await self._cdp_click_found(finder, label):
+                    logger.debug("No tile for '%s' on the free games list.", slug)
+                    return False
+            for _ in range(10):
+                if str(await self.page.evaluate("location.pathname")).rstrip("/").lower().endswith("/" + slug.lower()):
+                    logger.debug("Opened '%s' from its tile.", slug)
+                    return True
+                await self.sleep(0.5)
+        except Exception as exc:
+            logger.debug("Could not open '%s' from its tile: %s", slug, exc)
+            return False
+        logger.debug("The tile of '%s' did not lead to its page.", slug)
+        return False
+
+    async def _open_game_page(self, url: str, ask: bool = True, from_list: bool = False) -> bool:
+        """Open a game page and get past a Cloudflare check; False when the check stayed."""
+        if not (from_list and await self._click_game_tile(url)):
+            logger.debug("Opening %s by its address.", url)
+            await self.page.get(url)
+        await self.sleep(4)
+        if not await self._human_challenge_present():
+            return True
+        # Cloudflare reloads the page itself once its check passes, so there is no second load here.
+        return await self._wait_out_challenge("Epic", store_key=self.store_name, ask=ask)
+
     async def _confirm_in_library(self, url: str, tries: int = 3) -> bool:
         """Re-read the product page after checkout, only an owned page proves the claim landed."""
         for attempt in range(tries):
@@ -984,8 +1031,9 @@ class EpicGamesClaimer(BaseClaimer):
                 # Epic's library can take a few seconds to catch up with the order.
                 await self.sleep(6)
             try:
-                await self.page.get(url)
-                await self.sleep(4)
+                # A check nobody cleared comes back on every load, so the page is not loaded again.
+                if not await self._open_game_page(url):
+                    return False
                 await self._click_page_button_by_text("Continue", timeout=2, log="mature content gate")
                 state = await self._page_state(tries=8)
             except Exception as exc:
@@ -1023,7 +1071,7 @@ class EpicGamesClaimer(BaseClaimer):
 
     # Retry up to 2 times with exponential backoff if claiming fails
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=3, max=15), reraise=True)
-    async def _claim_game(self, url: str) -> None:
+    async def _claim_game(self, url: str, from_list: bool = False) -> None:
         """Claim a single free game by navigating to its page and clicking through the purchase flow."""
         self._click_counts = {}
         # Extract the game identifier from the URL (e.g. "fortnite" from ".../p/fortnite")
@@ -1031,16 +1079,35 @@ class EpicGamesClaimer(BaseClaimer):
 
         async with async_session() as session:
             obj, created = await get_or_create(
-                session, store=self.store_name, user=self.user or "unknown",
+                session, store=self.store_name, user=account_key(cfg.eg_email, self.user),
                 game_id=game_id, title=game_id, url=url, status="unknown",
             )
-            # The page, not the database, decides: a row saying "claimed" can be stale
-            # or simply wrong, and skipping on it alone would hide the game forever.
-            if not created:
-                logger.debug("DB says '%s' is '%s', verifying on the store page anyway", game_id, obj.status)
+            extra = row_extra(obj)
+            known = obj.status in RECHECKED
+            owned_entry = {"title": obj.title or title_from_slug(game_id), "url": url, "status": "existed"}
+            if known and not older_than(extra.get("page_checked"), RECHECK_DAYS):
+                logger.debug("'%s' is %s, its page was read %s, not opened this run.",
+                             game_id, obj.status, extra["page_checked"])
+                if obj.status != "skipped:region":
+                    self.notify_games.append(owned_entry)
+                return
+            extra["page_checked"] = datetime.now(timezone.utc).isoformat()
+            obj.extra = json.dumps(extra)
 
-            await self.page.get(url)
-            await self.sleep(4)
+            # A game you have, or cannot get in your region, is not worth asking you to solve a security check.
+            if not await self._open_game_page(url, ask=not known, from_list=from_list):
+                # From the address: an earlier run may have stored the check page's heading as the name.
+                title = title_from_slug(game_id)
+                if known:
+                    logger.info("'%s' is behind a security check on Epic, looked at again in %d days.",
+                                title, RECHECK_DAYS)
+                    if obj.status != "skipped:region":
+                        self.notify_games.append(owned_entry)
+                else:
+                    logger.warning("Security check on '%s' not cleared, trying again next run.", title)
+                    self.notify_games.append({"title": title, "url": url, "status": "failed"})
+                await session.commit()
+                return
 
             # ── Handle mature content / age gate ──
             await self._click_page_button_by_text("Continue", timeout=2, log="mature content gate")
