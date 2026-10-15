@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project does not follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): every release raises the number after the dot (1.10, 1.11), and a development build carries the same number with a `d` suffix (`v1.11d`). The version being worked on stays at the top without a date until it is released.
 
+## [1.17]
+
+### Fixed
+- **Epic signs in from its saved-account list without credentials** – without `EG_EMAIL` and `EG_PASSWORD` the bot went straight to the VNC wait, even when Epic only asked which saved account to continue with. `_pick_saved_account()` in `src/stores/epic.py` now clicks your tile with the mouse in both sign-in paths, on the switch-account and the MFA address alike, and gives the redirect to the store up to 30 seconds before it asks you over VNC. It picks the tile matching `EG_EMAIL`, or the only one there is. With several and no match it no longer takes the first, which could be someone else's account, and asks you to pick yours over VNC right away instead of after three sign-in attempts.
+
 ## [1.16] - 2026-10-16
 
 A hotfix for Epic Games: the mouse clicks 1.13 brought in to draw fewer captchas missed Epic's new checkout frame, so Epic claims stopped on 1.13 to 1.15. Epic keeps changing its site and anti-bot checks, so a problem there can come from their side too, and an issue with your log helps the bot catch up. The more users run the development build, the sooner such a change is caught there, before a release. If you are a technical user, please set `FGC_TAG=dev`, keep `DEBUG=true` (the default) and report what you see.
@@ -438,6 +443,7 @@ Steam no longer reads SteamDB: free Steam games now come from GamerPower and Ste
 - ❌ `unrealengine.js` – Out of scope
 - ❌ `steam-games.js` – Only scraped profiles, never claimed games
 
+[1.17]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.16...dev
 [1.16]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.15...v1.16
 [1.15]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.14...v1.15
 [1.14]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.13...v1.14

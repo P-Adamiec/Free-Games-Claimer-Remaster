@@ -205,7 +205,7 @@ class TestEpicLeavesTheChallengeOnScreen:
 
     def test_a_captcha_hands_over_before_any_navigation(self):
         loop = self.SOURCE.split("The wait loop can also run out of time", 1)[1]
-        handover = loop.index("if mfa_manual or challenge_blocked:")
+        handover = loop.index("if mfa_manual or challenge_blocked")
         assert handover < loop.index("await self.page.get(URL_CLAIM)")
 
 

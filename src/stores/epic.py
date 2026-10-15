@@ -133,6 +133,11 @@ def tile_finder(slug: str) -> str:
     return TILE_FINDER.replace("__SHOWN__", SHOWN).replace("__WANT__", json.dumps("/" + slug.strip("/").lower()))
 
 
+def saved_account_finder(email: str | None) -> str:
+    """A finder for BOX_JS: your tile on Epic's saved-account list, by EG_EMAIL, else the only tile there is."""
+    return SAVED_ACCOUNT_FINDER.replace("__SHOWN__", SHOWN).replace("__WANT__", json.dumps((email or "").strip().lower()))
+
+
 # Run on the checkout <iframe>: its content corner on the page and the part of it on screen, for clicks and the wheel.
 FRAME_ORIGIN_JS = """function() {
     const f = this, r0 = f.getBoundingClientRect();
@@ -153,6 +158,17 @@ SHOWN = r"""(b => { const r = b.getBoundingClientRect(), s = getComputedStyle(b)
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; })"""
 TILE_FINDER = r"""() => [...document.querySelectorAll('a[href*="/p/"], a[href*="/bundles/"]')].filter(__SHOWN__)
     .find(a => (a.getAttribute('href') || '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase().endsWith(__WANT__))"""
+# Epic's "continue as" list after a half-finished sign-in, on /id/login/switch-account and on the MFA address alike.
+# Verified live: each tile is a div[role=button] with id="account-…", holding the name and the e-mail, and there is no
+# Continue button; "Use another account" (#use-different-account) and "Manage accounts" (#manage-accounts) sit below.
+# With several accounts and none matching EG_EMAIL nothing is found: which one to claim on is not the bot's guess.
+SAVED_ACCOUNT_FINDER = r"""() => {
+    if (!location.pathname.toLowerCase().includes('/id/login/')) return null;
+    const tiles = [...document.querySelectorAll('[id^="account-"]')].filter(__SHOWN__);
+    const want = __WANT__;
+    return (want && tiles.find(t => (t.textContent || '').toLowerCase().includes(want)))
+        || (tiles.length === 1 ? tiles[0] : null);
+}"""
 FIND_ADD_TO_LIBRARY = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b =>
     (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase().includes('add to library'))""".replace("__SHOWN__", SHOWN)
 FIND_I_ACCEPT = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b => {
@@ -326,6 +342,14 @@ class EpicGamesClaimer(BaseClaimer):
     # Login
     # ------------------------------------------------------------------
 
+    async def _pick_saved_account(self, wait: int = 1) -> bool:
+        """Click your account on Epic's saved-account list, looking for it up to `wait` times a second apart."""
+        if not await self._cdp_click_found(saved_account_finder(cfg.eg_email), "saved account",
+                                           allow_script=True, tries=wait):
+            return False
+        logger.info("Epic asked which saved account to continue with, picked yours.")
+        return True
+
     async def _ensure_logged_in(self) -> bool:
         """Check if we're logged into Epic. If not, try automatic login or VNC fallback.
 
@@ -421,7 +445,17 @@ class EpicGamesClaimer(BaseClaimer):
         if not email or not password:
             logger.warning("EG_EMAIL missing. Proceeding to login page for manual VNC login...")
             await self._navigate_organically_to_login()
-            logged_in = await self._wait_for_vnc_login(_is_logged_in)
+            logged_in = False
+            # Epic's login page often only asks which saved account to continue with, nothing to wake you for.
+            if await self._pick_saved_account(wait=10):
+                # The VNC wait sends its notice before it first looks, so the pick gets its redirect to the store first.
+                for _ in range(15):
+                    await self.sleep(2)
+                    logged_in = await _is_logged_in()
+                    if logged_in:
+                        break
+            if not logged_in:
+                logged_in = await self._wait_for_vnc_login(_is_logged_in)
             if not logged_in:
                 logger.warning("VNC login timed out – skipping.")
                 return False
@@ -433,6 +467,7 @@ class EpicGamesClaimer(BaseClaimer):
         # Automated stealth login loop
         challenge_blocked = False
         mfa_manual = False
+        account_choice = False
         for attempt in range(3):
             # A prompt nobody answered means nobody will answer the next two either.
             if waits_for_nobody(self.store_name):
@@ -452,6 +487,7 @@ class EpicGamesClaimer(BaseClaimer):
 
             otp_tried = 0
             backup_tried = False
+            unpicked = 0
             # Wait loop to detect auth completion or interstitial
             for wait_sec in range(120):
                 try:
@@ -462,6 +498,18 @@ class EpicGamesClaimer(BaseClaimer):
                 # We know auth is complete when Epic redirects us back to the store domain.
                 if url_has_allowed_host(curr_url, "store.epicgames.com"):
                     break
+
+                # Epic's saved-account list, also on the MFA address, which the code screen check would take for itself.
+                low_url = curr_url.lower()
+                on_switch = "/id/login/switch-account" in low_url
+                if (on_switch or "/id/login/mfa" in low_url) and await self._pick_saved_account():
+                    continue
+                # Still up after a few seconds: several accounts and none matches EG_EMAIL, so the choice is yours.
+                if on_switch:
+                    unpicked += 1
+                    if unpicked >= 5:
+                        account_choice = True
+                        break
 
                 # 2FA code screen: fill in the TOTP if EG_OTP_KEY is set, otherwise hand it to the user.
                 if await self._mfa_prompt_present():
@@ -482,22 +530,6 @@ class EpicGamesClaimer(BaseClaimer):
                     otp_tried += 1
                     await self._fill_totp()
                     await self.sleep(3)
-                    continue
-
-                # Epic asks which account to continue with after any half-finished sign-in.
-                # Verified live: the screen is a list of accounts, there is no Continue button.
-                if "/id/login/switch-account" in curr_url.lower():
-                    logger.debug("Epic is asking which account to continue with, picking yours.")
-                    await self.page.evaluate(f"""
-                        (() => {{
-                            const want = {json.dumps((cfg.eg_email or "").lower())};
-                            const tiles = [...document.querySelectorAll('[id^="account-"]')];
-                            const tile = tiles.find(t => (t.textContent || '').toLowerCase().includes(want))
-                                || tiles[0];
-                            if (tile) tile.click();
-                        }})()
-                    """)
-                    await self.sleep(5)
                     continue
 
                 if "login/review" in curr_url:
@@ -548,7 +580,7 @@ class EpicGamesClaimer(BaseClaimer):
                 mfa_manual = True
 
             # A code screen or a captcha is yours to finish, so the page is left exactly as it stands.
-            if mfa_manual or challenge_blocked:
+            if mfa_manual or challenge_blocked or account_choice:
                 break
 
             # verify success
@@ -564,6 +596,8 @@ class EpicGamesClaimer(BaseClaimer):
             reason = " (2FA code needed)"
         elif challenge_blocked:
             reason = " (captcha/challenge)"
+        elif account_choice:
+            reason = " (several saved accounts)"
         else:
             reason = " after 3 attempts"
         logger.warning("Automated Epic login failed%s – requesting manual login via VNC.", reason)
@@ -572,6 +606,11 @@ class EpicGamesClaimer(BaseClaimer):
                 "Epic Games: 2FA code needed",
                 "Enter the 6-digit code Epic sent to your email or phone (or from your authenticator). "
                 "If a 'One more step' security check appears, complete it too.",
+            )
+        elif account_choice:
+            custom_msg = self._vnc_notice(
+                "Epic Games: pick your account",
+                "Epic asks which saved account to continue with, and none of them matches EG_EMAIL. Pick yours in the browser.",
             )
         else:
             custom_msg = self._vnc_notice(
