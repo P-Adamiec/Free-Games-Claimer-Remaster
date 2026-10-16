@@ -1,5 +1,5 @@
-"""[fork:fix] Tests for the two upstream fixes in this fork: Prime stops when signing in fails,
-and GOG actually unticks the newsletters instead of only opening the page."""
+"""[fork:fix] Tests for the upstream fixes in this fork: Prime stops when signing in fails, GOG
+actually unticks the newsletters, and Chrome gets time to start after a reboot."""
 import asyncio
 import json
 from pathlib import Path
@@ -63,3 +63,10 @@ def test_gog_unsubscribe_unticks_the_newsletters():
 def test_gog_newsletter_script_is_valid_javascript_shape():
     names = json.dumps(list(GOGClaimer.NEWSLETTERS))
     assert names.startswith('["Promotions')
+
+
+def test_chrome_gets_time_after_a_reboot():
+    """[fork:fix] Right after a host reboot Chrome needs more than nodriver's few seconds; wait 10 s and 20 s."""
+    source = (ROOT / "src" / "core" / "claimer.py").read_text(encoding="utf-8")
+    block = source.split("for attempt in range(1, 4):", 1)[1].split("if launch_error is not None:", 1)[0]
+    assert "await asyncio.sleep(10 * attempt)" in block

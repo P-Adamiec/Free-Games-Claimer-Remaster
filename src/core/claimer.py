@@ -377,7 +377,9 @@ class BaseClaimer:
                 self._sweep_orphan_chrome(store_browser_dir)
                 self._clear_profile_locks(store_browser_dir)
                 if attempt < 3:
-                    await asyncio.sleep(2 * attempt)
+                    # [fork:fix] nodriver waits under 3 s for Chrome; right after a host reboot Chrome needs
+                    # longer, so 2 s and 4 s between attempts was not enough. Now 10 s and 20 s.
+                    await asyncio.sleep(10 * attempt)
         if launch_error is not None:
             self._log_launch_diagnostics(store_browser_dir, chrome_path)
             raise RuntimeError(

@@ -17,6 +17,15 @@ Zie de [issues](https://github.com/sjkanon/Free-Games-Claimer-Remaster/issues) v
 - **Eerste logins** — een aantal winkels vraagt de eerste keer een handmatige login of 2FA via het scherm van de bot (noVNC, op de website onder 'Scherm').
   Dat moet Bjorn zelf doen, of Sjoerd samen met Bjorn.
 
+## 2026-10-16
+
+- Upstream v1.14/v1.15 gemerged; de webui kent de nieuwe instellingen (`GP_CLAIM_DLC` werd DLC per winkel, plus
+  `STEAM_SEARCH`, `DISCORD_SUPPRESS_EMBEDS`, `DEBUG_SCREENSHOTS`).
+- Branches: werk op `devel`, uitrol vanaf `main` (via een PR `devel` → `main`); Dependabot-updates naar `devel`
+  (`[fork:branches]` in `.github/dependabot.yml`).
+- `[fork:fix]` Chrome kreeg na een herstart van de server te weinig tijd (nodriver wacht onder 3 s, drie pogingen
+  binnen ~15 s); nu 10 s en 20 s tussen de pogingen (`src/core/claimer.py`, test in `tests/test_fork_fixes.py`).
+
 ## 2026-10-12
 
 - Upstream `dev` gemerged (v1.12, Fanatical-2FA en v1.13). De Prime-fix zit nu in upstream; `prime.py` is weer gelijk
