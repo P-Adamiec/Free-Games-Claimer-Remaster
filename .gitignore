@@ -4,7 +4,7 @@
 
 # Runtime data
 data/
-steamdb_dump.html
+.github/scripts/triage-issues.txt
 
 # Python
 __pycache__/

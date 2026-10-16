@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src.core.config import env_setting_kinds
 
@@ -74,3 +75,27 @@ class TestArchitectureTree:
                                               if p.name != "__init__.py"))
     def test_every_store_module_is_listed(self, module):
         assert module in self.TREE, f"src/stores/{module} is missing from the README tree"
+
+
+class TestIssueForms:
+    """A form that is not valid YAML drops out of GitHub's chooser, and with blank issues off nobody could report."""
+
+    FOLDER = ROOT / ".github" / "ISSUE_TEMPLATE"
+    FORMS = sorted(p for p in FOLDER.glob("*.yml") if p.name != "config.yml")
+    LABELS = {"type: bug", "type: feature", "type: question", "type: docs"}
+
+    def test_the_three_forms_are_there(self):
+        assert [p.name for p in self.FORMS] == ["bug_report.yml", "feature_request.yml", "other.yml"]
+
+    @pytest.mark.parametrize("path", FORMS, ids=lambda p: p.name)
+    def test_every_form_reads_and_asks_for_the_newest_version(self, path):
+        form = yaml.safe_load(path.read_text(encoding="utf-8"))
+        ids = [field["id"] for field in form["body"] if field["type"] != "markdown"]
+        assert form["name"] and form["description"] and len(ids) == len(set(ids))
+        assert set(form.get("labels", [])) <= self.LABELS
+        # On the newest version the log is masked and the fix may already be there.
+        newest = next(field for field in form["body"] if field.get("id") == "newest")
+        assert newest["attributes"]["options"][0]["required"] is True
+
+    def test_blank_issues_stay_off(self):
+        assert yaml.safe_load((self.FOLDER / "config.yml").read_text(encoding="utf-8"))["blank_issues_enabled"] is False

@@ -196,6 +196,8 @@ class Config:
     debug: bool = _bool("DEBUG", default=True)
     # Internals of third-party libraries (CDP frames, HTTP handshakes, SQL). Separate from DEBUG.
     debug_libs: bool = _bool("DEBUG_LIBS", default=False)
+    # A failure screenshot can show an account name, an e-mail or a code, so it is sent only when asked.
+    debug_screenshots: bool = _bool("DEBUG_SCREENSHOTS")
     dryrun: bool = _bool("DRYRUN")
     show: bool = _bool("SHOW", default=True)
     width: int = _int("WIDTH", 1280)
@@ -246,6 +248,7 @@ class Config:
 
     # --- Notifications ---
     discord_webhook: str | None = os.getenv("DISCORD_WEBHOOK")
+    discord_suppress_embeds: bool = _bool("DISCORD_SUPPRESS_EMBEDS", default=True)
     notify_url: str | None = os.getenv("NOTIFY")  # apprise URL fallback
     notify_summary: bool = _bool("NOTIFY_SUMMARY", default=True)
     notify_errors: bool = _bool("NOTIFY_ERRORS", default=True)
@@ -275,6 +278,8 @@ class Config:
     # Epic's weekly mobile giveaways (claimed on the same store pages as the PC games).
     eg_mobile: bool = _bool("EG_MOBILE", default=True)
     eg_mobile_platforms: str = os.getenv("EG_MOBILE_PLATFORMS", "android,ios")
+    # DLC giveaways GamerPower finds for Epic.
+    eg_claim_dlc: bool = _bool("EG_CLAIM_DLC", default=True)
 
     @property
     def eg_mobile_platform_list(self) -> list[str]:
@@ -304,10 +309,16 @@ class Config:
     ms_password: str | None = os.getenv("MS_PASSWORD") or os.getenv("PASSWORD")
     ms_otp_key: str | None = _secret("MS_OTP_KEY")
     ms_force_redeem: bool = _bool("MS_FORCE_REDEEM")
+    # DLC giveaways GamerPower finds for Xbox.
+    ms_claim_dlc: bool = _bool("MS_CLAIM_DLC", default=True)
 
     # --- Steam ---
     steam_username: str | None = os.getenv("STEAM_USERNAME")
     steam_password: str | None = os.getenv("STEAM_PASSWORD") or os.getenv("PASSWORD")
+    # DLC from GamerPower and from Steam's own search.
+    steam_claim_dlc: bool = _bool("STEAM_CLAIM_DLC", default=True)
+    # Off leaves Steam to GamerPower's finds, a safety switch should Steam mind the search.
+    steam_search: bool = _bool("STEAM_SEARCH", default=True)
 
     # --- Unity Asset Store ---
     unity_email: str | None = os.getenv("UNITY_EMAIL") or os.getenv("EMAIL")
@@ -323,10 +334,6 @@ class Config:
     ubi_email: str | None = os.getenv("UBI_EMAIL") or os.getenv("EMAIL")
     ubi_password: str | None = os.getenv("UBI_PASSWORD") or os.getenv("PASSWORD")
     ubi_otp_key: str | None = _secret("UBI_OTP_KEY", "UBI_OTPKEY")
-
-    # --- GamerPower ---
-    # Most giveaways are in-game DLC needing a per-game account, so they are skipped by default.
-    gp_claim_dlc: bool = _bool("GP_CLAIM_DLC", default=False)
 
     # --- GamerPower & Fanatical ---
     # Some GamerPower giveaways redirect to Fanatical.com,

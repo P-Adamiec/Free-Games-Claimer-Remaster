@@ -11,11 +11,12 @@ any redemption codes, and timestamps.
 import logging
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, Text, func
+from sqlalchemy import String, DateTime, Text, event, func
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.core.config import cfg
+from src.core.redact import hide, mask_account, mask_code
 
 logger = logging.getLogger("fgc.database")
 
@@ -24,7 +25,8 @@ logger = logging.getLogger("fgc.database")
 # Engine & session factory
 # ---------------------------------------------------------------------------
 
-engine = create_async_engine(cfg.database_url, echo=cfg.debug_libs)
+# No echo: it prints through a handler of its own, past the log mask; DEBUG_LIBS shows SQL through the normal log.
+engine = create_async_engine(cfg.database_url)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -65,6 +67,17 @@ class ClaimedGame(Base):
         return f"<ClaimedGame store={self.store!r} title={self.title!r} status={self.status!r}>"
 
 
+# A code the bot saves or reads back shows in the log only by its first characters, whoever logs it.
+@event.listens_for(ClaimedGame.code, "set")
+def _hide_new_code(target, value, oldvalue, initiator):
+    hide(value, mask_code(value))
+
+
+@event.listens_for(ClaimedGame, "load")
+def _hide_stored_code(target, context):
+    hide(target.code, mask_code(target.code))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -98,7 +111,8 @@ async def get_or_create(
     result = await session.execute(stmt)
     obj = result.scalar_one_or_none()
     if obj is not None:
-        logger.debug("DB hit: %s/%s/%s already stored as '%s' (%s)", store, user, game_id, obj.title, obj.status)
+        logger.debug("DB hit: %s/%s/%s already stored as '%s' (%s)",
+                     store, mask_account(user), game_id, obj.title, obj.status)
         return obj, False
 
     obj = ClaimedGame(
@@ -112,5 +126,5 @@ async def get_or_create(
     )
     session.add(obj)
     await session.flush()
-    logger.debug("DB new row: %s/%s/%s '%s' (%s)", store, user, game_id, title, status)
+    logger.debug("DB new row: %s/%s/%s '%s' (%s)", store, mask_account(user), game_id, title, status)
     return obj, True

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.core.claimer import missing_base_due, missing_base_status, track_missing_base
+from src.core.claimer import missing_base_due, missing_base_status, older_than, row_extra, track_missing_base
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 10, 11, 20, 0, tzinfo=timezone.utc)
@@ -31,6 +31,29 @@ class TestWhenToTell:
     def test_the_status_is_shown_or_parked(self):
         assert missing_base_status(True) == "failed:missing_base"
         assert missing_base_status(False) == "skipped:missing_base"
+
+
+class TestDatesAndExtra:
+    """Shared with Epic, which reads an owned game's page again only every few days."""
+
+    @pytest.mark.parametrize("stamp,old", [
+        ((NOW - timedelta(days=1)).isoformat(), False),
+        ((NOW - timedelta(days=3)).isoformat(), True),
+        ((NOW - timedelta(days=4)).isoformat(), True),
+        (None, True),
+        ("", True),
+        ("not a date", True),
+        ("2026-10-11T12:00:00", False),
+    ])
+    def test_a_date_is_old_enough_or_not(self, stamp, old):
+        assert older_than(stamp, 3, NOW) is old
+
+    @pytest.mark.parametrize("extra,expected", [
+        (None, {}), ("", {}), ("{not json", {}), ("[1, 2]", {}),
+        ('{"page_checked": "x"}', {"page_checked": "x"}),
+    ])
+    def test_the_extra_column_is_always_a_dict(self, extra, expected):
+        assert row_extra(SimpleNamespace(extra=extra)) == expected
 
 
 class TestTheRow:

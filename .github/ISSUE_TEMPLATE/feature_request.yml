@@ -1,0 +1,68 @@
+name: Feature idea
+description: Something new the bot could do.
+labels: ["type: feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        I read and think through every idea myself. The more of this you fill in, the sooner I can understand it and see how it fits the bot.
+  - type: checkboxes
+    id: newest
+    attributes:
+      label: Before you suggest it
+      options:
+        - label: I checked the newest version and the [CHANGELOG](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/blob/main/CHANGELOG.md), and the bot does not do this yet.
+          required: true
+        - label: I searched the [open and closed issues](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues?q=is%3Aissue) and nobody suggested it yet.
+          required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What the bot should do
+      description: One or two sentences are enough.
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Store or part of the bot
+      multiple: true
+      options:
+        - Epic Games
+        - Fab
+        - Steam
+        - Prime Gaming
+        - GOG
+        - Microsoft Store
+        - Ubisoft
+        - Unity Asset Store
+        - AliExpress
+        - Legacy Games
+        - Fanatical
+        - itch.io
+        - IndieGala
+        - Alienware Arena
+        - GamerPower
+        - Notifications
+        - Docker, VNC or setup
+        - A new store
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why you need it
+      description: The problem it solves for you, or what you do by hand today.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How you would use it
+      description: The setting you would change, and what you would expect to see in the log or in the notification.
+  - type: textarea
+    id: found
+    attributes:
+      label: What you already found
+      description: Links to the store page, an API, or another project that does something similar. If it depends on a service or tool I would have to set up and test first, tell me how it works for you.

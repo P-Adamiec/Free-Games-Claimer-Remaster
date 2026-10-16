@@ -4,12 +4,13 @@ Pins two live traps: the payload keeps each listing's original price, and only
 `isLimitedFreeContent` may authorise a claim.
 """
 
+import asyncio
 import re
 from pathlib import Path
 
 import pytest
 
-from src.stores.epic_fab import FabClaimer, _seller_name, parse_free_listings
+from src.stores.epic_fab import CHECKOUT_CLICK_JS, CHECKOUT_STATE_JS, FabClaimer, _seller_name, parse_free_listings
 
 # What /i/blades/free_content_blade served on 2026-08-08, trimmed to the fields used.
 BLADE = {
@@ -151,3 +152,42 @@ class TestNotificationVocabulary:
         titles = re.findall(r'self\._vnc_notice\(\s*"([^"]+)"', self.SOURCE)
         assert titles, "no VNC prompts found, the scan stopped matching"
         assert all(t.startswith("Fab: ") for t in titles), titles
+
+
+class TestCheckoutOrdersOnlyAtZero:
+    """Epic's checkout frame also sells assets, so Fab orders only when its total reads as zero (audit 2026-10-14)."""
+
+    class _Stub:
+        def __init__(self, texts):
+            self.texts, self.clicked = list(texts), []
+
+        async def sleep(self, seconds):
+            pass
+
+        async def _checkout_document(self):
+            return object()
+
+        async def _checkout_eval(self, document, script):
+            if script == CHECKOUT_STATE_JS:
+                return {"text": self.texts.pop(0) if len(self.texts) > 1 else self.texts[0], "buttons": ["Place Order"]}
+            if script == CHECKOUT_CLICK_JS:
+                self.clicked.append("Place Order")
+                return {"clicked": True, "label": "Place Order"}
+            return {"present": False}
+
+    def _checkout(self, *texts):
+        stub = self._Stub(texts)
+        return asyncio.run(FabClaimer._complete_checkout(stub)), stub.clicked
+
+    def test_a_price_is_never_ordered(self):
+        assert self._checkout("Order Summary Asset Price €79.99 Total €79.99 Place Order") == ("not-free", [])
+
+    def test_a_zero_total_is_ordered(self):
+        assert self._checkout("Order Summary Asset Price €79.99 Discount -€79.99 Total €0.00 Place Order") == (
+            True, ["Place Order"])
+
+    def test_a_total_that_never_shows_is_not_ordered(self):
+        assert self._checkout("Loading your order") == (False, [])
+
+    def test_the_total_may_arrive_after_a_moment(self):
+        assert self._checkout("Loading your order", "Total €0.00 Place Order") == (True, ["Place Order"])

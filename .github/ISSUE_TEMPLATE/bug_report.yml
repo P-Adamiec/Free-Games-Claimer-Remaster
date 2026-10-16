@@ -1,0 +1,80 @@
+name: Bug report
+description: The bot does something wrong, or a store stopped working.
+labels: ["type: bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. The README section [Something is not working](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster#something-is-not-working-what-to-send-us) shows how to get the log. Passwords, e-mail addresses, tokens and game codes are masked in it, but please give it a last look before you attach it.
+  - type: checkboxes
+    id: newest
+    attributes:
+      label: Before you report
+      options:
+        - label: I updated to the newest version (`docker compose pull`, then `docker compose up -d`) and the problem still happens.
+          required: true
+        - label: I searched the [open and closed issues](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues?q=is%3Aissue) and this is not there yet.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`docker logs fgc-remaster | head -20` shows it in the banner."
+      placeholder: v1.15
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Store or part of the bot
+      multiple: true
+      options:
+        - Epic Games
+        - Fab
+        - Steam
+        - Prime Gaming
+        - GOG
+        - Microsoft Store
+        - Ubisoft
+        - Unity Asset Store
+        - AliExpress
+        - Legacy Games
+        - Fanatical
+        - itch.io
+        - IndieGala
+        - Alienware Arena
+        - GamerPower
+        - Notifications
+        - Docker, VNC or setup
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What the bot did, and what you expected it to do instead.
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When it happens
+      description: Every run, once, since an update, only with a certain setting?
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Drag `fgc.log.txt` in here (`docker logs fgc-remaster --tail 500 > fgc.log.txt`), or paste the lines around the problem between triple backticks.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup
+      description: Settings you changed from the defaults, and where it runs, for example Windows, Linux, a NAS or a Raspberry Pi. Never paste passwords, e-mail addresses, tokens or webhook addresses, write `DISCORD_WEBHOOK=set` instead.
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or anything else
+      description: A screenshot from `data/screenshots/` or what you saw over VNC. A screenshot can show your account or a game code, so check it first.

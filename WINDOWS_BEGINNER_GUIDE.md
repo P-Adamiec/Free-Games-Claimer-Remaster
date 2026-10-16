@@ -46,14 +46,14 @@ There are two primary ways to set up the claimer. **Method A** is highly recomme
 1. Inside your Dockhand dashboard, navigate to the **Stacks** or **Compose** section.
 2. Name the stack however you like, for example: `free-games-claimer`.
 3. In the text editor box, **paste the entire contents of the `docker-compose.yml` file** from the GitHub repository.
-4. Set up your `.env` configuration (e.g. `EG_EMAIL=twoj@mail.com`) within the environment variables block or `.env` editor in Dockhand matching the `.env.example` file.
+4. Set up your `.env` configuration (e.g. `EG_EMAIL=your@email.com`) within the environment variables block or `.env` editor in Dockhand matching the `.env.example` file. Set `VNC_PASSWORD=` to a password of your own as well, it protects the browser that is signed in to your stores from anyone else on your network.
 5. Click **Deploy / Update**. That's it! Dockhand handles the downloading and execution automatically in the background.
 
 ### Method B: The Classic Folder Method
 If for some reason you don't want to use a visual interface:
 1. Go to the main page of this GitHub repository. Click the green **"Code"** button and select **"Download ZIP"**.
 2. Extract the ZIP file somewhere safe (like `Documents/free-games-claimer`).
-3. Inside the extracted folder, find `.env.example`, rename it strictly to `.env`, and fill out your logins inside it using Notepad.
+3. Inside the extracted folder, find `.env.example`, rename it strictly to `.env`, and fill out your logins inside it using Notepad. Set `VNC_PASSWORD=` to a password of your own as well, it protects the browser that is signed in to your stores from anyone else on your network.
 4. **Open Terminal exactly in this folder:** Click on the address bar at the very top of the window, erase the text, type `cmd`, and hit **Enter**. A black command window will pop up already pointing to your exact folder!
 5. In that black window, type `docker compose up -d` and hit Enter. The `-d` explicitly tells Docker to run it detached (invisibly).
 

@@ -56,8 +56,13 @@ OTP_HELP = ("De geheime sleutel uit de authenticator-instellingen (\"handmatige 
 CODES_HELP = "Herstelcodes, gescheiden door komma's. Gebruikte codes onthoudt de bot zelf."
 
 STORES: tuple[Store, ...] = (
-    Store("steam", "Steam", "Gratis games die je mag houden.",
-          _login("STEAM", "Gebruikersnaam", TEXT, "STEAM_USERNAME"), default_on=True),
+    Store("steam", "Steam", "Gratis games die je mag houden.", (
+        *_login("STEAM", "Gebruikersnaam", TEXT, "STEAM_USERNAME"),
+        Field("STEAM_CLAIM_DLC", "Ook gratis DLC", BOOL, "true",
+              help="Van GamerPower en Steams eigen zoekfunctie. DLC zonder basisspel wordt één keer gemeld."),
+        Field("STEAM_SEARCH", "Ook Steams eigen zoekfunctie lezen", BOOL, "true", advanced=True,
+              help="Uit = alleen GamerPower, mocht Steam het zoeken ooit niet waarderen."),
+    ), default_on=True),
     Store("epic", "Epic Games", "De wekelijkse gratis games.", (
         *_login("EG"),
         Field("EG_OTP_KEY", "Authenticator-sleutel", OTPKEY, help=OTP_HELP),
@@ -66,6 +71,8 @@ STORES: tuple[Store, ...] = (
         Field("EG_MOBILE", "Ook de gratis mobiele game", BOOL, "true"),
         Field("EG_MOBILE_PLATFORMS", "Mobiele versies", MULTI, "android,ios", choices=(
             ("android", "Android"), ("ios", "iOS"))),
+        Field("EG_CLAIM_DLC", "Ook DLC-giveaways (GamerPower)", BOOL, "true", advanced=True,
+              help="Alleen DLC waar GamerPower een prijs bij noemt."),
     ), default_on=True),
     Store("fab", "Fab", "Gratis assets op je Epic-account (zelfde login als Epic).", (
         Field("FAB_ACCEPT_EULA", "Licentie en afstandsverklaring automatisch accepteren", BOOL, "true"),
@@ -86,6 +93,8 @@ STORES: tuple[Store, ...] = (
         *_login("MS"),
         Field("MS_OTP_KEY", "Authenticator-sleutel", OTPKEY, help=OTP_HELP),
         Field("MS_FORCE_REDEEM", "Codes van de laatste 60 dagen opnieuw proberen", BOOL, "false", advanced=True),
+        Field("MS_CLAIM_DLC", "Ook DLC-giveaways (GamerPower)", BOOL, "true", advanced=True,
+              help="Alleen DLC waar GamerPower een prijs bij noemt."),
     ), default_on=True),
     Store("ubisoft", "Ubisoft", "Gratis game-giveaways op je Ubisoft Connect-account.", (
         *_login("UBI"),
@@ -137,6 +146,7 @@ SCHEDULE: tuple[Field, ...] = (
 NOTIFY: tuple[Field, ...] = (
     Field("DISCORD_WEBHOOK", "Discord-webhook", WEBHOOK,
           help="Discord: Serverinstellingen > Integraties > Webhooks > Nieuwe webhook > URL kopiëren."),
+    Field("DISCORD_SUPPRESS_EMBEDS", "Discord-links zonder voorbeeldkaart", BOOL, "true", advanced=True),
     Field("NOTIFY", "Apprise-adressen", APPRISE,
           help="Voor Telegram, ntfy, e-mail enz. Bijvoorbeeld tgram://bottoken/chatid. Meerdere met komma's."),
     Field("NOTIFY_SUMMARY", "Samenvatting na elke run", BOOL, "true"),
@@ -157,9 +167,10 @@ NOTIFY: tuple[Field, ...] = (
 OTHER: tuple[Field, ...] = (
     Field("VNC_LOGIN_TIMEOUT", "Wachttijd voor handmatig inloggen (seconden)", INT, "180", min=30, max=3600,
           help="Zo lang wacht de bot op jou bij een inlogstap, captcha of code."),
-    Field("GP_CLAIM_DLC", "Ook in-game DLC-giveaways (GamerPower)", BOOL, "false", advanced=True),
     Field("DRYRUN", "Proefmodus: alleen zoeken, niets claimen", BOOL, "false", advanced=True),
     Field("DEBUG", "Uitgebreid logboek", BOOL, "true", advanced=True),
+    Field("DEBUG_SCREENSHOTS", "Schermafbeelding bij een fout meesturen", BOOL, "false", advanced=True,
+          help="Kan je accountnaam, e-mailadres of een gamecode tonen; alleen naar een kanaal dat van jou alleen is."),
     Field("EMAIL", "Standaard e-mailadres", EMAIL, advanced=True,
           help="Gebruikt voor elke winkel waar je hierboven niets invult."),
     Field("PASSWORD", "Standaard wachtwoord", SECRET, advanced=True),

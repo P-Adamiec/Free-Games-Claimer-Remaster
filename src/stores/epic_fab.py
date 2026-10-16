@@ -11,10 +11,11 @@ import logging
 
 import nodriver as uc
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, account_key
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
+from src.stores.epic import checkout_total_is_zero
 
 logger = logging.getLogger("fgc.fab")
 
@@ -40,7 +41,7 @@ function () {
     return JSON.stringify({
         buttons: [...this.querySelectorAll('button, a[role=button]')]
             .map(b => (b.innerText || '').trim()).filter(Boolean).slice(0, 10),
-        text: (this.body ? (this.body.innerText || '').replace(/\\s+/g, ' ') : '').slice(0, 260),
+        text: this.body ? (this.body.innerText || '').replace(/\\s+/g, ' ') : '',
     });
 }
 """
@@ -576,7 +577,11 @@ class FabClaimer(BaseClaimer):
             return
 
         await self.sleep(6)
-        if not await self._complete_checkout():
+        checkout = await self._complete_checkout()
+        if checkout == "not-free":
+            self.notify_games.append({"title": title, "url": url, "status": "skipped:not-free"})
+            return
+        if not checkout:
             logger.warning("Epic's checkout did not offer '%s' for the library.", title)
             self.notify_games.append({"title": title, "url": url, "status": "failed:checkout"})
             return
@@ -681,15 +686,30 @@ class FabClaimer(BaseClaimer):
             logger.debug("Could not evaluate inside the checkout frame: %s", exc)
             return None
 
-    async def _complete_checkout(self) -> bool:
-        """Press "Add to library" in Epic's checkout frame."""
-        document = await self._checkout_document()
+    async def _complete_checkout(self) -> bool | str:
+        """Press "Add to library" in Epic's checkout frame, or answer "not-free" when its total is not zero."""
+        # The same frame sells assets, so only a total of zero is ever ordered; an unreadable one is not.
+        document, state, free = None, {}, None
+        for attempt in range(5):
+            if attempt:
+                await self.sleep(2)
+            document = await self._checkout_document()
+            if document is None:
+                continue
+            state = await self._checkout_eval(document, CHECKOUT_STATE_JS) or {}
+            free = checkout_total_is_zero(state.get("text"))
+            if free is not None:
+                break
         if document is None:
             logger.debug("No Epic checkout frame on the page.")
             return False
-
-        state = await self._checkout_eval(document, CHECKOUT_STATE_JS) or {}
-        logger.debug("Checkout frame: %r buttons=%r", (state.get("text") or "")[:120], state.get("buttons"))
+        logger.debug("Checkout frame: %r buttons=%r free=%s", (state.get("text") or "")[:120], state.get("buttons"), free)
+        if free is False:
+            logger.warning("Epic's checkout wants money for this asset, nothing was ordered.")
+            return "not-free"
+        if free is None:
+            logger.warning("Could not read the total in Epic's checkout, nothing was ordered.")
+            return False
 
         result = await self._checkout_eval(document, CHECKOUT_CLICK_JS) or {}
         if not result.get("clicked"):
@@ -749,7 +769,7 @@ class FabClaimer(BaseClaimer):
             result = await session.execute(
                 select(ClaimedGame).where(
                     ClaimedGame.store == self.store_name,
-                    ClaimedGame.user == (self.user or "unknown"),
+                    ClaimedGame.user == account_key(cfg.eg_email, self.user),
                     ClaimedGame.game_id == uid,
                 )
             )
@@ -761,7 +781,7 @@ class FabClaimer(BaseClaimer):
             obj, created = await get_or_create(
                 session,
                 store=self.store_name,
-                user=self.user or "unknown",
+                user=account_key(cfg.eg_email, self.user),
                 game_id=uid,
                 title=title,
                 url=url,
