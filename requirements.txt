@@ -9,7 +9,7 @@ psutil>=7.2.2
 browserforge>=1.2.4
 
 # Database
-sqlalchemy[asyncio]>=2.1.4,<3
+sqlalchemy[asyncio]>=2.1.5,<3
 aiosqlite>=0.22.1
 
 # Notifications
