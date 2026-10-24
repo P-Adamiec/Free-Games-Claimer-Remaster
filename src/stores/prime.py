@@ -101,7 +101,7 @@ class PrimeGamingClaimer(BaseClaimer):
                                 if (navigator.credentials) { navigator.credentials.get = noop; navigator.credentials.create = noop; }
                             } catch (e) {}
                             (function () {
-                                // Remove the wrong sign-in forms; leave only form[name="signIn"] (password).
+                                if (!location.pathname.includes("/ap/")) return; // Remove the wrong sign-in forms; leave only form[name="signIn"] (password).
                                 const KILL = ['form[name="signInWithPasskeyButton"]', 'form[name="signInWithMShopButton"]', '#auth-signin-via-passkey-section', '#auth-signin-via-passkey-btn'];
                                 const sweep = () => { try {
                                     KILL.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
