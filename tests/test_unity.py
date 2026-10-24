@@ -274,3 +274,14 @@ class TestOnlyBuyNowStartsTheCheckout:
         start = source.split("async def _start_checkout", 1)[1].split("\n    async def ", 1)[0]
         clicker = start.split('"""')[3]  # the script that picks the button
         assert "/^buy now$/i" in clicker and "add to cart" not in clicker.lower()
+
+
+class TestEntitlementsCheckReturnsToStoreHost:
+    """_owned_ids() calls a relative /api/users/entitlements path, which 404s on pay.unity.com."""
+
+    def test_leaves_the_payment_host_before_reading_entitlements(self):
+        source = (Path(__file__).resolve().parent.parent / "src" / "stores" / "unity.py").read_text(encoding="utf-8")
+        after_pay = source.split("if not await self._pay_now(", 1)[1].split("if package_id and package_id in await self._owned_ids():", 1)[0]
+        assert "url_has_allowed_host(await self._current_url(), STORE_HOST)" in after_pay
+        assert "await self.page.get(URL_ORDERS)" in after_pay
+

@@ -164,3 +164,14 @@ class TestACodeNotReadIsLookedForAgain:
 
     def test_the_dead_filter_is_gone(self):
         assert "existing_codes_map" not in self.SOURCE
+
+
+class TestPasskeyBlockerStaysOnSignInPages:
+    """The DOM sweep MutationObserver is meant for /ap/ sign-in pages, not the Luna React SPA."""
+
+    SOURCE = (ROOT / "src" / "stores" / "prime.py").read_text(encoding="utf-8")
+
+    def test_the_passkey_sweep_checks_for_ap_path(self):
+        block = self.SOURCE.split("add_script_to_evaluate_on_new_document", 1)[1].split("Passkey neutralization", 1)[0]
+        assert 'location.pathname.includes("/ap/")' in block
+

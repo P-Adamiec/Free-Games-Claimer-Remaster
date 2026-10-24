@@ -496,6 +496,9 @@ class UnityClaimer(BaseClaimer):
             return
 
         await self.sleep(12)
+        if not url_has_allowed_host(await self._current_url(), STORE_HOST):
+            await self.page.get(URL_ORDERS)
+            await self.sleep(6)
         if package_id and package_id in await self._owned_ids():
             logger.info("✓ Claimed '%s' successfully!", title)
             status = "claimed"
