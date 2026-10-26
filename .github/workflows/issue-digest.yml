@@ -90,7 +90,7 @@ jobs:
         # A failed labelling still lets the digest go out and report it.
         continue-on-error: true
         # Pinned to a commit because this step holds the Claude token.
-        uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1.0.256
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         env: &label_env
           CLAUDE_CODE_SCRIPT_CAPS: ${{ steps.pick.outputs.caps }}
           # Strips the Claude and runner credentials from every command the agent runs.
@@ -130,7 +130,7 @@ jobs:
         id: label_retry
         if: steps.label.outcome == 'failure'
         continue-on-error: true
-        uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1.0.256
+        uses: anthropics/claude-code-action@16f9f71ab9c490faf367f94dd294897edc25be33 # v1.0.261
         env: *label_env
         with: *label_with
 
