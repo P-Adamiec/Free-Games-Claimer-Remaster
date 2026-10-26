@@ -52,6 +52,21 @@ class TestIntParsing:
         assert _reload(monkeypatch, WIDTH="wide").width == 1280
 
 
+class TestChromeStartupTimeout:
+    def test_default_keeps_nodrivers_existing_launch(self, monkeypatch):
+        assert _reload(monkeypatch).chrome_startup_timeout == 0
+
+    def test_can_be_raised(self, monkeypatch):
+        assert _reload(monkeypatch, CHROME_STARTUP_TIMEOUT="60").chrome_startup_timeout == 60
+
+    def test_invalid_value_uses_the_default(self, monkeypatch):
+        assert _reload(monkeypatch, CHROME_STARTUP_TIMEOUT="slow").chrome_startup_timeout == 0
+
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_nonpositive_values_keep_nodrivers_existing_launch(self, monkeypatch, value):
+        assert _reload(monkeypatch, CHROME_STARTUP_TIMEOUT=value).chrome_startup_timeout == 0
+
+
 class TestNotifyToggles:
     def test_failures_are_reported_by_default_owned_games_are_not(self, monkeypatch):
         cfg = _reload(monkeypatch)

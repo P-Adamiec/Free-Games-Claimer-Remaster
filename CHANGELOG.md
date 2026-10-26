@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project does not follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): every release raises the number after the dot (1.10, 1.11), and a development build carries the same number with a `d` suffix (`v1.11d`). The version being worked on stays at the top without a date until it is released.
 
+## [1.19]
+
+### Added
+- **An optional longer wait for a slow Chrome start** – on a slow or busy disk a healthy browser can take over five seconds, longer than nodriver's readiness checks allow. Set `CHROME_STARTUP_TIMEOUT=30` to give each launch up to 30 seconds to become ready, then attach nodriver to the same Chrome process. Unset or `0` keeps nodriver's existing launch behavior. With the override enabled, fast starts carry on immediately, an exited process fails early, and a timeout or cancellation still closes the whole process tree before another launch. Profiles, browser arguments and the three-attempt limit are kept.
+
 ## [1.18] - 2026-10-21
 
 ### Changed
@@ -463,6 +468,7 @@ Steam no longer reads SteamDB: free Steam games now come from GamerPower and Ste
 - ❌ `unrealengine.js` – Out of scope
 - ❌ `steam-games.js` – Only scraped profiles, never claimed games
 
+[1.19]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.18...dev
 [1.18]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.17...v1.18
 [1.17]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.16...v1.17
 [1.16]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.15...v1.16

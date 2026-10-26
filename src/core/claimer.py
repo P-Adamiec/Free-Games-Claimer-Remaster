@@ -20,9 +20,11 @@ import logging
 import math
 import random
 import re
+import time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import nodriver as uc
 import pyotp
 
@@ -92,6 +94,30 @@ async def open_first_tab(browser, url: str = "about:blank", attempts: int = 10, 
         # "no browser is open": there is no window to put a tab in, so open one.
         logger.debug("New tab refused (%s), opening a window instead.", exc)
         return await browser.get(url, new_window=True)
+
+
+async def wait_for_chrome(process, port: int, timeout: int) -> None:
+    """Wait for this Chrome's control endpoint without restarting a slow process.
+
+    nodriver 0.50 gives a new Chrome only five half-second connection attempts.
+    Loading Chrome from a slow or busy disk can take longer even with a healthy profile.
+    """
+    deadline = time.monotonic() + timeout
+    # This is a loopback request, never something to send through HTTP_PROXY.
+    async with httpx.AsyncClient(trust_env=False) as client:
+        while (remaining := deadline - time.monotonic()) > 0:
+            if process.returncode is not None:
+                raise RuntimeError(f"Chrome exited before it was ready (exit={process.returncode}).")
+            try:
+                response = await client.get(f"http://127.0.0.1:{port}/json/version", timeout=min(1.0, remaining))
+                response.raise_for_status()
+                info = response.json()
+                if isinstance(info, dict) and info.get("webSocketDebuggerUrl"):
+                    return
+            except (httpx.HTTPError, ValueError):
+                pass
+            await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
+    raise TimeoutError(f"Chrome was not ready within CHROME_STARTUP_TIMEOUT={timeout}s.")
 
 
 WHEEL_NOTCH = 120
@@ -353,14 +379,7 @@ class BaseClaimer:
         launch_error: Exception | None = None
         for attempt in range(1, 4):
             try:
-                with chrome_timezone():
-                    self.browser = await uc.start(
-                        headless=headless,
-                        sandbox=False,  # required when running as root in Docker
-                        browser_executable_path=chrome_path,
-                        browser_args=args,
-                        user_data_dir=str(store_browser_dir),
-                    )
+                await self._launch_chrome(store_browser_dir, chrome_path, headless, args)
                 self.logger.debug("Chrome started (headless=%s, profile=%s, extra args=%s)",
                                   headless, store_browser_dir, extra_args or [])
                 # A missing first tab is a launch failure too, so it gets the same sweep and retry.
@@ -393,6 +412,52 @@ class BaseClaimer:
 
         self.log_browser_ready()
         return self.browser
+
+    async def _launch_chrome(self, profile_dir: Path, chrome_path: str | None, headless: bool, args: list[str]) -> None:
+        """Start Chrome for this profile and attach nodriver to it.
+
+        CHROME_STARTUP_TIMEOUT=0 keeps nodriver's own launch. A positive value starts Chrome here,
+        waits up to that many seconds for it to be ready, then attaches nodriver to that same process.
+        """
+        config = uc.Config(
+            headless=headless,
+            sandbox=False,  # required when running as root in Docker
+            browser_executable_path=chrome_path,
+            browser_args=args,
+            user_data_dir=str(profile_dir),
+        )
+        started = time.monotonic()
+        if not cfg.chrome_startup_timeout:
+            with chrome_timezone():
+                self.browser = await uc.start(config=config)
+        else:
+            # A host and port make uc.start() attach to the Chrome started here instead of spawning another.
+            config.host, config.port = "127.0.0.1", uc.util.free_port()
+            with chrome_timezone():
+                process = await asyncio.create_subprocess_exec(
+                    config.browser_executable_path, *config(),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            try:
+                await wait_for_chrome(process, config.port, cfg.chrome_startup_timeout)
+                self.browser = await uc.start(config=config)
+                # An attached browser does not own its process by default. Keep the
+                # same handles close_browser()/nodriver.stop() use for normal launches.
+                self.browser._process = process
+                self.browser._process_pid = process.pid
+            except BaseException:
+                # Timeout, failed attach and cancellation must all release the profile.
+                self._kill_process_tree(process.pid)
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    self.logger.debug("Chrome did not exit after process-tree cleanup.")
+                raise
+        # How long a start really takes, to pick a CHROME_STARTUP_TIMEOUT with some margin.
+        self.logger.debug("Chrome answered after %.1fs (CHROME_STARTUP_TIMEOUT=%s).",
+                          time.monotonic() - started, cfg.chrome_startup_timeout)
 
     @staticmethod
     def _normalize_title(title: str) -> str:

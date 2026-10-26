@@ -219,6 +219,8 @@ class Config:
     show: bool = _bool("SHOW", default=True)
     width: int = _int("WIDTH", 1280)
     height: int = _int("HEIGHT", 720)
+    # 0 keeps nodriver's default launch; a positive value opts into a longer readiness wait.
+    chrome_startup_timeout: int = max(0, _int("CHROME_STARTUP_TIMEOUT", 0))
     vnc_login_timeout: int = _int("VNC_LOGIN_TIMEOUT", 180) # seconds
     novnc_port: str = os.getenv("NOVNC_PORT", "7080")
     vnc_ip: str = os.getenv("VNC_IP", "localhost")

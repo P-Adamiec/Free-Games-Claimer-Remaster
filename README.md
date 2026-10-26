@@ -134,6 +134,7 @@ Options are set via environment variables in `.env`:
 | `SHOW` | `1` | Show browser window (VNC). |
 | `WIDTH` | `1280` | Browser/VNC screen width. |
 | `HEIGHT` | `720` | Browser/VNC screen height. |
+| `CHROME_STARTUP_TIMEOUT` | `0` | `0` keeps nodriver's existing launch behavior (about three seconds for its control endpoint). Set a positive number of seconds, e.g. `30`, to allow slower disks more time per launch before cleanup and retry (up to three launches). Fast starts continue immediately. The sign-in/captcha and first-tab waits are separate. |
 | `NOVNC_PORT` | `7080` | noVNC web access port. |
 | `VNC_IP` | `localhost`| Host for VNC notification links. Alerts include a one-click `http://<VNC_IP>:<NOVNC_PORT>/?autoconnect=true`. |
 | `VNC_URL` | | Full public noVNC address for notification links, e.g. `https://fgc.example.tld`. Use it behind a reverse proxy: it keeps your scheme and drops the port, replacing `VNC_IP` and `NOVNC_PORT` in the link (`NOVNC_PORT` still publishes the container port). |
