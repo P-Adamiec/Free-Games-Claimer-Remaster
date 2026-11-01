@@ -11,6 +11,7 @@ from src.stores.humble import (
     is_choice_order,
     order_created,
     order_is_legacy,
+    owned_in_plan,
     plan_reveals,
     reveal_outcome,
     tpk_state,
@@ -149,3 +150,27 @@ class TestChooseOutcome:
     def test_a_plain_refusal_does_not(self):
         assert choose_outcome(403, {}) is False
         assert choose_outcome(200, {"success": False}) is False
+
+
+class TestOwnedInPlan:
+    """The Steam-library guard: which planned keys it holds back."""
+
+    def _planned(self):
+        return plan_reveals(extract_tpks(_order(tpks=[
+            _tpk(name="A Game"),
+            _tpk(name="B Game", machine="bgame_choice_steam"),
+            _tpk(name="C Game", machine="cgame_choice_gog", key_type="gog"),
+        ])))
+
+    def test_a_steam_key_already_on_steam_is_held_back(self):
+        # Owned titles arrive normalized, the form _normalize_title produces.
+        held = owned_in_plan(self._planned(), {"agame"})
+        assert [t["title"] for t in held] == ["A Game"]
+
+    def test_only_steam_keys_can_be_held_back(self):
+        held = owned_in_plan(self._planned(), {"agame", "bgame", "cgame"})
+        assert [t["title"] for t in held] == ["A Game", "B Game"]
+
+    def test_nothing_owned_holds_nothing_back(self):
+        assert owned_in_plan(self._planned(), set()) == []
+        assert owned_in_plan(self._planned(), None) == []

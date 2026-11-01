@@ -6,6 +6,7 @@ import html as html_lib
 import json
 import logging
 import re
+from urllib.parse import quote_plus
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -151,6 +152,95 @@ def is_waiting_steam_key(status: str | None, code: str | None, extra: str | None
         return json.loads(extra or "{}").get("external_store") == "steam"
     except (json.JSONDecodeError, AttributeError):
         return False
+
+
+# ---------------------------------------------------------------------------
+# Your Steam library, read for another store (Humble's unrevealed keys)
+# ---------------------------------------------------------------------------
+
+# Steam's own record of your account: the app ids you own, asked from inside
+# the signed-in store page, the way the store's own scripts ask for it.
+URL_USERDATA = "https://store.steampowered.com/dynamicstore/userdata/"
+# Steam's search suggestions for one title: the candidate apps, with their ids.
+URL_SUGGEST = "https://store.steampowered.com/search/suggest?term={term}&f=games&cc=US&l=en"
+
+FETCH_TEXT_JS = """
+    (async () => {
+        try {
+            const r = await fetch(%s, {credentials: 'include', headers: {'Accept': '*/*'}});
+            return JSON.stringify({status: r.status, body: await r.text()});
+        } catch (e) {
+            return JSON.stringify({status: 0, body: '', error: String(e).slice(0, 120)});
+        }
+    })()
+"""
+
+SUGGEST_ROW = re.compile(r'data-ds-appid="(\d+)".*?<span class="match_name">(.*?)</span>', re.S)
+
+# Edition words a title can carry on one store and not the other, for the same game.
+EDITION_SUFFIXES = (
+    "complete edition", "definitive edition", "ultimate edition", "deluxe edition",
+    "premium edition", "collector's edition", "special edition", "anniversary edition",
+    "gold edition", "standard edition", "game of the year edition", "goty edition",
+    "director's cut", "remastered",
+)
+
+
+def owned_app_ids(payload) -> set[int] | None:
+    """The app ids your Steam library holds, from the userdata answer; None when unreadable."""
+    if not isinstance(payload, dict):
+        return None
+    apps = payload.get("rgOwnedApps")
+    if not isinstance(apps, list):
+        return None
+    found = set()
+    for app in apps:
+        try:
+            found.add(int(app))
+        except (TypeError, ValueError):
+            continue
+    return found
+
+
+def suggest_candidates(page_html: str) -> list[tuple[int, str]]:
+    """Steam's search suggestions, as (app id, name) pairs."""
+    found = []
+    for app_id, name in SUGGEST_ROW.findall(str(page_html or "")):
+        clean = html_lib.unescape(re.sub(r"<[^>]+>", "", name)).strip()
+        if clean:
+            found.append((int(app_id), clean))
+    return found
+
+
+def _title_forms(title: str) -> set[str]:
+    """A title's matching forms: itself, and itself with edition words stripped off the end."""
+    spaced = re.sub(r"[^a-z0-9]+", " ", str(title or "").lower()).strip()
+    forms = {BaseClaimer._normalize_title(spaced)}
+    base = spaced
+    changed = True
+    while changed and base:
+        changed = False
+        for suffix in EDITION_SUFFIXES:
+            if base.endswith(" " + suffix):
+                base = base[: len(base) - len(suffix)].rstrip()
+                changed = True
+    forms.add(BaseClaimer._normalize_title(base))
+    forms.discard("")
+    return forms
+
+
+def title_is_owned(title: str, candidates: list, owned_ids: set) -> bool:
+    """True when a Steam candidate for this title is an app in your library.
+
+    The candidate's name must be the title itself, edition words aside: a
+    near miss must never leave a key unrevealed for a game you do not own,
+    while a miss only means the key is revealed exactly as before.
+    """
+    forms = _title_forms(title)
+    if not forms:
+        return False
+    return any(app_id in (owned_ids or set()) and _title_forms(name) & forms
+               for app_id, name in candidates or [])
 
 
 class SteamClaimer(BaseClaimer):
@@ -1035,6 +1125,63 @@ class SteamClaimer(BaseClaimer):
             """
         )
         await self.sleep(3)
+
+
+async def steam_owned_verdicts(titles: list[str]) -> dict[str, bool] | None:
+    """Which of these titles are already in your Steam library; None when it cannot be read.
+
+    One Steam session on Steam's own browser profile (STEAM_USERNAME /
+    STEAM_PASSWORD, or the sign-in already saved there), opened and closed
+    for the check alone, so a caller in another store can ask before it
+    hands out a Steam key it cannot take back. Steam's own userdata names
+    the apps you own; its search suggestions name the app a title means.
+    """
+    wanted = [t for t in dict.fromkeys(titles or []) if str(t).strip()]
+    if not wanted:
+        return {}
+    claimer = SteamClaimer()
+    try:
+        await claimer.start_browser(
+            force_headful=True,
+            extra_args=["--ignore-gpu-blocklist", "--enable-unsafe-webgpu"],
+        )
+        await claimer.page.get(URL_STORE)
+        await claimer.sleep(3)
+        if not await claimer._ensure_logged_in(URL_STORE):
+            logger.warning("Steam sign-in did not finish, so your library cannot be checked.")
+            return None
+
+        async def _fetch_text(url: str) -> tuple[int, str]:
+            try:
+                raw = await claimer.page.evaluate(FETCH_TEXT_JS % json.dumps(url), await_promise=True)
+                answer = json.loads(raw) if isinstance(raw, str) else {}
+            except Exception as e:
+                logger.debug("Steam library request failed: %s", e)
+                return 0, ""
+            return int(answer.get("status") or 0), str(answer.get("body") or "")
+
+        status, body = await _fetch_text(URL_USERDATA)
+        try:
+            payload = json.loads(body or "")
+        except (TypeError, ValueError):
+            payload = None
+        owned = owned_app_ids(payload)
+        if owned is None:
+            logger.warning("Steam's library data answered %s and could not be read.", status)
+            return None
+
+        verdicts = {}
+        for title in wanted:
+            _, suggest_html = await _fetch_text(URL_SUGGEST.format(term=quote_plus(str(title))))
+            verdicts[title] = title_is_owned(title, suggest_candidates(suggest_html), owned)
+        logger.debug("Steam library check: %d of %d title(s) already owned.",
+                     sum(1 for v in verdicts.values() if v), len(verdicts))
+        return verdicts
+    except Exception:
+        logger.exception("Steam library check failed")
+        return None
+    finally:
+        await claimer.close_browser()
 
 
 async def claim_steam(extra_games: list | None = None) -> dict:

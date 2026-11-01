@@ -176,6 +176,7 @@ Options are set via environment variables in `.env`:
 | `HB_EMAIL` | | Humble Bundle login email. |
 | `HB_PASSWORD` | | Humble Bundle login password. |
 | `HB_OTP_KEY` | | Humble Bundle authenticator (TOTP) secret, auto-filled. A code Humble e-mails you (its Guard check) is entered manually via VNC. |
+| `HB_CHECK_STEAM` | `true` | Before revealing a Steam key, check your Steam library (your Steam sign-in, on Steam's own browser profile) and leave the key unrevealed when you already own the game there, so it stays giftable. When the library cannot be read, no Steam key is revealed that run. Set to `false` to reveal every key as before. |
 | `MS_EMAIL` | | Microsoft account email. |
 | `MS_PASSWORD` | | Microsoft account password. |
 | `MS_FORCE_REDEEM` | `false` | Force another pass over Microsoft codes from the last 60 days. |
@@ -308,6 +309,7 @@ What it does on a run:
 - Signs in with `HB_EMAIL` / `HB_PASSWORD` (an authenticator code from `HB_OTP_KEY` if your account asks for one; the code Humble e-mails you, its Guard check, is typed by you over VNC).
 - Reads your orders through Humble's own API, from inside the signed-in page, and keeps your Choice months. **It never unlocks a month early**: early unlock is a payment, and a subscriber's month appears as an order on its own when the automatic billing runs on the last Tuesday of the month.
 - Reveals every key that is still unrevealed and unexpired, and saves it in the database, tagged with the store it belongs to. Add `steam` to the same `STORES` and a revealed Steam key is activated on your Steam account at the end of the run, like a Fanatical key; add `gog` and a GOG key is redeemed the same way. Any other key waits in the database and on your [Humble keys page](https://www.humblebundle.com/home/keys), where a revealed key sits anyway.
+- Before revealing a **Steam** key, it checks your Steam library first (`HB_CHECK_STEAM`, on by default), using your Steam sign-in on Steam's own browser profile: a game you already own on Steam keeps its key **unrevealed**, so the key stays giftable and the month refundable. If your library cannot be read at all that run, no Steam key is revealed either; the keys wait for a run that can check. Switch the check off with `HB_CHECK_STEAM=false`.
 - A game offered as a Steam key or an Epic grant is claimed as the **Steam key**: a key can still be activated or gifted later, a keyless grant cannot be taken back.
 
 What it leaves alone, on purpose:
