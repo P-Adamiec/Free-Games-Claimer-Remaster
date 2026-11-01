@@ -5,16 +5,19 @@ a Choice month is an order whose product is a subscription, and each game in it
 is a third-party key (TPK) that gains a `redeemed_key_val` only once revealed.
 """
 
+from datetime import datetime, timezone
+
 from src.stores.humble import (
     choose_outcome,
+    detail_facts,
     extract_tpks,
     is_choice_order,
-    latest_order,
     order_created,
-    order_is_legacy,
     owned_in_plan,
+    pick_month,
     plan_reveals,
     reveal_outcome,
+    summary_facts,
     tpk_state,
 )
 
@@ -52,16 +55,8 @@ class TestWhichMonthsCount:
         order["product"]["human_name"] = "Great Games Bundle"
         assert is_choice_order(order) is False
 
-    def test_a_month_before_february_2022_is_legacy(self):
-        assert order_is_legacy(_order(created="2021-12-07T18:00:00")) is True
-        assert order_is_legacy(_order(created="2022-01-04T18:00:00")) is True
-
-    def test_the_single_plan_months_are_not_legacy(self):
-        assert order_is_legacy(_order(created="2022-02-01T18:00:00")) is False
-        assert order_is_legacy(_order()) is False
-
-    def test_an_unreadable_date_counts_as_current(self):
-        assert order_is_legacy(_order(created="not a date")) is False
+    def test_an_unreadable_date_reads_as_no_date(self):
+        assert order_created(_order(created="not a date")) is None
         assert order_created(_order(created="")) is None
 
     def test_a_zulu_stamp_reads_as_utc(self):
@@ -177,23 +172,75 @@ class TestOwnedInPlan:
         assert owned_in_plan(self._planned(), None) == []
 
 
-class TestLatestOrder:
-    """Only the most recent month is worked on; this says which one that is."""
+class TestSummaryFacts:
+    """The month is picked from the order list alone; this reads one entry."""
 
-    def test_the_newest_stamp_wins(self):
-        orders = [_order(created="2026-09-01T17:00:00", machine="september_2026_choice"),
-                  _order(created="2026-10-06T17:00:00"),
-                  _order(created="2026-08-04T17:00:00", machine="august_2026_choice")]
-        assert latest_order(orders)["product"]["machine_name"] == "october_2026_choice"
+    def test_a_list_entry_classifies_without_opening_the_order(self):
+        fact = summary_facts(_order())
+        assert fact["gamekey"] == "abc123"
+        assert fact["choice"] is True
+        assert fact["human_name"] == "October 2026 Choice"
+        assert fact["created"] is not None and fact["created"].year == 2026
 
-    def test_one_order_is_itself(self):
-        orders = [_order()]
-        assert latest_order(orders) is orders[0]
+    def test_a_bundle_entry_is_not_a_choice_month(self):
+        entry = _order(machine="great_games_bundle", category="bundle")
+        entry["product"]["human_name"] = "Great Games Bundle"
+        assert summary_facts(entry)["choice"] is False
 
-    def test_no_orders_is_none(self):
-        assert latest_order([]) is None
+    def test_an_entry_with_no_product_says_nothing(self):
+        fact = summary_facts({"gamekey": "xyz789", "created": "2026-10-06T17:00:00"})
+        assert fact["choice"] is None
+        assert fact["human_name"] == ""
 
-    def test_an_unreadable_stamp_counts_as_oldest(self):
-        orders = [_order(created="not a date", machine="mystery_choice"),
-                  _order(created="2023-01-03T17:00:00", machine="january_2023_choice")]
-        assert latest_order(orders)["product"]["machine_name"] == "january_2023_choice"
+    def test_detail_facts_agree_with_the_summary_shape(self):
+        fact = detail_facts(_order(), "abc123")
+        assert fact["choice"] is True
+        assert fact["created"] is not None
+
+
+class TestPickMonth:
+    """Only the most recent current-plan month is worked on; this picks it."""
+
+    def _fact(self, name, created, choice=True):
+        stamp = (datetime.fromisoformat(created).replace(tzinfo=timezone.utc)
+                 if created else None)
+        return {"gamekey": name, "choice": choice, "created": stamp, "human_name": name}
+
+    def test_the_newest_current_month_wins(self):
+        facts = [self._fact("september", "2026-09-01T17:00:00"),
+                 self._fact("october", "2026-10-06T17:00:00"),
+                 self._fact("august", "2026-08-04T17:00:00")]
+        latest, legacy, older = pick_month(facts)
+        assert latest["human_name"] == "october"
+        assert legacy == []
+        assert older == 2
+
+    def test_months_before_february_2022_are_legacy(self):
+        facts = [self._fact("december 2021", "2021-12-07T18:00:00"),
+                 self._fact("january 2022", "2022-01-04T18:00:00"),
+                 self._fact("february 2022", "2022-02-01T18:00:00")]
+        latest, legacy, older = pick_month(facts)
+        assert [fact["human_name"] for fact in legacy] == ["december 2021", "january 2022"]
+        assert latest["human_name"] == "february 2022"
+        assert older == 0
+
+    def test_no_current_month_picks_nothing(self):
+        latest, legacy, older = pick_month([self._fact("december 2021", "2021-12-07T18:00:00")])
+        assert latest is None
+        assert len(legacy) == 1
+        assert older == 0
+
+    def test_an_unreadable_date_counts_as_current_but_ranks_oldest(self):
+        facts = [self._fact("mystery", None),
+                 self._fact("january 2023", "2023-01-03T17:00:00")]
+        latest, legacy, older = pick_month(facts)
+        assert legacy == []
+        assert latest["human_name"] == "january 2023"
+        assert older == 1
+
+    def test_non_choice_orders_are_ignored(self):
+        facts = [self._fact("a bundle", "2026-10-01T17:00:00", choice=False),
+                 self._fact("october", "2026-10-06T17:00:00")]
+        latest, legacy, older = pick_month(facts)
+        assert latest["human_name"] == "october"
+        assert legacy == [] and older == 0
