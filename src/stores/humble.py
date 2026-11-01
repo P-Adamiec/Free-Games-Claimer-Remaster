@@ -23,9 +23,17 @@ What a run does, in order:
      spend picks. Older current-plan months are left alone too: unrevealed
      keys in them are a back catalogue to settle by hand, not a sweep for
      a monthly run, so they stay exactly as they are.
-  3. For every game whose key is still unrevealed and unexpired: ask Humble
-     to choose the month's content (one call per month), then reveal each
-     key with one call per game. Both calls run inside the page, because
+  3. Read the month's lineup from its membership page, because the order
+     alone cannot see a game that was never selected on the site: it has
+     no key entry there yet. Lineup games without an entry join the run as
+     waiting games in their own right — the Steam check below covers them
+     too, and one already in your library is never chosen, so no key entry
+     is ever created for it. For every game whose key is still unrevealed
+     and unexpired: ask Humble to choose the month's content (one call per
+     month, by the short identifiers the site's own claim button sends),
+     then reveal each key with one call per game. Choosing a game that
+     had no entry is what makes Humble create it, so the order is read
+     once more before the reveals. Both calls run inside the page, because
      Humble's anti-bot check turns away plain HTTP clients on those two
      endpoints while reads pass.
   4. Save each revealed key in the database, tagged with the store it
@@ -55,6 +63,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -348,6 +357,189 @@ def owned_in_plan(planned: list, owned_titles) -> list:
             and BaseClaimer._normalize_title(tpk.get("title") or "") in owned]
 
 
+# A Choice key entry's name ends in _<platform>, in front of the word
+# "choice" (or Humble's real-world typo "hoice"): chantsofsennaar_choice_steam,
+# deeprockgalactic_survivor_choice_steam. A single regional or functional
+# word can sit between the game's own name and that ending — row, naeu,
+# europe, playtest — and is not part of the identifier the choosing call
+# expects: mightmushroom_playtest_choice_steam is chosen as "mightmushroom".
+_CHOICE_SUFFIX_RE = re.compile(r"^(.+)_c?hoice_([a-z][a-z_]*)$")
+_CHOICE_MODIFIERS = frozenset({"row", "naeu", "europe", "playtest"})
+
+
+def short_identifier(machine_name: str) -> str | None:
+    """The identifier the choosing call expects for one key entry, or None.
+
+    None for a name that is not Choice content at all: such an entry is
+    never chosen, and is not a game in a month's lineup either. The exact
+    identifier normally comes from the month's page (month_lineup); this
+    derivation is the fallback for when the page could not be read, and
+    resolves the one ambiguity — a game's own name can contain underscores
+    too — by stripping only the modifier words Humble is known to insert.
+    """
+    match = _CHOICE_SUFFIX_RE.match((machine_name or "").strip().lower())
+    if not match:
+        return None
+    base = match.group(1)
+    head, _, last = base.rpartition("_")
+    if head and last in _CHOICE_MODIFIERS:
+        return head
+    return base
+
+
+def lineup_identifiers(lineup: list) -> dict:
+    """Key-entry name -> the page identifier of its game, for a whole lineup."""
+    identifiers = {}
+    for game in lineup or []:
+        for tpkd in game.get("tpks") or []:
+            identifiers[tpkd["machine_name"]] = game["identifier"]
+    return identifiers
+
+
+def choose_identifiers(planned: list) -> list[str]:
+    """The identifiers to choose for a plan, one per game, in plan order.
+
+    A game that has no key entry yet carries the identifier its month's
+    page gave it; a game that has one gives up the short form of its key
+    entry's name. Games with neither are not Choice content and are left
+    out: there is nothing to choose for them.
+    """
+    identifiers = []
+    for tpk in planned or []:
+        identifier = tpk.get("identifier") or short_identifier(tpk.get("machine_name") or "")
+        if identifier and identifier not in identifiers:
+            identifiers.append(identifier)
+    return identifiers
+
+
+def membership_slug(order: dict) -> str | None:
+    """The /membership/<slug> path for an order's month, or None.
+
+    The product's own choice_url wins when Humble provides one; otherwise
+    the slug is the product's machine name in kebab case with the Choice
+    suffix stripped (october_2026_choice -> october-2026).
+    """
+    product = (order or {}).get("product") or {}
+    url = str(product.get("choice_url") or "").strip()
+    if url:
+        return url.strip("/").rsplit("/", 1)[-1] or None
+    machine = str(product.get("machine_name") or "").lower()
+    for suffix in ("_choice_storefront", "_choice"):
+        if machine.endswith(suffix):
+            machine = machine[: -len(suffix)]
+            break
+    return machine.replace("_", "-") or None
+
+
+def _embedded_choice_options(page: str) -> dict | None:
+    """The contentChoiceOptions object a membership page carries in its data.
+
+    The page embeds its month as JSON inside a script block; the object is
+    lifted out by matching its braces, because the block around it is not
+    JSON as a whole. None when the marker or a readable object is absent.
+    """
+    marker = page.find('"contentChoiceOptions"')
+    if marker < 0:
+        return None
+    start = page.find("{", marker)
+    if start < 0:
+        return None
+    depth = 0
+    for index in range(start, len(page)):
+        char = page[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    blob = json.loads(page[start:index + 1])
+                except ValueError:
+                    return None
+                return blob if isinstance(blob, dict) else None
+    return None
+
+
+def month_lineup(page: str | None, product_machine: str = "") -> list | None:
+    """A Choice month's games, from its membership page's own data.
+
+    One entry per game: its page identifier (what the choosing call
+    expects), its title, and the key entries it would hand out, in the
+    page's display order. Items that are not games (a month's coupon, a
+    discount) never appear: their key entries' names are not Choice
+    content, which is also what keeps them unclaimable here. None when
+    the page's data cannot be read or belongs to another month, so the
+    caller can say plainly that the lineup went unchecked.
+    """
+    if not page:
+        return None
+    blob = _embedded_choice_options(page)
+    if blob is None:
+        return None
+    if product_machine and str(blob.get("productMachineName") or "") != product_machine:
+        return None
+    data = blob.get("contentChoiceData") or {}
+    game_data = data.get("game_data") or {}
+    if not isinstance(game_data, dict):
+        return None
+    lineup = []
+    for identifier in data.get("display_order") or list(game_data):
+        entry = game_data.get(identifier) or {}
+        tpks = []
+        for tpkd in entry.get("tpkds") or []:
+            machine = str(tpkd.get("machine_name") or "")
+            key_type = str(tpkd.get("key_type") or "").strip().lower()
+            if short_identifier(machine) is None or key_type == "generic":
+                continue
+            if tpkd.get("visible") is False:
+                continue
+            tpks.append({
+                "machine_name": machine,
+                "key_type": key_type,
+                "expired": bool(tpkd.get("is_expired")),
+                "expiry_date": str(tpkd.get("expiration_date|datetime") or ""),
+            })
+        if not tpks:
+            continue
+        lineup.append({
+            "identifier": str(identifier),
+            "title": str(entry.get("title") or identifier),
+            "tpks": tpks,
+        })
+    return lineup or None
+
+
+def unchosen_tpks(order: dict, lineup: list) -> list[dict]:
+    """Lineup games the order carries no key entry for yet, as waiting entries.
+
+    Shaped like extract_tpks output so the rest of the run treats them the
+    same, plus the page identifier the choosing call needs and an
+    "unchosen" mark: choosing one is what makes Humble create its real
+    key entry. A game lands here when it was never selected on the site —
+    the order alone cannot see it at all.
+    """
+    present = {tpk["machine_name"] for tpk in extract_tpks(order)}
+    gamekey = str((order or {}).get("gamekey") or "")
+    missing = []
+    for game in lineup or []:
+        for tpkd in game.get("tpks") or []:
+            if tpkd["machine_name"] in present:
+                continue
+            missing.append({
+                "gamekey": gamekey,
+                "title": game["title"],
+                "machine_name": tpkd["machine_name"],
+                "key_type": tpkd["key_type"],
+                "key_index": 0,
+                "revealed_key": None,
+                "expired": tpkd["expired"],
+                "expiry_date": tpkd["expiry_date"],
+                "identifier": game["identifier"],
+                "unchosen": True,
+            })
+    return missing
+
+
 def reveal_outcome(http_status: int, payload) -> str:
     """What a redeemkey answer means: revealed, already, blocked or failed.
 
@@ -381,8 +573,8 @@ class HumbleClaimer(BaseClaimer):
     # Humble's API, asked from inside the page
     # ------------------------------------------------------------------
 
-    async def _fetch(self, url: str, form: list | None = None) -> tuple[int, object]:
-        """One request to humblebundle.com from the open page; (HTTP status, JSON or None)."""
+    async def _fetch_raw(self, url: str, form: list | None = None) -> tuple[int, str]:
+        """One request to humblebundle.com from the open page; (HTTP status, raw body)."""
         js = FETCH_JS % (
             json.dumps("POST" if form else "GET"),
             json.dumps(url),
@@ -393,14 +585,23 @@ class HumbleClaimer(BaseClaimer):
             answer = json.loads(raw) if isinstance(raw, str) else {}
         except Exception as e:
             logger.debug("Humble request to %s failed: %s", url, e)
-            return 0, None
-        try:
-            payload = json.loads(answer.get("body") or "")
-        except (TypeError, ValueError):
-            payload = None
+            return 0, ""
         if answer.get("error"):
             logger.debug("Humble request to %s failed in the page: %s", url, answer["error"])
-        return int(answer.get("status") or 0), payload
+        return int(answer.get("status") or 0), str(answer.get("body") or "")
+
+    async def _fetch(self, url: str, form: list | None = None) -> tuple[int, object]:
+        """One request to humblebundle.com from the open page; (HTTP status, JSON or None)."""
+        status, body = await self._fetch_raw(url, form)
+        try:
+            payload = json.loads(body) if body else None
+        except (TypeError, ValueError):
+            payload = None
+        return status, payload
+
+    async def _fetch_text(self, url: str) -> tuple[int, str]:
+        """One GET from the open page, body unparsed: for pages, not API answers."""
+        return await self._fetch_raw(url)
 
     async def _signed_in(self) -> bool:
         """Ask the order list: it answers 200 signed in and 401 signed out."""
@@ -602,18 +803,77 @@ class HumbleClaimer(BaseClaimer):
             await session.commit()
 
     async def _choose_month(self, order: dict, planned: list) -> bool:
-        """Choose a month's games in one call, the identifiers being the keys' own names.
+        """Choose a plan's games in one call, by the identifiers the page itself uses.
 
-        For a current-plan month the content is normally chosen already (the
-        keys are in the order), and Humble saying so counts as chosen too:
-        revealing the keys is the step that decides, this one only opens it.
+        The identifiers are the short forms (choose_identifiers), the shape
+        the site's own claim button sends. For a current-plan month the
+        content is normally chosen already, and Humble saying so counts as
+        chosen too: revealing the keys is the step that decides, this one
+        only opens it — and for a game that had no key entry yet, it is
+        what makes Humble create one.
         """
+        identifiers = choose_identifiers(planned)
+        if not identifiers:
+            return True
         form = [["gamekey", str(order.get("gamekey") or "")], ["parent_identifier", "initial"]]
-        form += [["chosen_identifiers[]", tpk["machine_name"]] for tpk in planned]
+        form += [["chosen_identifiers[]", identifier] for identifier in identifiers]
         status, payload = await self._fetch(API_CHOOSE, form)
         chosen = choose_outcome(status, payload)
         logger.debug("Choosing the month answered %s (%s).", status, "chosen" if chosen else "not chosen")
         return chosen
+
+    async def _month_lineup(self, order: dict) -> list | None:
+        """The picked month's full lineup, from its membership page.
+
+        The order alone cannot see a game that was never selected on the
+        site — it has no key entry there — so the month's games are read
+        from the page that offers them. None when the page or its data
+        cannot be read, with the gap said out loud: a run that cannot see
+        the lineup must not sound complete.
+        """
+        slug = membership_slug(order)
+        if not slug:
+            logger.warning("The month's membership page is not known, so games you have not "
+                           "selected on the site yet, if any, are invisible this run.")
+            return None
+        status, page = await self._fetch_text(f"/membership/{slug}")
+        product = (order.get("product") or {}).get("machine_name") or ""
+        lineup = month_lineup(page, str(product)) if status == 200 else None
+        if lineup is None:
+            logger.warning("The month's lineup could not be read from its membership page, "
+                           "so games you have not selected on the site yet, if any, are "
+                           "invisible this run.")
+        return lineup
+
+    async def _materialize(self, order: dict, planned: list) -> list:
+        """Swap planned entries that had no key entry for the real ones, after choosing.
+
+        Choosing is what makes Humble create a game's key entry, so the
+        order is read once more and the planned stand-ins are matched to
+        real entries by name. A game Humble still hands no entry for is
+        named and left for the next run; entries that were real all along
+        pass through untouched.
+        """
+        fresh = await self._open_order(str(order.get("gamekey") or ""))
+        if fresh is None:
+            logger.warning("The order could not be re-read after choosing, so the games that "
+                           "were just chosen wait for the next run.")
+            return [tpk for tpk in planned if not tpk.get("unchosen")]
+        real = {tpk["machine_name"]: tpk for tpk in extract_tpks(fresh)}
+        settled = []
+        for tpk in planned:
+            if not tpk.get("unchosen"):
+                settled.append(tpk)
+                continue
+            match = real.get(tpk["machine_name"])
+            if match is None or tpk_state(match) != "waiting":
+                logger.warning("'%s' was chosen, but Humble handed over no key entry for it; "
+                               "it waits for the next run.", tpk["title"])
+                self.notify_games.append({"title": tpk["title"], "url": URL_KEYS,
+                                          "status": "skipped:choose-failed"})
+                continue
+            settled.append(match)
+        return settled
 
     async def _reveal(self, tpk: dict) -> str:
         """Reveal one key and save it. Returns the run's standing: claimed, blocked or failed."""
@@ -648,19 +908,21 @@ class HumbleClaimer(BaseClaimer):
         self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "claimed"})
         return "claimed"
 
-    async def _steam_owned_titles(self, orders: list) -> set | None:
+    async def _steam_owned_titles(self, candidates: list) -> set | None:
         """Normalized titles of waiting Steam keys your Steam library already holds.
 
-        One check for the whole run, before any month is claimed from, on
-        Steam's own profile and sign-in. An empty set when the check is off
+        One check for the whole run, before the month is claimed from, on
+        Steam's own profile and sign-in. The candidates are every waiting
+        key entry the run can see, including games that have no entry in
+        the order yet: one of those counts as owned exactly the same, and
+        is then never chosen at all. An empty set when the check is off
         (HB_CHECK_STEAM=false) or no Steam key is waiting; None when the
         check is on but your library could not be read, which the caller
         treats as "reveal no Steam key this run".
         """
         if not cfg.hb_check_steam:
             return set()
-        titles = sorted({tpk["title"] for order in orders
-                         for tpk in plan_reveals(extract_tpks(order))
+        titles = sorted({tpk["title"] for tpk in plan_reveals(candidates)
                          if (tpk.get("key_type") or "") == "steam"})
         if not titles:
             return set()
@@ -677,9 +939,25 @@ class HumbleClaimer(BaseClaimer):
                     "library, left unrevealed.", len(owned), len(titles))
         return owned
 
-    async def _claim_month(self, order: dict, steam_owned: set | None) -> None:
-        """Settle one Choice month: record what is settled, reveal what is waiting."""
+    async def _claim_month(self, order: dict, steam_owned: set | None,
+                           lineup: list | None = None) -> None:
+        """Settle one Choice month: record what is settled, reveal what is waiting.
+
+        The month's games are the order's key entries plus the lineup games
+        that have no entry yet (unchosen_tpks): a game never selected on
+        the site is as much this month's game as any other, and the Steam
+        check and the plan treat it the same. One already in your Steam
+        library is never chosen, so no key entry is ever created for it.
+        """
         tpks = extract_tpks(order)
+        if lineup:
+            # The page's identifiers are exact; stamp them onto the key
+            # entries they belong to so choosing never has to derive one.
+            identifiers = lineup_identifiers(lineup)
+            for tpk in tpks:
+                if tpk["machine_name"] in identifiers:
+                    tpk["identifier"] = identifiers[tpk["machine_name"]]
+            tpks += unchosen_tpks(order, lineup)
         for tpk in tpks:
             state = tpk_state(tpk)
             if state == "revealed":
@@ -728,6 +1006,12 @@ class HumbleClaimer(BaseClaimer):
             return
 
         await self._choose_month(order, planned)
+        if any(tpk.get("unchosen") for tpk in planned):
+            # Choosing created their key entries; re-read the order so the
+            # reveals work on the real entries, not the stand-ins.
+            planned = await self._materialize(order, planned)
+            if not planned:
+                return
         for index, tpk in enumerate(planned):
             if await self._reveal(tpk) == "blocked":
                 left = len(planned) - index - 1
@@ -753,8 +1037,12 @@ class HumbleClaimer(BaseClaimer):
             if order is None:
                 logger.info("No Humble Choice month is waiting to be claimed.")
                 return
-            steam_owned = await self._steam_owned_titles([order])
-            await self._claim_month(order, steam_owned)
+            lineup = await self._month_lineup(order)
+            candidates = extract_tpks(order)
+            if lineup:
+                candidates += unchosen_tpks(order, lineup)
+            steam_owned = await self._steam_owned_titles(candidates)
+            await self._claim_month(order, steam_owned, lineup)
 
         except Exception as exc:
             logger.exception("Fatal error")
