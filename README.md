@@ -74,6 +74,10 @@ PG_PASSWORD=your_password
 GOG_EMAIL=your@email.com
 GOG_PASSWORD=your_password
 
+# Humble Bundle (Humble Choice, opt-in: add humble to STORES)
+HB_EMAIL=your@email.com
+HB_PASSWORD=your_password
+
 # Steam
 STEAM_USERNAME=your_username
 STEAM_PASSWORD=your_password
@@ -169,6 +173,9 @@ Options are set via environment variables in `.env`:
 | `GOG_FORCE_REDEEM` | `false` | Force re-redeem old GOG codes from Prime Gaming. |
 | `GOG_OTP_KEY` | | GOG authenticator (TOTP) secret, auto-filled. Codes sent by e-mail are entered manually via VNC. |
 | `GOG_OTP_CODES` | | Comma-separated GOG recovery codes, tried after the secret. Used ones are written to `data/used_gog_codes.txt`. |
+| `HB_EMAIL` | | Humble Bundle login email. |
+| `HB_PASSWORD` | | Humble Bundle login password. |
+| `HB_OTP_KEY` | | Humble Bundle authenticator (TOTP) secret, auto-filled. A code Humble e-mails you (its Guard check) is entered manually via VNC. |
 | `MS_EMAIL` | | Microsoft account email. |
 | `MS_PASSWORD` | | Microsoft account password. |
 | `MS_FORCE_REDEEM` | `false` | Force another pass over Microsoft codes from the last 60 days. |
@@ -191,7 +198,7 @@ Options are set via environment variables in `.env`:
 | `AE_FLAG_RETRIES` | `3` | How many times to wait and re-approach the coin page when the offer is capped. |
 | `AE_FLAG_WAIT` | `480` | Seconds to wait between retries (kept above AliExpress' ~7-min penalty so one wait clears it). |
 | `AE_PAGE_RETRIES` | `4` | How many extra approaches to make when the coin page loads but renders nothing. AliExpress serves it empty most of the time (measured: one usable page in eight looks), so each retry is a real chance at the daily check-in. `0` gives up on the first look. |
-| `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `prime`, `gog`, `microsoft`, `ubisoft`, `aliexpress` and `legacy`. Add `fab`, `unity`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
+| `STORES` | *(see note)* | Comma-separated list of stores to run. Empty runs `steam`, `epic`, `prime`, `gog`, `microsoft`, `ubisoft`, `aliexpress` and `legacy`. Add `fab`, `unity`, `humble`, `itchio`, `fanatical`, `indiegala` or `alienware` to switch one on. GamerPower is asked once per run and its finds go to the store they belong to, so `steam` also claims the Steam giveaways it lists. |
 | `RESET_DB_GAMES` | `false` | Erase the database claims recorded within the last 7 days, at every start while it is on, to clear false positives. Codes and keys still waiting to be redeemed are kept. Set it back to `false` after one start. |
 | `FANATICAL_EMAIL` | | Fanatical account email. |
 | `FANATICAL_PASSWORD`| | Fanatical account password. |
@@ -240,6 +247,7 @@ Set either, both, or neither. Filling one in is all it takes to switch it on. Ev
 | Epic (and Fab) | `EG_OTP_KEY` | `EG_OTP_CODES` | `data/used_epic_codes.txt` |
 | Fanatical | `FANATICAL_OTP_KEY` | Fanatical does not issue any | |
 | GOG | `GOG_OTP_KEY` | `GOG_OTP_CODES` | `data/used_gog_codes.txt` |
+| Humble Bundle | `HB_OTP_KEY` | Humble does not issue any | |
 | IndieGala | not supported | not supported | the login captcha is ticked by you over VNC |
 | Itch.io | `ITCHIO_OTP_KEY` | `ITCHIO_OTP_CODES` | `data/used_itchio_codes.txt` |
 | Microsoft | `MS_OTP_KEY` | Microsoft issues one recovery code for the account, not codes for signing in | |
@@ -291,6 +299,25 @@ When a lookup fails, the bot keeps the zone it saved last time and tries again o
 
 Not sure which one is yours? Open [ipapi.co/timezone](https://ipapi.co/timezone/) in your own browser: the one line it shows is exactly what the bot would have used.
 
+## Humble Bundle, Humble Choice
+
+Humble is opt-in (`STORES=...,humble`), because claiming a Choice game is not like claiming a giveaway: it **reveals the game's key**, and a revealed key cannot be un-revealed, gifted from Humble, or refunded as part of its month. The bot only does that when you have named the store yourself.
+
+What it does on a run:
+
+- Signs in with `HB_EMAIL` / `HB_PASSWORD` (an authenticator code from `HB_OTP_KEY` if your account asks for one; the code Humble e-mails you, its Guard check, is typed by you over VNC).
+- Reads your orders through Humble's own API, from inside the signed-in page, and keeps your Choice months. **It never unlocks a month early**: early unlock is a payment, and a subscriber's month appears as an order on its own when the automatic billing runs on the last Tuesday of the month.
+- Reveals every key that is still unrevealed and unexpired, and saves it in the database, tagged with the store it belongs to. Add `steam` to the same `STORES` and a revealed Steam key is activated on your Steam account at the end of the run, like a Fanatical key; add `gog` and a GOG key is redeemed the same way. Any other key waits in the database and on your [Humble keys page](https://www.humblebundle.com/home/keys), where a revealed key sits anyway.
+- A game offered as a Steam key or an Epic grant is claimed as the **Steam key**: a key can still be activated or gifted later, a keyless grant cannot be taken back.
+
+What it leaves alone, on purpose:
+
+- **Months from before February 2022.** Choice was pick-limited then, so an old month's unpicked games are a choice only you can make. The bot names the month in the log and moves on.
+- **Keys already revealed**, by you or by an earlier run, and **keys whose publisher expiry has passed**, which it reports once as expired.
+- Everything that is not a Choice month: store purchases and ordinary bundles are already yours without a reveal step this bot needs to make.
+
+One honest limit: Humble draws its sign-in form with script and changes it from time to time, and its anti-bot check can still ask for you. When the automated sign-in does not finish, the bot asks you to sign in over VNC, like every other store, and carries on from there.
+
 ## Unity, one-time setup
 
 Unity is opt-in (`STORES=...,unity`) and its checkout refuses the free coupon until your Unity account carries a complete billing address. That is the one thing the bot cannot invent for you, so on the first claim it opens the checkout, pings you the same way it does for a login, and waits as long as `VNC_LOGIN_TIMEOUT` says, three minutes by default:
@@ -341,7 +368,7 @@ The application supports three scheduling modes: running on a recurring interval
 
 ### Selective module execution
 
-Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`/`amazon`, `gog`, `ubisoft`/`ubi`, `fab`, `unity`, `microsoft`/`ms`/`xbox`, `aliexpress`/`ae`, `legacy`/`lg`, `itchio`/`itch`, `fanatical`, `indiegala`, `alienware`):
+Run only specific stores using accepted module aliases (`steam`, `epic`, `prime`/`amazon`, `gog`, `ubisoft`/`ubi`, `fab`, `unity`, `humble`/`hb`, `microsoft`/`ms`/`xbox`, `aliexpress`/`ae`, `legacy`/`lg`, `itchio`/`itch`, `fanatical`, `indiegala`, `alienware`):
 
 ```bash
 # Method 1: Via environment variable (recommended)
@@ -360,7 +387,7 @@ To skip a store, simply exclude it from the `STORES` list. Any unrecognized sett
 >
 > So `STORES=steam` also claims the Steam giveaways GamerPower lists, and `STORES=prime` sends GamerPower no request at all, because nothing in that run could use it.
 >
-> Without `steam` in `STORES`, a Fanatical key stays in your Fanatical library and the summary says so. IndieGala adds its games to your IndieGala library.
+> Without `steam` in `STORES`, a Fanatical key stays in your Fanatical library and the summary says so. A Steam key revealed from Humble Choice stays in your Humble library the same way, and is activated the first later run that includes `steam`. IndieGala adds its games to your IndieGala library.
 
 
 ---
@@ -402,6 +429,7 @@ free-games-claimer-remaster/
 │       ├── epic.py         # Epic Games Store
 │       ├── prime.py        # Amazon Prime Gaming
 │       ├── gog.py          # GOG (+ GOG code redemption from Prime)
+│       ├── humble.py       # Humble Bundle: revealing Humble Choice keys
 │       ├── steam.py        # Steam (store search for 100% off, activating keys from Fanatical)
 │       ├── epic_fab.py     # Fab limited-time free assets (shares Epic's session)
 │       ├── unity.py        # Unity Asset Store weekly free asset

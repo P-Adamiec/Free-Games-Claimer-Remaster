@@ -38,6 +38,7 @@ from src.stores.epic import claim_epic
 from src.stores.epic_fab import claim_fab
 from src.stores.gamerpower import SIDE_STORE_KEYS, claim_side_stores, discover_giveaways
 from src.stores.gog import claim_gog
+from src.stores.humble import claim_humble
 from src.stores.microsoft import claim_microsoft
 from src.stores.prime import claim_prime
 from src.stores.steam import claim_steam
@@ -59,8 +60,8 @@ class StorePrefixFilter(logging.Filter):
     def filter(self, record):
         if record.name.startswith("fgc."):
             store = record.name.split(".")[-1]
-            if store in ("epic", "steam", "gog", "prime", "microsoft", "aliexpress", "ubisoft", "fab", "unity", "legacygames"):
-                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "microsoft": "Microsoft", "aliexpress": "AliExpress", "ubisoft": "Ubisoft", "fab": "Fab", "unity": "Unity", "legacygames": "Legacy Games"}
+            if store in ("epic", "steam", "gog", "prime", "microsoft", "aliexpress", "ubisoft", "fab", "unity", "legacygames", "humble"):
+                store_map = {"gog": "GOG", "epic": "Epic", "steam": "Steam", "prime": "Prime", "microsoft": "Microsoft", "aliexpress": "AliExpress", "ubisoft": "Ubisoft", "fab": "Fab", "unity": "Unity", "legacygames": "Legacy Games", "humble": "Humble Bundle"}
                 prefix = escape(f"[{store_map[store]}]")
                 # Prepend to the message template
                 record.msg = f"{prefix} {record.msg}"
@@ -125,6 +126,7 @@ ALL_CLAIMERS: dict[str, tuple[str, object]] = {
     "fab":        ("Fab",          claim_fab),
     "prime":      ("Prime Gaming", claim_prime),
     "gog":        ("GOG",          claim_gog),
+    "humble":     ("Humble Bundle", claim_humble),
     "microsoft":  ("Microsoft",    claim_microsoft),
     "ubisoft":    ("Ubisoft",      claim_ubisoft),
     "unity":      ("Unity",        claim_unity),
@@ -174,6 +176,11 @@ _ALIASES: dict[str, str] = {
     "primegaming":   "prime",
     "amazon":        "prime",
     "gog":           "gog",
+    "humble":        "humble",
+    "humble-bundle": "humble",
+    "humblebundle":  "humble",
+    "humble-choice": "humble",
+    "hb":            "humble",
     "microsoft":     "microsoft",
     "microsoft-store": "microsoft",
     "ms":            "microsoft",
@@ -512,7 +519,7 @@ async def run_claimers() -> None:
         except Exception:
             logger.exception("✗ GamerPower side stores crashed")
 
-    # Steam keys a side site handed out (Fanatical), activated after the sites that hand them out.
+    # Steam keys another store handed out (Fanatical, Humble Bundle), activated after the stores that hand them out.
     if "Steam" in store_names:
         try:
             from src.stores.steam import SteamClaimer
