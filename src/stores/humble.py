@@ -13,7 +13,10 @@ What a run does, in order:
   2. Read your orders and keep the Choice ones from the current plan, the
      single all-games plan sold since February 2022. Pick-limited months from
      before that switch are left alone: their unpicked games are a choice
-     only you can make, and the bot must not spend picks.
+     only you can make, and the bot must not spend picks. Of the current-plan
+     months, only the most recent one is worked on: unrevealed keys in older
+     months are a back catalogue to settle by hand, not a sweep for a
+     monthly run, so they are left exactly as they are.
   3. For every game whose key is still unrevealed and unexpired: ask Humble
      to choose the month's content (one call per month), then reveal each
      key with one call per game. Both calls run inside the page, because
@@ -25,6 +28,16 @@ What a run does, in order:
      the GOG module when `gog` is, exactly like the keys Prime Gaming and
      Fanatical hand out. Any other key waits in the database and on your
      Humble keys page, where a revealed key sits anyway.
+
+Before step 3, a waiting Steam key is checked against your own Steam
+library (HB_CHECK_STEAM, on unless switched off): a game already on Steam
+keeps its key unrevealed, so the key stays giftable and the month stays
+refundable. The check rides Steam's own browser profile and sign-in, and
+reads Steam's own userdata and search suggestions. When your library
+cannot be read at all, no Steam key is revealed that run either: a key
+revealed for a game you already own is the one outcome no later run can
+undo, so the keys wait for a run that can check. A dry run reveals
+nothing either way, so it simply lists what it would do.
 
 Revealing is one-way: a revealed key can no longer be gifted from Humble,
 and a month with a revealed key in it is no longer refundable. That is why
@@ -165,6 +178,19 @@ def order_is_legacy(order: dict) -> bool:
     return created is not None and created < LEGACY_CUTOFF
 
 
+def latest_order(orders: list) -> dict | None:
+    """The most recent of these orders, by the stamp Humble put on it.
+
+    Only this month is worked on in a run. An order whose date cannot be
+    read counts as the oldest, so a stamp Humble changes one day cannot
+    quietly promote a random month over the newest one.
+    """
+    if not orders:
+        return None
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    return max(orders, key=lambda order: order_created(order) or epoch)
+
+
 def extract_tpks(order: dict) -> list[dict]:
     """An order's third-party keys (TPKs), one dict per key a game can hand out."""
     order = order or {}
@@ -221,6 +247,19 @@ def plan_reveals(tpks: list) -> list[dict]:
         seen.add(variant)
         planned.append(tpk)
     return planned
+
+
+def owned_in_plan(planned: list, owned_titles) -> list:
+    """The planned Steam keys whose game is already in your Steam library.
+
+    `owned_titles` holds normalized titles (BaseClaimer._normalize_title
+    form), as the Steam check hands them over. Only Steam keys can be in a
+    Steam library; every other key in the plan is untouched.
+    """
+    owned = set(owned_titles or set())
+    return [tpk for tpk in planned or []
+            if (tpk.get("key_type") or "") == "steam"
+            and BaseClaimer._normalize_title(tpk.get("title") or "") in owned]
 
 
 def reveal_outcome(http_status: int, payload) -> str:
@@ -457,7 +496,36 @@ class HumbleClaimer(BaseClaimer):
         self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "claimed"})
         return "claimed"
 
-    async def _claim_month(self, order: dict) -> None:
+    async def _steam_owned_titles(self, orders: list) -> set | None:
+        """Normalized titles of waiting Steam keys your Steam library already holds.
+
+        One check for the whole run, before any month is claimed from, on
+        Steam's own profile and sign-in. An empty set when the check is off
+        (HB_CHECK_STEAM=false) or no Steam key is waiting; None when the
+        check is on but your library could not be read, which the caller
+        treats as "reveal no Steam key this run".
+        """
+        if not cfg.hb_check_steam:
+            return set()
+        titles = sorted({tpk["title"] for order in orders
+                         for tpk in plan_reveals(extract_tpks(order))
+                         if (tpk.get("key_type") or "") == "steam"})
+        if not titles:
+            return set()
+        from src.stores.steam import steam_owned_verdicts
+
+        verdicts = await steam_owned_verdicts(titles)
+        if verdicts is None:
+            logger.warning("Your Steam library could not be checked, so no Steam key will be "
+                           "revealed this run; the keys wait, unrevealed, for the next one.")
+            return None
+        owned = {BaseClaimer._normalize_title(title)
+                 for title, is_owned in verdicts.items() if is_owned}
+        logger.info("Steam library check: %d of %d waiting Steam key(s) already in your "
+                    "library, left unrevealed.", len(owned), len(titles))
+        return owned
+
+    async def _claim_month(self, order: dict, steam_owned: set | None) -> None:
         """Settle one Choice month: record what is settled, reveal what is waiting."""
         tpks = extract_tpks(order)
         for tpk in tpks:
@@ -473,6 +541,29 @@ class HumbleClaimer(BaseClaimer):
                 self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "skipped:expired"})
 
         planned = plan_reveals(tpks)
+        if planned and steam_owned is not None:
+            # Already on Steam: the key stays unrevealed, so it can still be gifted.
+            held = owned_in_plan(planned, steam_owned)
+            for tpk in held:
+                logger.info("'%s' is already in your Steam library, so its key stays unrevealed.",
+                            tpk["title"])
+                await self._remember(tpk, "skipped:owned-on-steam")
+                self.notify_games.append({"title": tpk["title"], "url": URL_KEYS,
+                                          "status": "skipped:owned-on-steam"})
+            drop = {id(tpk) for tpk in held}
+            planned = [tpk for tpk in planned if id(tpk) not in drop]
+        elif planned and steam_owned is None and not cfg.dryrun:
+            # The library could not be read: no Steam key is revealed on a guess.
+            held = [tpk for tpk in planned if (tpk.get("key_type") or "") == "steam"]
+            for tpk in held:
+                logger.warning("'%s' waits for the next run: your Steam library could not be "
+                               "checked this run.", tpk["title"])
+                await self._remember(tpk, "skipped:steam-unchecked")
+                self.notify_games.append({"title": tpk["title"], "url": URL_KEYS,
+                                          "status": "skipped:steam-unchecked"})
+            drop = {id(tpk) for tpk in held}
+            planned = [tpk for tpk in planned if id(tpk) not in drop]
+
         if not planned:
             logger.debug("Nothing waiting to be revealed in this month.")
             return
@@ -510,8 +601,15 @@ class HumbleClaimer(BaseClaimer):
             if not orders:
                 logger.info("No Humble Choice month is waiting to be claimed.")
                 return
+            latest = latest_order(orders)
+            if len(orders) > 1:
+                name = (latest.get("product") or {}).get("human_name") or "the newest month"
+                logger.info("Only the most recent Choice month is checked: '%s'. "
+                            "%d older month(s) left alone.", name, len(orders) - 1)
+            orders = [latest]
+            steam_owned = await self._steam_owned_titles(orders)
             for order in orders:
-                await self._claim_month(order)
+                await self._claim_month(order, steam_owned)
 
         except Exception as exc:
             logger.exception("Fatal error")

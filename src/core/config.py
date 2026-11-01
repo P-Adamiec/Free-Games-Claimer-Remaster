@@ -325,6 +325,8 @@ class Config:
     hb_email: str | None = os.getenv("HB_EMAIL") or os.getenv("EMAIL")
     hb_password: str | None = os.getenv("HB_PASSWORD") or os.getenv("PASSWORD")
     hb_otp_key: str | None = otp_key(_secret("HB_OTP_KEY"))
+    # Before a Steam key is revealed, check your Steam library and leave owned games unrevealed.
+    hb_check_steam: bool = _bool("HB_CHECK_STEAM", default=True)
 
     # --- Microsoft Store / Xbox ---
     ms_email: str | None = os.getenv("MS_EMAIL") or os.getenv("EMAIL")

@@ -9,7 +9,7 @@ import pytest
 
 from src.stores.steam import (DEMO_JS, GAMES_ONLY, KEY_OUTCOMES, REMEMBER_ME_JS, REMEMBER_ME_STATE_JS, STORE_FREE_SEARCH,
                               SteamClaimer, activation_outcome, base_game_button_js, claim_order, free_search_games,
-                              is_waiting_steam_key)
+                              is_waiting_steam_key, owned_app_ids, suggest_candidates, title_is_owned)
 
 SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "steam.py").read_text(encoding="utf-8")
 
@@ -433,3 +433,45 @@ class TestOnlyRealGiveaways:
     def test_without_steam_dlc_a_dlc_page_is_left_alone_first(self):
         guard = self.CLAIM.index("if not cfg.steam_claim_dlc and")
         assert guard < self.CLAIM.index("price_check_raw = await") < self.CLAIM.index("await self._ensure_base_game(")
+
+
+class TestLibraryOwnershipCheck:
+    """The userdata / suggest reading Humble's Steam-key guard is built on."""
+
+    SUGGEST = (
+        '<a data-ds-appid="1234" data-ds-itemkey="App_1234" class="match" '
+        'href="https://store.steampowered.com/app/1234/A_Game/">'
+        '<div class="match_details"><span class="match_name">A Game</span></div></a>'
+        '<a data-ds-appid="5678" data-ds-itemkey="App_5678" class="match" '
+        'href="https://store.steampowered.com/app/5678/Fish__Chips/">'
+        '<div class="match_details"><span class="match_name">Fish &amp; Chips</span></div></a>'
+    )
+
+    def test_owned_ids_read_the_userdata_shape(self):
+        assert owned_app_ids({"rgOwnedApps": [10, "20", "junk", None]}) == {10, 20}
+        assert owned_app_ids({"rgOwnedApps": []}) == set()
+
+    def test_an_unreadable_userdata_answer_is_none_not_empty(self):
+        # Empty would read as "owns nothing" and every key would be revealed unchecked.
+        assert owned_app_ids({}) is None
+        assert owned_app_ids({"rgOwnedApps": "nope"}) is None
+        assert owned_app_ids([1, 2]) is None
+        assert owned_app_ids(None) is None
+
+    def test_suggestions_give_app_ids_and_clean_names(self):
+        assert suggest_candidates(self.SUGGEST) == [(1234, "A Game"), (5678, "Fish & Chips")]
+        assert suggest_candidates("") == []
+
+    def test_an_exact_title_in_the_library_is_owned(self):
+        candidates = [(1234, "A Game"), (9999, "A Game")]
+        assert title_is_owned("A Game", candidates, {1234}) is True
+        assert title_is_owned("A Game", candidates, {5555}) is False
+
+    def test_edition_words_do_not_hide_the_same_game(self):
+        assert title_is_owned("A Game: Complete Edition", [(1234, "A Game")], {1234}) is True
+        assert title_is_owned("A Game", [(1234, "A Game Definitive Edition")], {1234}) is True
+
+    def test_a_near_miss_is_not_owned(self):
+        # The soundtrack is a different app; owning the game says nothing about it.
+        assert title_is_owned("A Game", [(1234, "A Game Soundtrack")], {1234}) is False
+        assert title_is_owned("A Game 2", [(1234, "A Game")], {1234}) is False
