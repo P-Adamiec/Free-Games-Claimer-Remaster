@@ -45,9 +45,9 @@ There are two primary ways to set up the claimer. **Method A** is highly recomme
 ### Method A: Using Dockhand (Visual Web UI)
 1. Inside your Dockhand dashboard, navigate to the **Stacks** or **Compose** section.
 2. Name the stack however you like, for example: `free-games-claimer`.
-3. In the text editor box, **paste the entire contents of the `docker-compose.yml` file** from the GitHub repository.
+3. In the text editor box, **paste the entire contents of the `docker-compose.yml` file** from the GitHub repository. One catch: this compose file builds the bot from source, so Dockhand must run it as a stack on the folder holding your checkout of the repository (Dockerfile and all), not as a pasted compose file on its own, or the build has nothing to build from.
 4. Set up your `.env` configuration (e.g. `EG_EMAIL=your@email.com`) within the environment variables block or `.env` editor in Dockhand matching the `.env.example` file. Set `VNC_PASSWORD=` to a password of your own as well, it protects the browser that is signed in to your stores from anyone else on your network.
-5. Click **Deploy / Update**. That's it! Dockhand handles the downloading and execution automatically in the background.
+5. Click **Deploy / Update**. That's it! Dockhand handles the building and execution automatically in the background. The first deploy builds the image from the checkout, which takes a while.
 
 ### Method B: The Classic Folder Method
 If for some reason you don't want to use a visual interface:
@@ -55,7 +55,7 @@ If for some reason you don't want to use a visual interface:
 2. Extract the ZIP file somewhere safe (like `Documents/free-games-claimer`).
 3. Inside the extracted folder, find `.env.example`, rename it strictly to `.env`, and fill out your logins inside it using Notepad. Set `VNC_PASSWORD=` to a password of your own as well, it protects the browser that is signed in to your stores from anyone else on your network.
 4. **Open Terminal exactly in this folder:** Click on the address bar at the very top of the window, erase the text, type `cmd`, and hit **Enter**. A black command window will pop up already pointing to your exact folder!
-5. In that black window, type `docker compose up -d` and hit Enter. The `-d` explicitly tells Docker to run it detached (invisibly).
+5. In that black window, type `docker compose up -d --build` and hit Enter. The `-d` explicitly tells Docker to run it detached (invisibly), and `--build` builds the bot from the code in this folder; the first build takes a while.
 
 ---
 
@@ -77,9 +77,9 @@ Open a terminal in the folder that holds your `docker-compose.yml` (click the ad
 | What you want | Command |
 |---|---|
 | See what the bot is doing | `docker logs -f fgc-remaster` (press `Ctrl + C` to stop watching, the bot keeps running) |
-| Update to the newest version | `docker compose pull` then `docker compose up -d` |
+| Update to the newest version | Update the checkout (`git pull`), then `docker compose up -d --build` |
 | Stop it, keeping your logins | `docker compose down` |
-| Start completely fresh | `docker compose down -v` then `docker compose up -d` |
+| Start completely fresh | `docker compose down -v` then `docker compose up -d --build` |
 
 **What the difference is:** your logins and the record of what was already claimed live in a Docker volume next to the container, not inside it. `down` leaves that volume alone, so starting again picks up where you left off and you do not sign in a second time. `down -v` deletes it, which means every store asks you to sign in again through VNC. Updating never touches it, the new version simply starts using what is already there.
 

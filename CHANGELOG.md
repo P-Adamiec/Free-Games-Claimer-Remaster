@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **Humble Bundle: Humble Choice claiming (opt-in, `STORES=...,humble`)**: the new `src/stores/humble.py` signs in with `HB_EMAIL` / `HB_PASSWORD` (`HB_OTP_KEY` for an authenticator code, the e-mailed Guard code over VNC) and reveals the keys of your Choice months through Humble's own API, asked from inside the signed-in page, because the two claim endpoints turn plain HTTP clients away. Revealing is one-way, so the store runs only when named, like Fab and Unity. It never unlocks a month early (that is a payment; a subscriber's month arrives by automatic billing), it leaves pick-limited months from before February 2022 alone, and a game offered as a Steam key or an Epic grant is claimed as the Steam key. A revealed key is saved in the database tagged with its store, so a Steam key is activated by the Steam module in the same run when `steam` is in `STORES` too, and a GOG key is redeemed by the GOG module when `gog` is, the way Prime Gaming and Fanatical keys already are. Keys already revealed and keys past their publisher expiry are reported, never touched again.
 
+### Changed
+- **`docker-compose.yml` builds locally instead of pulling a published image** – the image now comes from the Dockerfile in the checkout (`image: fgc-remaster:${FGC_TAG:-local}`, `pull_policy: never`), so `docker compose up -d --build` runs the code in front of you, which is what you want when testing a change such as a new store. `FGC_TAG` only names the local image now and no longer selects a published release or the `dev` build; a comment in the compose file shows the published-image line to restore if you want that back. The `.env` file is also no longer required for the container to start, so a fresh checkout comes up and you can sign in over VNC before creating one from `.env.example`.
+
 ## [1.18] - 2026-10-21
 
 ### Changed

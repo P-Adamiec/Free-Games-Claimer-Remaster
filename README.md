@@ -104,10 +104,10 @@ DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 ### 2. Run container
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-> 💡 **Want to test experimental development features?** Add `FGC_TAG=dev` to your `.env` file before running Docker to automatically download our pre-release build!
+The compose file builds the image from the code in this folder and never pulls a published one, so what runs is exactly this checkout, including any changes of your own. The first build takes a while; later starts reuse it, and `--build` picks up code changes whenever you want them in.
 
 ### 3. Login (first run)
 
@@ -132,7 +132,7 @@ Options are set via environment variables in `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `FGC_TAG` | `latest` | Docker image tag to run (set to `dev` to test experimental pre-release builds). |
+| `FGC_TAG` | `local` | Tag for the image `docker-compose.yml` builds locally from this checkout. The compose file never pulls a published image, so the tag no longer selects a release. |
 | `PUID` | | Run the bot as this user id instead of root, so files in a mounted data folder belong to you on the host. Use what `id -u` prints there. With `cap_drop: ALL` in your compose, add `cap_add: [CHOWN, SETUID, SETGID]`, which the switch needs. |
 | `PGID` | | Group id to go with `PUID` (what `id -g` prints). Defaults to `PUID`. |
 | `SHOW` | `1` | Show browser window (VNC). |
@@ -548,14 +548,13 @@ Keep this one for when you are truly stuck. You lose every saved login and the r
 
 The log already carries the bot's diagnostic detail, because `DEBUG` is on by default. With `DEBUG=false` it shows only what you act on: which store is running, who is signed in, what was found and claimed, plus every warning and error.
 
-1. **Check you are on the newest code first**, the fix may already exist. `docker logs fgc-remaster | head -20` prints the version in the banner. To try the development build, set `FGC_TAG=dev` in `.env`, then `docker compose pull` and `docker compose up -d`.
+1. **Check you are on the newest code first**, the fix may already exist. `docker logs fgc-remaster | head -20` prints the version in the banner. The compose file builds from this checkout, so update the checkout (`git pull`), then `docker compose up -d --build` to run it.
 2. If your `.env` has `DEBUG=false`, remove that line and restart (`docker compose up -d`), then reproduce the problem.
 3. Collect the log. Go to the folder that holds your `docker-compose.yml` and run `docker logs fgc-remaster --tail 500 > fgc.log.txt`. **The file appears in that folder, next to `docker-compose.yml`**, and you drag it into the GitHub comment box. Pasting the terminal output of the command itself sends us nothing, the log is inside the file. Prefer pasting? Run `docker logs fgc-remaster --tail 100` and put the output between triple backticks. Your passwords, two-factor secrets and notification tokens show as `***`, e-mail addresses as `p***@gmail.com`, other account names (such as your first name on Amazon) by their first letter, and game codes by their first five characters, so either way it should be safe to share, but please have a final look at it before sending.
 4. **Keep that file, then try it clean.** Leftover state explains a surprising share of these:
    ```bash
    docker compose down -v     # stops the bot and throws away logins and claim history
-   docker compose pull        # takes the newest image
-   docker compose up -d       # starts fresh, sign in again through VNC
+   docker compose up -d --build  # rebuilds from this checkout and starts fresh, sign in again through VNC
    ```
    This is step two, never step one: `-v` deletes the volume, so every store asks you to sign in again and the bot re-checks titles it had already claimed. If the problem is gone, that was it. If it comes back, make a second log the same way as above and send **both**, the one from before and the one from after. Two logs of the same fault from two clean starts say far more than one.
 5. Look in the `data/` folder for what the bot saw:

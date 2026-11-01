@@ -3,10 +3,20 @@ services:
   # Free Games Claimer Remaster
   # ---------------------------------------------------------------
   app:
-    # To run the experimental development build, set FGC_TAG=dev in your .env file!
-    image: ghcr.io/p-adamiec/free-games-claimer-remaster:${FGC_TAG:-latest}
-    container_name: fgc-remaster
+    # Local build: the image is built from the Dockerfile in this folder, so
+    # the container runs the code in this checkout — including your own
+    # changes — instead of a published image built from someone else's code.
+    # FGC_TAG only names the local image now (default "local"); it no longer
+    # selects a published tag.
     build: .
+    image: fgc-remaster:${FGC_TAG:-local}
+    # Never pull: no published image exists under this local name, and pulling
+    # would defeat the point of testing this checkout.
+    pull_policy: never
+    # To run the published upstream image again instead, delete the build,
+    # image and pull_policy lines above and use:
+    #   image: ghcr.io/p-adamiec/free-games-claimer-remaster:${FGC_TAG:-latest}
+    container_name: fgc-remaster
     restart: unless-stopped
     tty: true
     stdin_open: true
@@ -15,7 +25,11 @@ services:
     volumes:
       - fgc_data:/fgc/data
     env_file:
-      - .env
+      # Not required: a fresh checkout has no .env yet, and the container
+      # should still start so you can sign in over VNC. Create one from
+      # .env.example when you want your settings and logins applied.
+      - path: .env
+        required: false
     healthcheck:
       test: pgrep python3 && curl --fail http://localhost:7080 || exit 1
       interval: 10s
