@@ -8,19 +8,24 @@ is a third-party key (TPK) that gains a `redeemed_key_val` only once revealed.
 from datetime import datetime, timezone
 
 from src.stores.humble import (
+    choose_identifiers,
     choose_outcome,
     detail_facts,
     extract_tpks,
     facts_from_cache,
     facts_to_cache,
     is_choice_order,
+    membership_slug,
+    month_lineup,
     order_created,
     owned_in_plan,
     pick_month,
     plan_reveals,
     reveal_outcome,
+    short_identifier,
     summary_facts,
     tpk_state,
+    unchosen_tpks,
 )
 
 
@@ -283,3 +288,107 @@ class TestFactsCache:
         kept = facts_from_cache({"old": {"choice": True, "created": "someday", "human_name": "Old"}})
         assert kept["old"]["choice"] is True
         assert kept["old"]["created"] is None
+
+
+class TestShortIdentifier:
+    """The choosing call takes the short form of a key entry's name."""
+
+    def test_the_shapes_humble_actually_uses(self):
+        assert short_identifier("zerohour_row_choice_steam") == "zerohour"
+        assert short_identifier("chantsofsennaar_choice_steam") == "chantsofsennaar"
+        assert short_identifier("mightmushroom_playtest_choice_steam") == "mightmushroom"
+        assert short_identifier("deeprockgalactic_survivor_choice_steam") == "deeprockgalactic_survivor"
+
+    def test_humbles_own_typo_still_reads(self):
+        assert short_identifier("road96_europe_hoice_steam") == "road96"
+
+    def test_names_that_are_not_choice_content_have_none(self):
+        assert short_identifier("ignplus_october_choicecoupon_2026") is None
+        assert short_identifier("plain_old_steam") is None
+        assert short_identifier("") is None
+
+
+class TestChooseIdentifiers:
+    def test_one_per_game_in_plan_order(self):
+        planned = [
+            {"machine_name": "rowgame_row_choice_steam"},
+            {"machine_name": "deeprockgalactic_survivor_choice_steam",
+             "identifier": "deeprockgalactic_survivor"},
+            {"machine_name": "rowgame_row_choice_steam"},
+            {"machine_name": "some_bundle_key"},
+        ]
+        assert choose_identifiers(planned) == ["rowgame", "deeprockgalactic_survivor"]
+
+
+class TestMembershipSlug:
+    def test_derived_from_the_product_name(self):
+        assert membership_slug(_order()) == "october-2026"
+
+    def test_the_products_own_url_wins(self):
+        order = _order()
+        order["product"]["choice_url"] = "/membership/march-2026"
+        assert membership_slug(order) == "march-2026"
+
+
+def _lineup_page():
+    """A membership page's embedded data, shaped like the real October 2026 one."""
+    import json as _json
+
+    blob = {
+        "productMachineName": "october_2026_choice",
+        "contentChoiceData": {
+            "display_order": ["rowgame", "deeprockgalactic_survivor", "ignplus_choicecoupon_2025"],
+            "game_data": {
+                "rowgame": {"title": "Row Game", "tpkds": [
+                    {"machine_name": "rowgame_row_choice_steam", "key_type": "steam",
+                     "visible": True, "is_expired": False,
+                     "expiration_date|datetime": "2027-05-04T17:00:00"}]},
+                "deeprockgalactic_survivor": {"title": "Deep Rock Galactic: Survivor", "tpkds": [
+                    {"machine_name": "deeprockgalactic_survivor_choice_steam", "key_type": "steam",
+                     "visible": True, "is_expired": False,
+                     "expiration_date|datetime": "2027-05-04T17:00:00"}]},
+                "ignplus_choicecoupon_2025": {"title": "Get One Month of IGN Plus", "tpkds": [
+                    {"machine_name": "ignplus_october_choicecoupon_2026", "key_type": "generic",
+                     "visible": True, "is_expired": False,
+                     "expiration_date|datetime": "2026-12-01T17:59:59"}]},
+            },
+        },
+    }
+    return '<script>var state = {"contentChoiceOptions": ' + _json.dumps(blob) + ', "other": 1};</script>'
+
+
+class TestMonthLineup:
+    """The month's games come from its membership page, not the order."""
+
+    def test_the_games_in_display_order_and_no_coupon(self):
+        lineup = month_lineup(_lineup_page(), "october_2026_choice")
+        assert [game["title"] for game in lineup] == ["Row Game", "Deep Rock Galactic: Survivor"]
+        assert lineup[1]["identifier"] == "deeprockgalactic_survivor"
+        assert lineup[1]["tpks"][0]["machine_name"] == "deeprockgalactic_survivor_choice_steam"
+        assert lineup[1]["tpks"][0]["key_type"] == "steam"
+
+    def test_another_months_page_is_not_believed(self):
+        assert month_lineup(_lineup_page(), "september_2026_choice") is None
+
+    def test_a_page_without_the_data_reads_as_no_lineup(self):
+        assert month_lineup("<html>nothing here</html>", "october_2026_choice") is None
+        assert month_lineup("", "october_2026_choice") is None
+        assert month_lineup(None, "october_2026_choice") is None
+
+
+class TestUnchosenTpks:
+    """A game never selected on the site has no key entry; this stands one in."""
+
+    def test_only_the_games_the_order_cannot_see(self):
+        lineup = month_lineup(_lineup_page(), "october_2026_choice")
+        order = _order(tpks=[_tpk(name="Row Game", machine="rowgame_row_choice_steam")])
+        missing = unchosen_tpks(order, lineup)
+        assert len(missing) == 1
+        (tpk,) = missing
+        assert tpk["title"] == "Deep Rock Galactic: Survivor"
+        assert tpk["machine_name"] == "deeprockgalactic_survivor_choice_steam"
+        assert tpk["key_type"] == "steam"
+        assert tpk["gamekey"] == "abc123"
+        assert tpk["identifier"] == "deeprockgalactic_survivor"
+        assert tpk["unchosen"] is True
+        assert tpk_state(tpk) == "waiting"
