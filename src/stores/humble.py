@@ -13,7 +13,10 @@ What a run does, in order:
   2. Read your orders and keep the Choice ones from the current plan, the
      single all-games plan sold since February 2022. Pick-limited months from
      before that switch are left alone: their unpicked games are a choice
-     only you can make, and the bot must not spend picks.
+     only you can make, and the bot must not spend picks. Of the current-plan
+     months, only the most recent one is worked on: unrevealed keys in older
+     months are a back catalogue to settle by hand, not a sweep for a
+     monthly run, so they are left exactly as they are.
   3. For every game whose key is still unrevealed and unexpired: ask Humble
      to choose the month's content (one call per month), then reveal each
      key with one call per game. Both calls run inside the page, because
@@ -173,6 +176,19 @@ def order_is_legacy(order: dict) -> bool:
     """
     created = order_created(order)
     return created is not None and created < LEGACY_CUTOFF
+
+
+def latest_order(orders: list) -> dict | None:
+    """The most recent of these orders, by the stamp Humble put on it.
+
+    Only this month is worked on in a run. An order whose date cannot be
+    read counts as the oldest, so a stamp Humble changes one day cannot
+    quietly promote a random month over the newest one.
+    """
+    if not orders:
+        return None
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    return max(orders, key=lambda order: order_created(order) or epoch)
 
 
 def extract_tpks(order: dict) -> list[dict]:
@@ -585,6 +601,12 @@ class HumbleClaimer(BaseClaimer):
             if not orders:
                 logger.info("No Humble Choice month is waiting to be claimed.")
                 return
+            latest = latest_order(orders)
+            if len(orders) > 1:
+                name = (latest.get("product") or {}).get("human_name") or "the newest month"
+                logger.info("Only the most recent Choice month is checked: '%s'. "
+                            "%d older month(s) left alone.", name, len(orders) - 1)
+            orders = [latest]
             steam_owned = await self._steam_owned_titles(orders)
             for order in orders:
                 await self._claim_month(order, steam_owned)

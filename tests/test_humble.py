@@ -9,6 +9,7 @@ from src.stores.humble import (
     choose_outcome,
     extract_tpks,
     is_choice_order,
+    latest_order,
     order_created,
     order_is_legacy,
     owned_in_plan,
@@ -174,3 +175,25 @@ class TestOwnedInPlan:
     def test_nothing_owned_holds_nothing_back(self):
         assert owned_in_plan(self._planned(), set()) == []
         assert owned_in_plan(self._planned(), None) == []
+
+
+class TestLatestOrder:
+    """Only the most recent month is worked on; this says which one that is."""
+
+    def test_the_newest_stamp_wins(self):
+        orders = [_order(created="2026-09-01T17:00:00", machine="september_2026_choice"),
+                  _order(created="2026-10-06T17:00:00"),
+                  _order(created="2026-08-04T17:00:00", machine="august_2026_choice")]
+        assert latest_order(orders)["product"]["machine_name"] == "october_2026_choice"
+
+    def test_one_order_is_itself(self):
+        orders = [_order()]
+        assert latest_order(orders) is orders[0]
+
+    def test_no_orders_is_none(self):
+        assert latest_order([]) is None
+
+    def test_an_unreadable_stamp_counts_as_oldest(self):
+        orders = [_order(created="not a date", machine="mystery_choice"),
+                  _order(created="2023-01-03T17:00:00", machine="january_2023_choice")]
+        assert latest_order(orders)["product"]["machine_name"] == "january_2023_choice"
