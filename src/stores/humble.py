@@ -10,13 +10,16 @@ What a run does, in order:
   1. Sign in (HB_EMAIL / HB_PASSWORD, an authenticator code if asked, else you
      over VNC). Humble's own JSON API, asked from inside the signed-in page,
      says whether the session is alive.
-  2. Read your orders and keep the Choice ones from the current plan, the
-     single all-games plan sold since February 2022. Pick-limited months from
-     before that switch are left alone: their unpicked games are a choice
-     only you can make, and the bot must not spend picks. Of the current-plan
-     months, only the most recent one is worked on: unrevealed keys in older
-     months are a back catalogue to settle by hand, not a sweep for a
-     monthly run, so they are left exactly as they are.
+  2. Read your order list and pick the one month to work on from the list
+     alone: the list already says what each order is and when it was made,
+     so no order is opened in full just to be classified, and only the
+     picked month's full order is fetched. The pick is the most recent
+     Choice month from the current plan, the single all-games plan sold
+     since February 2022. Pick-limited months from before that switch are
+     left alone: their unpicked games are a choice only you can make, and
+     the bot must not spend picks. Older current-plan months are left
+     alone too: unrevealed keys in them are a back catalogue to settle by
+     hand, not a sweep for a monthly run, so they stay exactly as they are.
   3. For every game whose key is still unrevealed and unexpired: ask Humble
      to choose the month's content (one call per month), then reveal each
      key with one call per game. Both calls run inside the page, because
@@ -167,28 +170,63 @@ def is_choice_order(order: dict) -> bool:
     return "choice" in name
 
 
-def order_is_legacy(order: dict) -> bool:
-    """True for a month bought before the single-plan switch on 2022-02-01.
+def summary_facts(entry: dict) -> dict:
+    """What the order list alone says about one order, without opening it.
 
-    An order whose date cannot be read counts as current, not legacy: its
-    games are visible in the order either way, and a stamp Humble changes
-    one day must not quietly retire every month there is.
+    The list carries each order's product and date, which is all the picking
+    needs. "choice" comes back None when the entry says nothing about its
+    product; the caller opens just those orders in full rather than guessing.
     """
-    created = order_created(order)
-    return created is not None and created < LEGACY_CUTOFF
+    entry = entry or {}
+    product = entry.get("product") or {}
+    category = str(product.get("category") or "").strip().lower()
+    name = f"{product.get('machine_name') or ''} {product.get('human_name') or ''}".lower()
+    choice: bool | None = None
+    if category or name.strip():
+        choice = category == "subscription" or "choice" in name
+    return {
+        "gamekey": str(entry.get("gamekey") or ""),
+        "choice": choice,
+        "created": order_created(entry),
+        "human_name": str(product.get("human_name") or ""),
+    }
 
 
-def latest_order(orders: list) -> dict | None:
-    """The most recent of these orders, by the stamp Humble put on it.
+def detail_facts(order: dict, gamekey: str) -> dict:
+    """summary_facts for an order opened in full, under the gamekey asked for."""
+    product = (order or {}).get("product") or {}
+    return {
+        "gamekey": gamekey,
+        "choice": is_choice_order(order),
+        "created": order_created(order),
+        "human_name": str(product.get("human_name") or ""),
+    }
 
-    Only this month is worked on in a run. An order whose date cannot be
-    read counts as the oldest, so a stamp Humble changes one day cannot
-    quietly promote a random month over the newest one.
+
+def pick_month(facts: list) -> tuple[dict | None, list, int]:
+    """Split classified orders into (the month to work on, legacy months, older count).
+
+    The month to work on is the most recent current-plan Choice month, the
+    legacy months are the pick-limited ones from before February 2022, and
+    the count is how many other current-plan months are left alone. A date
+    that cannot be read counts as current-plan, not legacy: its games are
+    visible either way, and a stamp Humble changes one day must not quietly
+    retire every month there is. It still ranks oldest when the newest
+    month is picked, so the same changed stamp cannot promote it either.
     """
-    if not orders:
-        return None
+    legacy, current = [], []
+    for fact in facts or []:
+        if not fact.get("choice"):
+            continue
+        created = fact.get("created")
+        if created is not None and created < LEGACY_CUTOFF:
+            legacy.append(fact)
+        else:
+            current.append(fact)
     epoch = datetime.min.replace(tzinfo=timezone.utc)
-    return max(orders, key=lambda order: order_created(order) or epoch)
+    latest = max(current, key=lambda fact: fact.get("created") or epoch) if current else None
+    older = len(current) - 1 if latest is not None else 0
+    return latest, legacy, older
 
 
 def extract_tpks(order: dict) -> list[dict]:
@@ -405,33 +443,60 @@ class HumbleClaimer(BaseClaimer):
     # Choice months
     # ------------------------------------------------------------------
 
-    async def _choice_orders(self) -> list[dict]:
-        """Your Choice orders from the current plan, newest data Humble hands over."""
+    async def _open_order(self, gamekey: str) -> dict | None:
+        """One order in full, keys included; None when Humble will not hand it over."""
+        status, order = await self._fetch(API_ORDER.format(gamekey=gamekey))
+        if status != 200 or not isinstance(order, dict):
+            logger.debug("Order %s answered %s, skipped.", gamekey, status)
+            return None
+        return order
+
+    async def _latest_choice_order(self) -> dict | None:
+        """The one Choice month this run works on, opened in full, or None.
+
+        The month is picked from the order list alone (summary_facts), so a
+        run opens exactly one order in full instead of walking every order
+        there is. An entry the list cannot classify, or whose date it does
+        not carry, is opened on its own: a thinner list answer then changes
+        the run's speed, never its pick.
+        """
         status, payload = await self._fetch(API_ORDERS)
         if status != 200 or not isinstance(payload, list):
             logger.warning("Humble's order list answered %s, so no month can be read this run.", status)
-            return []
-        orders = []
+            return None
+        facts, opened = [], {}
         for entry in payload:
-            gamekey = str((entry or {}).get("gamekey") or "")
-            if not gamekey:
+            fact = summary_facts(entry)
+            if not fact["gamekey"]:
                 continue
-            ostatus, order = await self._fetch(API_ORDER.format(gamekey=gamekey))
-            if ostatus != 200 or not isinstance(order, dict):
-                logger.debug("Order %s answered %s, skipped.", gamekey, ostatus)
-                continue
-            if not is_choice_order(order):
-                continue
-            if order_is_legacy(order):
-                product = (order.get("product") or {}).get("human_name") or "Humble Choice (legacy month)"
-                logger.info("'%s' is a pick-limited month from before February 2022, left alone: "
-                            "its unpicked games are yours to choose.", product)
-                self.notify_games.append({"title": str(product), "url": URL_MEMBERSHIP,
-                                          "status": "skipped:legacy-month"})
-                continue
-            orders.append(order)
-        logger.debug("Humble: %d current-plan Choice month(s) to look through.", len(orders))
-        return orders
+            if fact["choice"] is None or fact["created"] is None:
+                order = await self._open_order(fact["gamekey"])
+                if order is None:
+                    continue
+                opened[fact["gamekey"]] = order
+                fact = detail_facts(order, fact["gamekey"])
+            facts.append(fact)
+        latest, legacy, older = pick_month(facts)
+        for fact in legacy:
+            product = fact["human_name"] or "Humble Choice (legacy month)"
+            self.notify_games.append({"title": product, "url": URL_MEMBERSHIP,
+                                      "status": "skipped:legacy-month"})
+        if legacy:
+            logger.info("%d pick-limited month(s) from before February 2022 left alone: "
+                        "their unpicked games are yours to choose.", len(legacy))
+        if latest is None:
+            return None
+        if older:
+            logger.info("Only the most recent Choice month is checked: '%s'. "
+                        "%d older month(s) left alone.",
+                        latest["human_name"] or "the newest month", older)
+        order = opened.get(latest["gamekey"])
+        if order is None:
+            order = await self._open_order(latest["gamekey"])
+        if order is None:
+            logger.warning("The most recent Choice month could not be opened, so nothing "
+                           "is claimed this run.")
+        return order
 
     async def _remember(self, tpk: dict, db_status: str, key: str | None = None,
                         platform: str = "", overwrite: bool = True) -> None:
@@ -597,19 +662,12 @@ class HumbleClaimer(BaseClaimer):
                 needs_you(self.store_name, 0, "game")
                 return
 
-            orders = await self._choice_orders()
-            if not orders:
+            order = await self._latest_choice_order()
+            if order is None:
                 logger.info("No Humble Choice month is waiting to be claimed.")
                 return
-            latest = latest_order(orders)
-            if len(orders) > 1:
-                name = (latest.get("product") or {}).get("human_name") or "the newest month"
-                logger.info("Only the most recent Choice month is checked: '%s'. "
-                            "%d older month(s) left alone.", name, len(orders) - 1)
-            orders = [latest]
-            steam_owned = await self._steam_owned_titles(orders)
-            for order in orders:
-                await self._claim_month(order, steam_owned)
+            steam_owned = await self._steam_owned_titles([order])
+            await self._claim_month(order, steam_owned)
 
         except Exception as exc:
             logger.exception("Fatal error")

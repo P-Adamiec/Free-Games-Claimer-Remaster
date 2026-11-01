@@ -307,7 +307,7 @@ Humble is opt-in (`STORES=...,humble`), because claiming a Choice game is not li
 What it does on a run:
 
 - Signs in with `HB_EMAIL` / `HB_PASSWORD` (an authenticator code from `HB_OTP_KEY` if your account asks for one; the code Humble e-mails you, its Guard check, is typed by you over VNC).
-- Reads your orders through Humble's own API, from inside the signed-in page, and keeps your most recent Choice month. **It never unlocks a month early**: early unlock is a payment, and a subscriber's month appears as an order on its own when the automatic billing runs on the last Tuesday of the month.
+- Reads your order list through Humble's own API, from inside the signed-in page, and picks your most recent Choice month from the list alone — the full order is fetched for that one month only, so a run no longer opens every order you have ever had. **It never unlocks a month early**: early unlock is a payment, and a subscriber's month appears as an order on its own when the automatic billing runs on the last Tuesday of the month.
 - Reveals every key that is still unrevealed and unexpired, and saves it in the database, tagged with the store it belongs to. Add `steam` to the same `STORES` and a revealed Steam key is activated on your Steam account at the end of the run, like a Fanatical key; add `gog` and a GOG key is redeemed the same way. Any other key waits in the database and on your [Humble keys page](https://www.humblebundle.com/home/keys), where a revealed key sits anyway.
 - Before revealing a **Steam** key, it checks your Steam library first (`HB_CHECK_STEAM`, on by default), using your Steam sign-in on Steam's own browser profile: a game you already own on Steam keeps its key **unrevealed**, so the key stays giftable and the month refundable. If your library cannot be read at all that run, no Steam key is revealed either; the keys wait for a run that can check. Switch the check off with `HB_CHECK_STEAM=false`.
 - A game offered as a Steam key or an Epic grant is claimed as the **Steam key**: a key can still be activated or gifted later, a keyless grant cannot be taken back.
@@ -315,7 +315,7 @@ What it does on a run:
 What it leaves alone, on purpose:
 
 - **Older Choice months.** Only the most recent month is checked and claimed from. Unrevealed keys in older months stay exactly as they are — a back catalogue to settle by hand, not something a monthly run sweeps up.
-- **Months from before February 2022.** Choice was pick-limited then, so an old month's unpicked games are a choice only you can make. The bot names the month in the log and moves on.
+- **Months from before February 2022.** Choice was pick-limited then, so an old month's unpicked games are a choice only you can make. The bot counts them in one log line (each is still named in the run summary) and moves on.
 - **Keys already revealed**, by you or by an earlier run, and **keys whose publisher expiry has passed**, which it reports once as expired.
 - Everything that is not a Choice month: store purchases and ordinary bundles are already yours without a reveal step this bot needs to make.
 
