@@ -14,7 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWED = re.compile(r"^(claimed|existed|notified|available \(dry run\)|(failed|skipped)(:[a-z-]+)?)$")
 # Store module and the name its VNC prompts start with.
-STORES = {"ubisoft": "Ubisoft", "unity": "Unity", "epic_fab": "Fab", "microsoft": "Microsoft"}
+STORES = {"ubisoft": "Ubisoft", "unity": "Unity", "epic_fab": "Fab", "microsoft": "Microsoft",
+          "humble": "Humble Bundle"}
 
 
 def _strings(expr) -> set:

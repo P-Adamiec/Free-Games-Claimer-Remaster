@@ -1,0 +1,528 @@
+"""Humble Bundle: claims the games of a Humble Choice subscription.
+
+"Claiming" a Choice game means revealing its key. The month itself is never
+unlocked by the bot: early unlock is a payment, and a subscriber's month is
+created by the automatic billing on the last Tuesday, so by the time a run
+looks, a paid month either exists as an order or it does not.
+
+What a run does, in order:
+
+  1. Sign in (HB_EMAIL / HB_PASSWORD, an authenticator code if asked, else you
+     over VNC). Humble's own JSON API, asked from inside the signed-in page,
+     says whether the session is alive.
+  2. Read your orders and keep the Choice ones from the current plan, the
+     single all-games plan sold since February 2022. Pick-limited months from
+     before that switch are left alone: their unpicked games are a choice
+     only you can make, and the bot must not spend picks.
+  3. For every game whose key is still unrevealed and unexpired: ask Humble
+     to choose the month's content (one call per month), then reveal each
+     key with one call per game. Both calls run inside the page, because
+     Humble's anti-bot check turns away plain HTTP clients on those two
+     endpoints while reads pass.
+  4. Save each revealed key in the database, tagged with the store it
+     belongs to. A Steam key is then activated by the Steam module in the
+     same run when `steam` is in STORES too, and a GOG key is redeemed by
+     the GOG module when `gog` is, exactly like the keys Prime Gaming and
+     Fanatical hand out. Any other key waits in the database and on your
+     Humble keys page, where a revealed key sits anyway.
+
+Revealing is one-way: a revealed key can no longer be gifted from Humble,
+and a month with a revealed key in it is no longer refundable. That is why
+this store is opt-in (name `humble` in STORES) and why a key that has
+already been revealed, by you or by an earlier run, is never touched again.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+
+from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, account_key
+from src.core.config import cfg
+from src.core.database import async_session, get_or_create
+from src.core.redact import mask_code
+from src.core.run_state import needs_you
+
+logger = logging.getLogger("fgc.humble")
+
+SITE_HOST = "www.humblebundle.com"
+URL_LOGIN = "https://www.humblebundle.com/login"
+URL_KEYS = "https://www.humblebundle.com/home/keys"
+URL_MEMBERSHIP = "https://www.humblebundle.com/membership/home"
+API_ORDERS = "/api/v1/user/order"
+API_ORDER = "/api/v1/order/{gamekey}?all_tpkds=true"
+API_CHOOSE = "/humbler/choosecontent"
+API_REDEEM = "/humbler/redeemkey"
+
+# Choice became a single plan with every game included on 2022-02-01. Months
+# bought before that are pick-limited, so their orders are never claimed from.
+LEGACY_CUTOFF = datetime(2022, 2, 1, tzinfo=timezone.utc)
+
+# One fetch, run inside the signed-in page: the session cookie and the CSRF
+# token only exist there, and /humbler/* turns plain HTTP clients away.
+FETCH_JS = """
+    (async () => {
+        const method = %s, url = %s, form = %s;
+        const init = {method, credentials: 'include', headers: {'Accept': 'application/json'}};
+        if (form) {
+            const token = (document.cookie.match(/(?:^|; )csrf_cookie=([^;]*)/) || [])[1] || '';
+            const body = new URLSearchParams();
+            for (const [name, value] of form) body.append(name, value);
+            init.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+            init.headers['csrf-prevention-token'] = decodeURIComponent(token);
+            init.body = body;
+        }
+        try {
+            const r = await fetch(url, init);
+            return JSON.stringify({status: r.status, body: await r.text()});
+        } catch (e) {
+            return JSON.stringify({status: 0, body: '', error: String(e).slice(0, 120)});
+        }
+    })()
+"""
+
+# The sign-in form is drawn by script, so its fields are found by what they
+# are, not by one build's ids: the e-mail box, the password box, the button.
+LOGIN_FORM_JS = """
+    JSON.stringify({
+        href: location.href,
+        email: !!document.querySelector('input[type="email"], input[name="username"], input#username'),
+        password: !!document.querySelector('input[type="password"]'),
+        code: !!document.querySelector('input[name*="code" i], input[autocomplete="one-time-code"]'),
+        text: document.body ? document.body.innerText.slice(0, 400) : '',
+    })
+"""
+
+FILL_LOGIN_JS = """
+    (() => {
+        const set = (el, value) => {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(el, value);
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+        };
+        const email = document.querySelector('input[type="email"], input[name="username"], input#username');
+        const password = document.querySelector('input[type="password"]');
+        if (!email || !password) return false;
+        set(email, %s);
+        set(password, %s);
+        const box = document.querySelector('input[name="remember"]');
+        if (box && !box.checked) box.click();
+        const button = document.querySelector('button[type="submit"], input[type="submit"]')
+            || [...document.querySelectorAll('button')].find(b => /log\\s?in|sign\\s?in/i.test(b.textContent || ''));
+        if (!button) return false;
+        button.click();
+        return true;
+    })()
+"""
+
+FILL_CODE_JS = """
+    (() => {
+        const field = document.querySelector('input[name*="code" i], input[autocomplete="one-time-code"]');
+        if (!field) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(field, %s);
+        field.dispatchEvent(new Event('input', {bubbles: true}));
+        field.dispatchEvent(new Event('change', {bubbles: true}));
+        const button = document.querySelector('button[type="submit"], input[type="submit"]')
+            || [...document.querySelectorAll('button')].find(b => /verify|continue|submit/i.test(b.textContent || ''));
+        if (button) button.click();
+        return true;
+    })()
+"""
+
+
+def order_created(order: dict) -> datetime | None:
+    """When an order was bought, None when Humble's stamp cannot be read."""
+    raw = str((order or {}).get("created") or "").strip()
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def is_choice_order(order: dict) -> bool:
+    """True for a Humble Choice month: a subscription product, or one named Choice."""
+    product = (order or {}).get("product") or {}
+    if str(product.get("category") or "").strip().lower() == "subscription":
+        return True
+    name = f"{product.get('machine_name') or ''} {product.get('human_name') or ''}".lower()
+    return "choice" in name
+
+
+def order_is_legacy(order: dict) -> bool:
+    """True for a month bought before the single-plan switch on 2022-02-01.
+
+    An order whose date cannot be read counts as current, not legacy: its
+    games are visible in the order either way, and a stamp Humble changes
+    one day must not quietly retire every month there is.
+    """
+    created = order_created(order)
+    return created is not None and created < LEGACY_CUTOFF
+
+
+def extract_tpks(order: dict) -> list[dict]:
+    """An order's third-party keys (TPKs), one dict per key a game can hand out."""
+    order = order or {}
+    gamekey = str(order.get("gamekey") or "")
+    found = []
+    for tpk in ((order.get("tpkd_dict") or {}).get("all_tpks")) or []:
+        try:
+            key_index = int(tpk.get("key_index") or 0)
+        except (TypeError, ValueError):
+            key_index = 0
+        found.append({
+            "gamekey": gamekey,
+            "title": str(tpk.get("human_name") or "(untitled)"),
+            "machine_name": str(tpk.get("machine_name") or ""),
+            "key_type": str(tpk.get("key_type") or "").strip().lower(),
+            "key_index": key_index,
+            "revealed_key": tpk.get("redeemed_key_val") or None,
+            "expired": bool(tpk.get("is_expired")),
+            "expiry_date": str(tpk.get("expiry_date") or ""),
+        })
+    return found
+
+
+def tpk_state(tpk: dict) -> str:
+    """Where one key stands before a run touches it: revealed, expired or waiting."""
+    if (tpk or {}).get("revealed_key"):
+        return "revealed"
+    if (tpk or {}).get("expired"):
+        return "expired"
+    return "waiting"
+
+
+def plan_reveals(tpks: list) -> list[dict]:
+    """The waiting keys to reveal: unrevealed, unexpired, one per game and platform.
+
+    A game offered as a Steam key or an Epic grant (a platform-choice title)
+    keeps its Steam variant and drops the Epic one: a key can be activated,
+    gifted or traded later, a keyless grant cannot be taken back. The same
+    variant listed twice is revealed once.
+    """
+    steam_games = {(t["gamekey"], BaseClaimer._normalize_title(t["title"]))
+                   for t in tpks or [] if "_choice_steam" in (t.get("machine_name") or "")}
+    planned, seen = [], set()
+    for tpk in tpks or []:
+        if tpk_state(tpk) != "waiting":
+            continue
+        game = (tpk["gamekey"], BaseClaimer._normalize_title(tpk["title"]))
+        machine = tpk.get("machine_name") or ""
+        if "_choice_epic" in machine and game in steam_games:
+            continue
+        variant = game + (tpk.get("key_type") or "",)
+        if ("_choice_steam" in machine or "_choice_epic" in machine) and variant in seen:
+            continue
+        seen.add(variant)
+        planned.append(tpk)
+    return planned
+
+
+def reveal_outcome(http_status: int, payload) -> str:
+    """What a redeemkey answer means: revealed, already, blocked or failed.
+
+    "Blocked" is a 401/403: the session died or the anti-bot check answered,
+    and no other key in this run would fare better, so the run stops there.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    if payload.get("success") is True:
+        return "revealed"
+    if http_status in (401, 403):
+        return "blocked"
+    said = json.dumps(payload).lower()
+    if "already" in said:
+        return "already"
+    return "failed"
+
+
+def choose_outcome(http_status: int, payload) -> bool:
+    """True when the month's content counts as chosen: Humble said so, or it already was."""
+    payload = payload if isinstance(payload, dict) else {}
+    if payload.get("success") is True:
+        return True
+    said = json.dumps(payload).lower()
+    return "already" in said or "chosen" in said
+
+
+class HumbleClaimer(BaseClaimer):
+    store_name = "humble"
+
+    # ------------------------------------------------------------------
+    # Humble's API, asked from inside the page
+    # ------------------------------------------------------------------
+
+    async def _fetch(self, url: str, form: list | None = None) -> tuple[int, object]:
+        """One request to humblebundle.com from the open page; (HTTP status, JSON or None)."""
+        js = FETCH_JS % (
+            json.dumps("POST" if form else "GET"),
+            json.dumps(url),
+            json.dumps(form) if form else "null",
+        )
+        try:
+            raw = await self.page.evaluate(js, await_promise=True)
+            answer = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as e:
+            logger.debug("Humble request to %s failed: %s", url, e)
+            return 0, None
+        try:
+            payload = json.loads(answer.get("body") or "")
+        except (TypeError, ValueError):
+            payload = None
+        if answer.get("error"):
+            logger.debug("Humble request to %s failed in the page: %s", url, answer["error"])
+        return int(answer.get("status") or 0), payload
+
+    async def _signed_in(self) -> bool:
+        """Ask the order list: it answers 200 signed in and 401 signed out."""
+        status, payload = await self._fetch(API_ORDERS)
+        if status == 200 and isinstance(payload, list):
+            return True
+        logger.debug("Order list answered %s, not a signed-in session.", status)
+        return False
+
+    # ------------------------------------------------------------------
+    # Login
+    # ------------------------------------------------------------------
+
+    async def _login_form(self) -> dict:
+        try:
+            raw = await self.page.evaluate(LOGIN_FORM_JS)
+            return json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as e:
+            logger.debug("Could not read the sign-in page: %s", e)
+            return {}
+
+    async def _fill_code(self) -> bool:
+        """One authenticator code from HB_OTP_KEY into the code box, when there is one."""
+        if not cfg.hb_otp_key:
+            return False
+        self._last_totp = await self._fresh_totp(cfg.hb_otp_key, self._last_totp)
+        try:
+            filled = await self.page.evaluate(FILL_CODE_JS % json.dumps(self._last_totp))
+        except Exception as e:
+            logger.debug("Could not type the authenticator code: %s", e)
+            return False
+        if filled:
+            await self.sleep(5)
+        return bool(filled)
+
+    async def _ensure_logged_in(self) -> bool:
+        """Signed in to Humble: by itself with HB_EMAIL / HB_PASSWORD, else you over VNC."""
+        await self.page.get(URL_KEYS)
+        await self.sleep(4)
+        if await self._human_challenge_present():
+            if not await self._wait_out_challenge("Humble Bundle", store_key=self.store_name):
+                return False
+        if await self._signed_in():
+            self.log_signed_in(account_key(cfg.hb_email, None))
+            return True
+
+        if cfg.hb_email and cfg.hb_password:
+            logger.info("Signing in to Humble Bundle as %s…", account_key(cfg.hb_email, None))
+            await self.page.get(URL_LOGIN)
+            await self.sleep(4)
+            try:
+                sent = await self.page.evaluate(
+                    FILL_LOGIN_JS % (json.dumps(cfg.hb_email), json.dumps(cfg.hb_password)))
+            except Exception as e:
+                logger.debug("Could not fill the sign-in form: %s", e)
+                sent = False
+            if sent:
+                await self.sleep(5)
+                codes = 0
+                for _ in range(10):
+                    if await self._signed_in():
+                        self.log_signed_in(account_key(cfg.hb_email, None))
+                        return True
+                    form = await self._login_form()
+                    # A code box means the password went through and a second step is left.
+                    if form.get("code"):
+                        if codes < OTP_KEY_ATTEMPTS and await self._fill_code():
+                            codes += 1
+                            continue
+                        break
+                    if not form.get("password"):
+                        break
+                    await self.sleep(3)
+            else:
+                logger.debug("The sign-in form was not on %s", await self._page_brief())
+
+        msg = self._vnc_notice(
+            "Humble Bundle: login needs you",
+            "The automated sign-in did not finish. Open the browser and sign in to Humble Bundle; "
+            "a code Humble e-mails you (its Guard check) is typed there too.",
+        )
+        if await self._wait_for_vnc_login(self._signed_in, custom_msg=msg, store_key=self.store_name):
+            self.log_signed_in(account_key(cfg.hb_email, None))
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Choice months
+    # ------------------------------------------------------------------
+
+    async def _choice_orders(self) -> list[dict]:
+        """Your Choice orders from the current plan, newest data Humble hands over."""
+        status, payload = await self._fetch(API_ORDERS)
+        if status != 200 or not isinstance(payload, list):
+            logger.warning("Humble's order list answered %s, so no month can be read this run.", status)
+            return []
+        orders = []
+        for entry in payload:
+            gamekey = str((entry or {}).get("gamekey") or "")
+            if not gamekey:
+                continue
+            ostatus, order = await self._fetch(API_ORDER.format(gamekey=gamekey))
+            if ostatus != 200 or not isinstance(order, dict):
+                logger.debug("Order %s answered %s, skipped.", gamekey, ostatus)
+                continue
+            if not is_choice_order(order):
+                continue
+            if order_is_legacy(order):
+                product = (order.get("product") or {}).get("human_name") or "Humble Choice (legacy month)"
+                logger.info("'%s' is a pick-limited month from before February 2022, left alone: "
+                            "its unpicked games are yours to choose.", product)
+                self.notify_games.append({"title": str(product), "url": URL_MEMBERSHIP,
+                                          "status": "skipped:legacy-month"})
+                continue
+            orders.append(order)
+        logger.debug("Humble: %d current-plan Choice month(s) to look through.", len(orders))
+        return orders
+
+    async def _remember(self, tpk: dict, db_status: str, key: str | None = None,
+                        platform: str = "", overwrite: bool = True) -> None:
+        """Save one key's standing in the database, under the account that claimed it."""
+        async with async_session() as session:
+            obj, created = await get_or_create(
+                session, store="humble", user=self.user or "unknown",
+                game_id=f"{tpk['gamekey']}/{tpk['machine_name']}/{tpk['key_index']}",
+                title=tpk["title"], url=URL_KEYS, status=db_status,
+            )
+            if created or overwrite:
+                obj.status = db_status
+            if key:
+                obj.code = key
+                obj.extra = json.dumps({"external_store": platform or tpk["key_type"]})
+            await session.commit()
+
+    async def _choose_month(self, order: dict, planned: list) -> bool:
+        """Choose a month's games in one call, the identifiers being the keys' own names.
+
+        For a current-plan month the content is normally chosen already (the
+        keys are in the order), and Humble saying so counts as chosen too:
+        revealing the keys is the step that decides, this one only opens it.
+        """
+        form = [["gamekey", str(order.get("gamekey") or "")], ["parent_identifier", "initial"]]
+        form += [["chosen_identifiers[]", tpk["machine_name"]] for tpk in planned]
+        status, payload = await self._fetch(API_CHOOSE, form)
+        chosen = choose_outcome(status, payload)
+        logger.debug("Choosing the month answered %s (%s).", status, "chosen" if chosen else "not chosen")
+        return chosen
+
+    async def _reveal(self, tpk: dict) -> str:
+        """Reveal one key and save it. Returns the run's standing: claimed, blocked or failed."""
+        form = [["keytype", tpk["machine_name"]], ["key", tpk["gamekey"]],
+                ["keyindex", str(tpk["key_index"])]]
+        status, payload = await self._fetch(API_REDEEM, form)
+        outcome = reveal_outcome(status, payload if isinstance(payload, dict) else {})
+        if outcome == "blocked":
+            logger.warning("Humble turned the reveal of '%s' away (HTTP %s): the session or its "
+                           "anti-bot check, so the rest of this run waits.", tpk["title"], status)
+            return "blocked"
+        if outcome == "already":
+            # Revealed between reading the order and asking, by you or another run.
+            logger.info("'%s' was already revealed.", tpk["title"])
+            await self._remember(tpk, "existed", overwrite=False)
+            self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "existed"})
+            return "claimed"
+        if outcome != "revealed":
+            logger.warning("Humble did not reveal the key for '%s' (HTTP %s).", tpk["title"], status)
+            await self._remember(tpk, "failed")
+            self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "failed:reveal-failed"})
+            return "failed"
+
+        key = str((payload or {}).get("key") or "")
+        platform = tpk["key_type"] or "humble"
+        if key:
+            logger.info("✓ Revealed '%s' (%s key %s).", tpk["title"], platform, mask_code(key))
+        else:
+            # A keyless grant (an Epic variant linked to your account) has no key to hand over.
+            logger.info("✓ Claimed '%s' (%s, no key: it goes to the linked account).", tpk["title"], platform)
+        await self._remember(tpk, "claimed", key=key or None, platform=platform)
+        self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "claimed"})
+        return "claimed"
+
+    async def _claim_month(self, order: dict) -> None:
+        """Settle one Choice month: record what is settled, reveal what is waiting."""
+        tpks = extract_tpks(order)
+        for tpk in tpks:
+            state = tpk_state(tpk)
+            if state == "revealed":
+                # Yours already, and a row the bot made for it keeps its key and queue place.
+                await self._remember(tpk, "existed", overwrite=False)
+                self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "existed"})
+            elif state == "expired":
+                logger.info("The key for '%s' expired on %s, before it was ever revealed.",
+                            tpk["title"], tpk["expiry_date"] or "its publisher's date")
+                await self._remember(tpk, "skipped:expired")
+                self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "skipped:expired"})
+
+        planned = plan_reveals(tpks)
+        if not planned:
+            logger.debug("Nothing waiting to be revealed in this month.")
+            return
+        logger.info("🎮 %d Humble Choice game(s) to reveal.", len(planned))
+
+        if cfg.dryrun:
+            for tpk in planned:
+                logger.info("DRYRUN – skipped revealing '%s'.", tpk["title"])
+                self.notify_games.append({"title": tpk["title"], "url": URL_KEYS, "status": "available (dry run)"})
+            return
+
+        await self._choose_month(order, planned)
+        for index, tpk in enumerate(planned):
+            if await self._reveal(tpk) == "blocked":
+                left = len(planned) - index - 1
+                if left:
+                    logger.warning("%d more key(s) wait for the next run.", left)
+                break
+
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """Main entry point for the Humble Bundle claiming flow."""
+        logger.debug("Starting Humble Bundle claiming flow")
+        try:
+            await self.start_browser()
+            if not await self._ensure_logged_in():
+                logger.error("Aborting Humble Bundle claim flow due to login failure.")
+                needs_you(self.store_name, 0, "game")
+                return
+
+            orders = await self._choice_orders()
+            if not orders:
+                logger.info("No Humble Choice month is waiting to be claimed.")
+                return
+            for order in orders:
+                await self._claim_month(order)
+
+        except Exception as exc:
+            logger.exception("Fatal error")
+            if cfg.notify_errors:
+                await self.notify(f"humble failed: {exc}")
+        finally:
+            await self.close_browser()
+
+
+async def claim_humble() -> dict:
+    """Convenience entry point."""
+    claimer = HumbleClaimer()
+    await claimer.run()
+    return {"store": "Humble Bundle", "user": claimer.user, "games": claimer.notify_games}

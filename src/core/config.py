@@ -60,7 +60,7 @@ def _int(key: str, default: int = 0) -> int:
 
 
 # Aliases so NOTIFY_SKIP_STORES accepts the same names as the CLI/STORES.
-_STORE_ALIASES = {"ae": "aliexpress", "amazon": "prime", "gp": "gamerpower"}
+_STORE_ALIASES = {"ae": "aliexpress", "amazon": "prime", "gp": "gamerpower", "hb": "humble"}
 
 
 def _skip_stores(key: str) -> set:
@@ -320,6 +320,11 @@ class Config:
     gog_force_redeem: bool = _bool("GOG_FORCE_REDEEM")
     gog_otp_key: str | None = otp_key(_secret("GOG_OTP_KEY"))
     gog_otp_codes: list[str] = [c.strip() for c in os.getenv("GOG_OTP_CODES", "").split(",") if c.strip()]
+
+    # --- Humble Bundle ---
+    hb_email: str | None = os.getenv("HB_EMAIL") or os.getenv("EMAIL")
+    hb_password: str | None = os.getenv("HB_PASSWORD") or os.getenv("PASSWORD")
+    hb_otp_key: str | None = otp_key(_secret("HB_OTP_KEY"))
 
     # --- Microsoft Store / Xbox ---
     ms_email: str | None = os.getenv("MS_EMAIL") or os.getenv("EMAIL")

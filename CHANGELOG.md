@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project does not follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): every release raises the number after the dot (1.10, 1.11), and a development build carries the same number with a `d` suffix (`v1.11d`). The version being worked on stays at the top without a date until it is released.
 
+## [1.19]
+
+### Added
+- **Humble Bundle: Humble Choice claiming (opt-in, `STORES=...,humble`)**: the new `src/stores/humble.py` signs in with `HB_EMAIL` / `HB_PASSWORD` (`HB_OTP_KEY` for an authenticator code, the e-mailed Guard code over VNC) and reveals the keys of your Choice months through Humble's own API, asked from inside the signed-in page, because the two claim endpoints turn plain HTTP clients away. Revealing is one-way, so the store runs only when named, like Fab and Unity. It never unlocks a month early (that is a payment; a subscriber's month arrives by automatic billing), it leaves pick-limited months from before February 2022 alone, and a game offered as a Steam key or an Epic grant is claimed as the Steam key. A revealed key is saved in the database tagged with its store, so a Steam key is activated by the Steam module in the same run when `steam` is in `STORES` too, and a GOG key is redeemed by the GOG module when `gog` is, the way Prime Gaming and Fanatical keys already are. Keys already revealed and keys past their publisher expiry are reported, never touched again.
+
 ## [1.18] - 2026-10-21
 
 ### Changed
@@ -463,6 +468,7 @@ Steam no longer reads SteamDB: free Steam games now come from GamerPower and Ste
 - ❌ `unrealengine.js` – Out of scope
 - ❌ `steam-games.js` – Only scraped profiles, never claimed games
 
+[1.19]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.18...dev
 [1.18]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.17...v1.18
 [1.17]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.16...v1.17
 [1.16]: https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/compare/v1.15...v1.16

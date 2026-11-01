@@ -46,7 +46,8 @@ class TestDefaultSelection:
     def test_new_stores_are_not_silently_left_out(self):
         # Anything in the registry is either a default or a deliberate opt-in.
         # Fab and Unity hand out assets for game developers, not games, so they run only when named.
-        opt_in = {"unity", "fab"}
+        # Humble reveals Choice keys, which cannot be undone, so it runs only when named too.
+        opt_in = {"unity", "fab", "humble"}
         missing = sorted(set(_registry_keys()) - set(_default_stores()) - opt_in)
         assert not missing, (
             f"{missing} exist in ALL_CLAIMERS but run neither by default nor as a known opt-in. "
