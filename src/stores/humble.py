@@ -10,16 +10,19 @@ What a run does, in order:
   1. Sign in (HB_EMAIL / HB_PASSWORD, an authenticator code if asked, else you
      over VNC). Humble's own JSON API, asked from inside the signed-in page,
      says whether the session is alive.
-  2. Read your order list and pick the one month to work on from the list
-     alone: the list already says what each order is and when it was made,
-     so no order is opened in full just to be classified, and only the
-     picked month's full order is fetched. The pick is the most recent
-     Choice month from the current plan, the single all-games plan sold
-     since February 2022. Pick-limited months from before that switch are
-     left alone: their unpicked games are a choice only you can make, and
-     the bot must not spend picks. Older current-plan months are left
-     alone too: unrevealed keys in them are a back catalogue to settle by
-     hand, not a sweep for a monthly run, so they stay exactly as they are.
+  2. Read your order list and pick the one month to work on. The list is
+     only gamekeys — what an order is, and when it was made, lives in the
+     order itself — so classifications are kept between runs (in the data
+     folder, next to the database): an order whose product and date are
+     already known is never opened just to be classified again, and a run
+     opens only orders it has never seen, plus the one month it works on,
+     in full. The pick is the most recent Choice month from the current
+     plan, the single all-games plan sold since February 2022.
+     Pick-limited months from before that switch are left alone: their
+     unpicked games are a choice only you can make, and the bot must not
+     spend picks. Older current-plan months are left alone too: unrevealed
+     keys in them are a back catalogue to settle by hand, not a sweep for
+     a monthly run, so they stay exactly as they are.
   3. For every game whose key is still unrevealed and unexpired: ask Humble
      to choose the month's content (one call per month), then reveal each
      key with one call per game. Both calls run inside the page, because
@@ -53,6 +56,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, account_key
 from src.core.config import cfg
@@ -171,11 +175,13 @@ def is_choice_order(order: dict) -> bool:
 
 
 def summary_facts(entry: dict) -> dict:
-    """What the order list alone says about one order, without opening it.
+    """What one order-list entry says about its order, without opening it.
 
-    The list carries each order's product and date, which is all the picking
-    needs. "choice" comes back None when the entry says nothing about its
-    product; the caller opens just those orders in full rather than guessing.
+    Today's list is only gamekeys, so in practice every fact but the
+    gamekey comes back empty and the caller classifies another way; the
+    reading stays because an entry that does carry its product and date
+    should be believed. "choice" comes back None when the entry says
+    nothing about its product.
     """
     entry = entry or {}
     product = entry.get("product") or {}
@@ -227,6 +233,48 @@ def pick_month(facts: list) -> tuple[dict | None, list, int]:
     latest = max(current, key=lambda fact: fact.get("created") or epoch) if current else None
     older = len(current) - 1 if latest is not None else 0
     return latest, legacy, older
+
+
+def facts_to_cache(facts: list) -> dict:
+    """The kept form of classified orders: gamekey -> the facts a pick needs.
+
+    An order's product and date never change once it exists, so what one
+    run learned about an order stays true for every later run.
+    """
+    kept = {}
+    for fact in facts or []:
+        gamekey = fact.get("gamekey") or ""
+        if not gamekey or fact.get("choice") is None:
+            continue
+        created = fact.get("created")
+        kept[gamekey] = {
+            "choice": bool(fact["choice"]),
+            "created": created.isoformat() if created else None,
+            "human_name": fact.get("human_name") or "",
+        }
+    return kept
+
+
+def facts_from_cache(cache: dict) -> dict:
+    """Kept classifications back into pick_month's shape, keyed by gamekey.
+
+    Malformed entries are dropped, never guessed at. A kept stamp that no
+    longer parses loses its date and keeps its verdict: the order then
+    counts as current-plan and ranks oldest, the same calls an unreadable
+    live stamp gets.
+    """
+    facts = {}
+    for gamekey, kept in (cache or {}).items():
+        if not isinstance(kept, dict) or "choice" not in kept:
+            continue
+        raw = kept.get("created")
+        facts[str(gamekey)] = {
+            "gamekey": str(gamekey),
+            "choice": bool(kept["choice"]),
+            "created": order_created({"created": raw}) if raw else None,
+            "human_name": str(kept.get("human_name") or ""),
+        }
+    return facts
 
 
 def extract_tpks(order: dict) -> list[dict]:
@@ -451,31 +499,70 @@ class HumbleClaimer(BaseClaimer):
             return None
         return order
 
+    def _facts_cache_path(self) -> Path:
+        """Where order classifications are kept: the data folder, by the database."""
+        return cfg.browser_dir.parent / "humble-order-facts.json"
+
+    def _read_facts_cache(self) -> dict:
+        """Classifications kept from earlier runs; an unreadable file means none kept."""
+        try:
+            data = json.loads(self._facts_cache_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return facts_from_cache(data if isinstance(data, dict) else {})
+
+    def _write_facts_cache(self, facts: list) -> None:
+        """Keep this run's classifications for the next one.
+
+        A failed write costs the next run its speed, never its pick, so it
+        is noted at debug level and the run carries on.
+        """
+        try:
+            path = self._facts_cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(facts_to_cache(facts), indent=1, sort_keys=True),
+                            encoding="utf-8")
+        except OSError:
+            logger.debug("The order classifications could not be kept for the next run.")
+
     async def _latest_choice_order(self) -> dict | None:
         """The one Choice month this run works on, opened in full, or None.
 
-        The month is picked from the order list alone (summary_facts), so a
-        run opens exactly one order in full instead of walking every order
-        there is. An entry the list cannot classify, or whose date it does
-        not carry, is opened on its own: a thinner list answer then changes
-        the run's speed, never its pick.
+        The order list is only gamekeys, so classifying an order means
+        opening it — once. Classifications are kept between runs
+        (facts_to_cache), and a run opens in full only the orders it has
+        never seen, plus the month it picks. Should the list itself ever
+        carry an entry's product and date, those are used first and the
+        kept answers stay a fallback.
         """
         status, payload = await self._fetch(API_ORDERS)
         if status != 200 or not isinstance(payload, list):
             logger.warning("Humble's order list answered %s, so no month can be read this run.", status)
             return None
-        facts, opened = [], {}
+        known = self._read_facts_cache()
+        facts_by_key, opened = {}, {}
+        unclassified = 0
         for entry in payload:
-            fact = summary_facts(entry)
-            if not fact["gamekey"]:
+            summary = summary_facts(entry)
+            gamekey = summary["gamekey"]
+            if not gamekey:
                 continue
-            if fact["choice"] is None or fact["created"] is None:
-                order = await self._open_order(fact["gamekey"])
+            fact = summary if summary["choice"] is not None and summary["created"] is not None else None
+            if fact is None:
+                fact = known.get(gamekey)
+            if fact is None:
+                order = await self._open_order(gamekey)
                 if order is None:
                     continue
-                opened[fact["gamekey"]] = order
-                fact = detail_facts(order, fact["gamekey"])
-            facts.append(fact)
+                opened[gamekey] = order
+                fact = detail_facts(order, gamekey)
+                unclassified += 1
+            facts_by_key[gamekey] = fact
+        facts = list(facts_by_key.values())
+        if unclassified:
+            logger.info("Opened %d order(s) to classify them; the answers are kept, "
+                        "so later runs open only orders they have never seen.", unclassified)
+        self._write_facts_cache(facts)
         latest, legacy, older = pick_month(facts)
         for fact in legacy:
             product = fact["human_name"] or "Humble Choice (legacy month)"

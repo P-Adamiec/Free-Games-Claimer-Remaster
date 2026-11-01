@@ -11,6 +11,8 @@ from src.stores.humble import (
     choose_outcome,
     detail_facts,
     extract_tpks,
+    facts_from_cache,
+    facts_to_cache,
     is_choice_order,
     order_created,
     owned_in_plan,
@@ -244,3 +246,40 @@ class TestPickMonth:
         latest, legacy, older = pick_month(facts)
         assert latest["human_name"] == "october"
         assert legacy == [] and older == 0
+
+
+class TestFactsCache:
+    """Classifications are kept between runs; these are the kept shapes."""
+
+    def _fact(self, name, created, choice=True):
+        stamp = (datetime.fromisoformat(created).replace(tzinfo=timezone.utc)
+                 if created else None)
+        return {"gamekey": name, "choice": choice, "created": stamp, "human_name": name}
+
+    def test_a_round_trip_keeps_the_pick_the_same(self):
+        facts = [self._fact("october", "2026-10-06T17:00:00"),
+                 self._fact("may 2021", "2021-05-04T17:00:00"),
+                 self._fact("a bundle", "2026-10-02T17:00:00", choice=False)]
+        kept = facts_from_cache(facts_to_cache(facts))
+        latest, legacy, older = pick_month(list(kept.values()))
+        assert latest["human_name"] == "october"
+        assert [fact["human_name"] for fact in legacy] == ["may 2021"]
+        assert older == 0
+
+    def test_facts_without_a_verdict_are_not_kept(self):
+        fact = self._fact("mystery", "2026-10-06T17:00:00")
+        fact["choice"] = None
+        assert facts_to_cache([fact]) == {}
+
+    def test_malformed_kept_entries_are_dropped_not_guessed(self):
+        kept = facts_from_cache({
+            "good": {"choice": True, "created": "2026-10-06T17:00:00", "human_name": "October"},
+            "junk": "not a dict",
+            "no verdict": {"created": "2026-10-06T17:00:00"},
+        })
+        assert list(kept) == ["good"]
+
+    def test_a_kept_stamp_that_no_longer_parses_keeps_its_verdict(self):
+        kept = facts_from_cache({"old": {"choice": True, "created": "someday", "human_name": "Old"}})
+        assert kept["old"]["choice"] is True
+        assert kept["old"]["created"] is None
