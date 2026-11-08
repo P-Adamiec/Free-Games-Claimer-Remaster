@@ -7,11 +7,13 @@ import json
 import logging
 import re
 
+from sqlalchemy import select
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import BaseClaimer, account_key, filenamify, track_missing_base
+from src.core.claimer import (BaseClaimer, account_key, filenamify, mark_page_checked, older_than, row_extra,
+                              track_missing_base)
 from src.core.config import cfg
-from src.core.database import async_session, get_or_create
+from src.core.database import ClaimedGame, async_session, get_or_create
 from src.core.run_state import needs_you
 from src.core.url_security import url_has_allowed_host
 
@@ -30,6 +32,9 @@ SEARCH_PAGE_JS = """JSON.stringify({
 })"""
 # The page renders this many rows before it waits for a scroll.
 SEARCH_PAGE_SIZE = 50
+# A paid page or a DLC without its base game is read again after this long; 20, so a twice-daily run a day later opens it.
+RECHECKED = ("skipped:paid", "failed:missing_base")
+RECHECK_HOURS = 20
 
 # Steam Store URLs used for login and navigation
 URL_STORE = "https://store.steampowered.com/?l=english"
@@ -158,6 +163,8 @@ class SteamClaimer(BaseClaimer):
 
     # Set when a sign-in nobody finished stops the run.
     _signed_out: bool = False
+    # Pages Steam's own search lists at 100% off and a price of zero this run.
+    _free_in_search: frozenset = frozenset()
 
     async def run(self, extra_games: list | None = None) -> None:
         """Main entry point: find free Steam games and claim them.
@@ -184,6 +191,7 @@ class SteamClaimer(BaseClaimer):
 
             # Step 2: Steam's own search for paid games that are free right now
             store_games = await self._fetch_free_from_store() if cfg.steam_search else []
+            self._free_in_search = frozenset(STEAM_ITEM.match(g["url"]).groups() for g in store_games)
             if store_games:
                 links = [f"  • [bold cyan]{g['title']}[/bold cyan] 🔗 {g.get('url', '')}" for g in store_games]
                 logger.info("🎮 [bold magenta]Steam store: %d free game(s):[/bold magenta]\n%s",
@@ -555,6 +563,29 @@ class SteamClaimer(BaseClaimer):
     # Claim a game
     # ------------------------------------------------------------------
 
+    async def _recently_skipped(self, kind: str, number: str) -> bool:
+        """True for a page that was paid, or a DLC without its base game, read so lately that it is not opened again yet."""
+        async with async_session() as session:
+            row = (await session.execute(select(ClaimedGame).where(
+                ClaimedGame.store == "steam", ClaimedGame.user == account_key(cfg.steam_username, self.user),
+                ClaimedGame.game_id == number))).scalars().first()
+        if row is None or row.status not in RECHECKED:
+            return False
+        # The row keeps only the number, and app 10 and package 10 are different things.
+        stored = STEAM_ITEM.match(row.url or "")
+        if not stored or stored.group(1) != kind:
+            return False
+        if row.status == "skipped:paid" and (kind, number) in self._free_in_search:
+            logger.debug("'%s' was paid, but Steam's search lists it free now, so it is opened.", row.title)
+            return False
+        checked = row_extra(row).get("page_checked")
+        if older_than(checked, RECHECK_HOURS / 24):
+            return False
+        why = "it was not free" if row.status == "skipped:paid" else "its base game was missing"
+        logger.info("Skipping '%s' without opening it: %s at the last look, it is looked at again later.", row.title, why)
+        logger.debug("'%s' is %s, its page was read %s.", row.title, row.status, checked)
+        return True
+
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=3, max=15), reraise=True)
     async def _claim_game(self, game: dict) -> None:
         """Claim a single free game on Steam."""
@@ -562,6 +593,10 @@ class SteamClaimer(BaseClaimer):
         title = game.get("title", "Unknown")
         app_id = game.get("app_id", "")
         source = game.get("source", "unknown")
+
+        known = STEAM_ITEM.match(url)
+        if known and await self._recently_skipped(*known.groups()):
+            return
 
         try:
             await self.page.get(url)
@@ -629,7 +664,9 @@ class SteamClaimer(BaseClaimer):
                     session, store="steam", user=account_key(cfg.steam_username, self.user),
                     game_id=app_id, title=page_title, url=current_url, status="existed",
                 )
-                obj.status = "existed"
+                # A claim the bot made stays a claim when a later run finds the game owned.
+                if not obj.status.startswith("claimed"):
+                    obj.status = "existed"
                 await session.commit()
             notify_game["status"] = "existed"
             return
@@ -755,10 +792,20 @@ class SteamClaimer(BaseClaimer):
 
         if not price_info.get("hasFreeBlock") and price_info.get("hasPaidBlock"):
             paid_price = price_info.get("paidPrice", "unknown")
-            logger.warning("⚠️ SKIPPING '%s': item is NOT free (price: %s). "
-                           "Will not purchase paid content.", page_title, paid_price)
+            logger.info("Skipping '%s': it is not free on Steam (price: %s).", page_title, paid_price)
             notify_game["status"] = "skipped:paid"
             await self.take_screenshot(f"steam_paid_skip_{filenamify(page_title)}", failed=False)
+            if not cfg.dryrun:
+                async with async_session() as session:
+                    obj, _ = await get_or_create(
+                        session, store="steam", user=account_key(cfg.steam_username, self.user),
+                        game_id=app_id, title=page_title, url=current_url, status="skipped:paid",
+                    )
+                    # A package with the number of a game you have must not turn that game's row into a skip.
+                    if not (obj.status == "existed" or obj.status.startswith("claimed")):
+                        obj.status, obj.url = "skipped:paid", current_url
+                        mark_page_checked(obj)
+                    await session.commit()
             return
 
         if price_info and not price_info.get("giveaway"):
@@ -776,6 +823,8 @@ class SteamClaimer(BaseClaimer):
                     game_id=app_id, title=page_title, url=current_url, status="failed:missing_base",
                 )
                 notify_game["status"] = track_missing_base(obj, remember=not cfg.dryrun)
+                if not cfg.dryrun:
+                    mark_page_checked(obj)
                 await session.commit()
             if notify_game["status"] == "failed:missing_base":
                 logger.warning("Skipping DLC '%s' because required base game is missing.", page_title)

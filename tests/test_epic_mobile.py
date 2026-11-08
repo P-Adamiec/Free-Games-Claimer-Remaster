@@ -58,6 +58,7 @@ class TestParsing:
             "url": PRODUCT_URL.format(slug="foretales-android-7c6e1c"),
             "platform": "android",
             "label": "Android",
+            "ends": "",
         }]
 
     def test_ios_label(self):

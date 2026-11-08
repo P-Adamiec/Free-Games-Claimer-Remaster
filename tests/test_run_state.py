@@ -100,21 +100,43 @@ class TestAnUnsolvedCaptchaStopsTheStore:
             def warning(*args):
                 pass
 
-    def _stops(self, left):
+    @staticmethod
+    def _holds(ends=None):
         from src.core.claimer import BaseClaimer
-        return BaseClaimer._captcha_stops_store(self._Store(), left, "game")
+        return BaseClaimer._captcha_holds(TestAnUnsolvedCaptchaStopsTheStore._Store(), ends)
 
     def test_a_store_you_answered_goes_on(self):
-        assert self._stops(3) is False and run_state.waiting_for_you() == {}
+        assert self._holds() is False and run_state.waiting_for_you() == {}
 
     def test_after_an_unsolved_captcha_the_rest_is_counted_and_left(self):
+        from src.core.claimer import BaseClaimer
         run_state.mark_unanswered("epic")
-        assert self._stops(3) is True
+        assert self._holds() is True
+        BaseClaimer._captcha_held(self._Store(), 3, "game")
         assert run_state.waiting_for_you() == {("epic", run_state.CAPTCHA_UNSOLVED, "game"): 3}
+
+    def test_an_item_on_its_last_run_is_still_tried(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        monkeypatch.setattr(run_state, "_next_run_source", lambda: datetime.now(timezone.utc) + timedelta(hours=12))
+        run_state.mark_unanswered("epic")
+        assert self._holds(datetime.now(timezone.utc) + timedelta(hours=2)) is False
+        assert self._holds(datetime.now(timezone.utc) + timedelta(days=3)) is True
+
+    def test_a_single_run_holds_everything_after_nobody_answered(self, monkeypatch):
+        # Audit 4.11: RUN_ONCE took every known end for a last run, so after an unanswered puzzle it opened every checkout.
+        from datetime import datetime, timedelta, timezone
+        monkeypatch.setattr(run_state, "_next_run_source", None)
+        run_state.mark_unanswered("epic")
+        assert self._holds(datetime.now(timezone.utc) + timedelta(hours=2)) is True
+
+    def test_nothing_held_says_nothing(self):
+        from src.core.claimer import BaseClaimer
+        BaseClaimer._captcha_held(self._Store(), 0, "game")
+        assert run_state.waiting_for_you() == {}
 
     def test_another_store_is_not_held_back(self):
         run_state.mark_unanswered("fab")
-        assert self._stops(3) is False
+        assert self._holds() is False
 
 
 class TestEveryRunStartsClean:

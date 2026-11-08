@@ -222,6 +222,8 @@ class Config:
     vnc_login_timeout: int = _int("VNC_LOGIN_TIMEOUT", 180) # seconds
     novnc_port: str = os.getenv("NOVNC_PORT", "7080")
     vnc_ip: str = os.getenv("VNC_IP", "localhost")
+    # Only whether VNC_PASSWORD is set, never its value: start-vnc.sh reads the password itself.
+    vnc_password_set: bool = bool(os.getenv("VNC_PASSWORD"))
     # Full public noVNC address for reverse proxies; replaces VNC_IP and NOVNC_PORT in links.
     vnc_url_base: str | None = os.getenv("VNC_URL")
 
@@ -297,6 +299,8 @@ class Config:
     eg_mobile_platforms: str = os.getenv("EG_MOBILE_PLATFORMS", "android,ios")
     # DLC giveaways GamerPower finds for Epic.
     eg_claim_dlc: bool = _bool("EG_CLAIM_DLC", default=True)
+    # A picture puzzle in Epic's checkout: off, the game waits for the next run and the summary says so; on, you are asked over VNC.
+    eg_captcha_ask: bool = _bool("EG_CAPTCHA_ASK", default=False)
 
     @property
     def eg_mobile_platform_list(self) -> list[str]:
@@ -328,6 +332,14 @@ class Config:
     ms_force_redeem: bool = _bool("MS_FORCE_REDEEM")
     # DLC giveaways GamerPower finds for Xbox.
     ms_claim_dlc: bool = _bool("MS_CLAIM_DLC", default=True)
+
+    # --- Microsoft Rewards (opt-in) ---
+    # Each setting falls back to the Microsoft Store one above, never to it for an account of its own.
+    ms_rewards_email: str | None = os.getenv("MS_REWARDS_EMAIL") or ms_email
+    ms_rewards_password: str | None = os.getenv("MS_REWARDS_PASSWORD") or (
+        os.getenv("PASSWORD") if os.getenv("MS_REWARDS_EMAIL") else ms_password)
+    ms_rewards_otp_key: str | None = otp_key(_secret("MS_REWARDS_OTP_KEY")) or (
+        None if os.getenv("MS_REWARDS_EMAIL") else ms_otp_key)
 
     # --- Steam ---
     steam_username: str | None = os.getenv("STEAM_USERNAME")

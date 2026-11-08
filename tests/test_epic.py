@@ -5,6 +5,7 @@ only once the product page itself reports the game as owned.
 """
 
 import asyncio
+import logging
 import contextlib
 import json
 import re
@@ -136,10 +137,40 @@ class TestTheCodeScreenIsNotAbandoned:
     def test_the_page_is_not_taken_away_while_the_code_screen_is_up(self):
         # The guard has to sit between the wait loop and the navigation that verifies success.
         block = self.SOURCE.split("otp_tried = 0", 1)[1]
-        assert block.index("if not mfa_manual and await self._mfa_prompt_present():") < block.index("# verify success")
+        assert block.index("if not (mfa_manual or challenge_blocked) and await self._mfa_prompt_present():") < block.index("# verify success")
 
     def test_what_epic_said_reaches_the_log(self):
         assert "_mfa_error_text" in self.SOURCE
+
+
+class TestACheckoutPuzzleWaitsForTheNextRun:
+    """Owner, 2026-10-30: a checkout puzzle is left for the next run and the summary says so, unless EG_CAPTCHA_ASK asks him."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "epic.py").read_text(encoding="utf-8")
+    CLAIM = SOURCE.split("async def _claim_game", 1)[1].split("\n    async def ", 1)[0]
+    RUN = SOURCE.split("async def run(", 1)[1].split("\n    async def ", 1)[0]
+
+    def test_a_game_stopped_by_a_puzzle_is_reported_as_a_captcha(self):
+        assert "elif title in self._checkout_puzzles:" in self.CLAIM
+        # A game kept for a noVNC meeting is listed apart, not as failed; one on its last run is not said to wait for the next one.
+        kept = self.CLAIM.index("if is_booked(self.store_name, title):")
+        assert kept < self.CLAIM.index("self.notify_games.remove(notify_game)") < \
+            self.CLAIM.index("elif waits_for_nobody(self.store_name) or title in self._checkout_puzzles:")
+        assert "why=CAPTCHA_ENDS if lost else CAPTCHA_UNSOLVED" in self.CLAIM
+
+    def test_after_a_puzzle_only_games_that_need_a_visit_wait_for_the_next_run(self):
+        # Each further checkout could draw another puzzle; a game owned and read lately is not counted as waiting.
+        stop = self.CLAIM.index("if self._checkout_puzzles and not cfg.eg_captcha_ask")
+        assert self.CLAIM.index("not opened this run.") < stop < self.CLAIM.index("await self._open_game_page(")
+        assert "if self._checkout_puzzles" not in self.RUN
+
+    def test_a_puzzle_handed_to_you_that_left_no_order_counts_as_unsolved(self):
+        # It expires and vanishes after about two minutes, which looked like a solve (TODO 67).
+        failed = self.CLAIM.split("if await self._confirm_in_library(", 1)[1]
+        expired = failed.index("if not checkout_ok and title in self._checkout_handed:")
+        assert expired < failed.index("elif title in self._checkout_puzzles:")
+        block = failed[expired:failed.index("if checkout_ok:")]
+        assert "self._checkout_puzzles.add(title)" in block and "mark_unanswered(self.store_name)" in block
 
 
 class TestRememberThisBrowser:
@@ -395,6 +426,159 @@ class TestSigningInWithCredentials:
         assert claimer.picks == 0
 
 
+class TestFinishingTheSignInAfterACheck:
+    """#100: a check you cleared on Epic's sign-in, then the bot gave up or was told to refresh the page."""
+
+    LOGIN = "https://www.epicgames.com/id/login?lang=en-US"
+    MFA = "https://www.epicgames.com/id/login/mfa?lang=en-US"
+    STORE = "https://store.epicgames.com/en-US/"
+
+    class _Button:
+        def __init__(self, page):
+            self.page = page
+
+        async def click(self):
+            self.page.log.append("button")
+            self.page.screen = self.page.flow.get("button", self.page.screen)
+
+    class _Page:
+        def __init__(self, flow, log):
+            # Each screen and what the next step turns it into, as Epic did in #100 and the cases around it.
+            self.flow, self.log, self.screen, self.reloads = flow, log, "start", 0
+
+        async def get(self, url):
+            pass
+
+        async def reload(self, ignore_cache=True):
+            self.reloads += 1
+            self.screen = self.flow.get("reload", self.screen)
+
+        async def select(self, selector, timeout=10):
+            buttons = {"#sign-in": "password", "#continue": "email"}
+            if selector in buttons:
+                return TestFinishingTheSignInAfterACheck._Button(self) if self.screen == buttons[selector] else None
+            return object() if "#email" in selector and self.screen in ("email", "password") else None
+
+        async def evaluate(self, script):
+            if "window.location.href" in script:
+                if self.screen == "store":
+                    return TestFinishingTheSignInAfterACheck.STORE
+                return TestFinishingTheSignInAfterACheck.MFA if "mfa" in self.screen else TestFinishingTheSignInAfterACheck.LOGIN
+            if "refresh the page" in script:
+                return self.screen.endswith("_stale")
+            if "isloggedin" in script:
+                return self.screen == "store"
+            return False if "account-" in script else ""
+
+    def _sign_in(self, tmp_path, monkeypatch, flow, otp_key="JBSWY3DPEHPK3PXP"):
+        from src.core import claimer as claimer_module
+        from src.stores import epic as epic_module
+
+        monkeypatch.setattr(claimer_module.cfg, "_data_dir", tmp_path)
+        monkeypatch.setattr(epic_module.cfg, "eg_email", "me@example.com")
+        monkeypatch.setattr(epic_module.cfg, "eg_password", "secret")
+        monkeypatch.setattr(epic_module.cfg, "eg_otp_key", otp_key)
+        monkeypatch.setattr(epic_module.cfg, "eg_otp_codes", "AAAA-BBBB")
+        claimer = EpicGamesClaimer()
+        claimer.log = log = []
+        claimer.page = page = self._Page(flow, log)
+        claimer.notice = None
+
+        async def nothing(*args, **kwargs):
+            return False
+
+        async def login():
+            log.append("form")
+            page.screen = flow["login"] if log.count("form") == 1 else flow.get("form again", "store")
+
+        async def challenge():
+            return "challenge" in page.screen
+
+        async def wait_out(label, store_key=None, ask=True, **kwargs):
+            if not ask:
+                log.append("settled")
+                page.screen = flow.get("settles", page.screen)
+                return "challenge" not in page.screen
+            log.append("asked")
+            page.screen = flow["solved"]
+            return True
+
+        async def code_screen():
+            return "mfa" in page.screen
+
+        async def totp():
+            if "mfa" not in page.screen or "challenge" in page.screen:
+                return False
+            log.append("code")
+            page.screen = flow["code"]
+            return True
+
+        async def backup():
+            log.append("recovery code")
+            return False
+
+        async def vnc(check_fn, custom_msg=None, **kwargs):
+            log.append("handed to you")
+            claimer.notice = custom_msg
+            return False
+
+        claimer.sleep = claimer._navigate_organically_to_login = claimer._pick_saved_account = nothing
+        claimer._mfa_error_text = nothing
+        claimer._do_stealth_login, claimer._human_challenge_present, claimer._wait_out_challenge = login, challenge, wait_out
+        claimer._mfa_prompt_present, claimer._fill_totp, claimer._fill_backup_code = code_screen, totp, backup
+        claimer._wait_for_vnc_login = vnc
+        return claimer, asyncio.run(claimer._ensure_logged_in())
+
+    def test_the_reported_case_reloads_and_signs_in_again(self, tmp_path, monkeypatch):
+        # #100: the check came on the e-mail step, and Epic then asked for the page to be refreshed.
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {
+            "login": "challenge", "solved": "email_stale", "reload": "email", "form again": "store"})
+        assert signed_in is True and claimer.log == ["form", "asked", "form"] and claimer.page.reloads == 1
+
+    def test_a_rejected_check_goes_to_you_after_one_try(self, tmp_path, monkeypatch):
+        # Epic does not take the check from this browser: one more try brings one more check, which is yours.
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {
+            "login": "challenge", "solved": "email_stale", "reload": "email", "form again": "challenge"})
+        assert signed_in is False and claimer.log == ["form", "asked", "form", "settled", "handed to you"]
+        assert "reload arrow" in claimer.notice and "F5" not in claimer.notice
+
+    def test_a_second_check_that_passes_by_itself_does_not_wake_you(self, tmp_path, monkeypatch):
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {
+            "login": "challenge", "solved": "email_stale", "reload": "email", "form again": "challenge", "settles": "store"})
+        assert signed_in is True and claimer.log == ["form", "asked", "form", "settled"]
+
+    def test_an_interrupted_step_is_filled_in_and_sent_again(self, tmp_path, monkeypatch):
+        # #100: an accepted check on the e-mail step leads to the password step, where the password still has to be typed.
+        for solved in ("password", "email"):
+            claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {"login": "challenge", "solved": solved})
+            assert signed_in is True and claimer.log == ["form", "asked", "form"] and claimer.page.reloads == 0
+
+    def test_without_a_form_the_page_s_own_button_is_the_last_try(self, tmp_path, monkeypatch):
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {"login": "challenge", "solved": "review"})
+        assert signed_in is False and claimer.log == ["form", "asked", "handed to you"]
+
+    def test_a_check_on_the_code_screen_gets_a_fresh_code_after_it(self, tmp_path, monkeypatch):
+        # The code screen used to answer first: codes typed under the check, then a recovery code spent.
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {
+            "login": "challenge_mfa", "solved": "mfa_stale", "reload": "mfa", "code": "store"})
+        assert signed_in is True and claimer.log == ["form", "asked", "code"]
+
+    def test_a_check_after_the_fresh_code_never_costs_a_recovery_code(self, tmp_path, monkeypatch):
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {
+            "login": "challenge", "solved": "mfa_stale", "reload": "mfa", "code": "challenge_mfa"})
+        assert signed_in is False and claimer.log == ["form", "asked", "code", "settled", "handed to you"]
+        assert "reload arrow" in claimer.notice
+
+    def test_without_an_authenticator_key_the_code_screen_is_left_for_you(self, tmp_path, monkeypatch):
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {"login": "challenge", "solved": "mfa"}, otp_key=None)
+        assert signed_in is False and claimer.log == ["form", "asked", "handed to you"] and claimer.page.reloads == 0
+        assert "2FA code needed" in claimer.notice
+
+    def test_a_check_that_ends_on_the_store_needs_nothing_more(self, tmp_path, monkeypatch):
+        claimer, signed_in = self._sign_in(tmp_path, monkeypatch, {"login": "challenge", "solved": "store"})
+        assert signed_in is True and claimer.log == ["form", "asked"]
+
+
 class TestRecoveryCodeBookkeeping:
     """One code per sign-in, never the same one twice, and no crash once they run out."""
 
@@ -440,7 +624,7 @@ class TestTheCheckoutCaptcha:
 
     def test_the_checkout_frame_is_searched_too(self):
         # The page check only sees the top document, verified against a real browser.
-        look = self.SOURCE.split("async def _checkout_challenge_present", 1)[1].split("\n    async def ", 1)[0]
+        look = self.SOURCE.split("async def _checkout_challenge_reason", 1)[1].split("\n    async def ", 1)[0]
         assert "_find_purchase_frame(" in look and "CHALLENGE_JS" in look
 
     def test_it_is_checked_before_the_page_text_can_read_as_success(self):
@@ -461,22 +645,31 @@ class TestTheCheckoutCaptcha:
         assert "yourself" not in tail and '"notified"' not in tail
         # Only a captcha left unanswered in this run reaches "Needed you", and it says so.
         assert tail.count("needs_you(") == 1
-        assert 'if waits_for_nobody(self.store_name): needs_you(self.store_name, 1, "game", why=CAPTCHA_UNSOLVED)' in tail
+        assert 'needs_you(self.store_name, 1, "game", why=CAPTCHA_ENDS if lost else CAPTCHA_UNSOLVED)' in tail
 
     def test_a_checkout_that_did_not_finish_reloads_the_page_once(self):
         # 15.10: four failed checkouts reloaded their pages three times each on a session under watch.
-        assert "_confirm_in_library(url, tries=3 if checkout_ok else 1)" in self.CLAIM
+        assert "_confirm_in_library(url, tries=3 if checkout_ok or title in self._checkout_handed else 1)" in self.CLAIM
 
     def test_a_security_check_nobody_solved_reaches_needed_you(self):
-        stuck = re.sub(r"\s+", " ", self.CLAIM.split("not cleared, trying again next run", 1)[1][:300])
-        assert 'needs_you(self.store_name, 1, "game", why=CAPTCHA_UNSOLVED)' in stuck
+        stuck = re.sub(r"\s+", " ", self.CLAIM.split("Security check on '%s' not cleared", 1)[1][:500])
+        # On its last run the game is not said to wait for the next one.
+        assert 'needs_you(self.store_name, 1, "game", why=CAPTCHA_ENDS if lost else CAPTCHA_UNSOLVED)' in stuck
 
-    @pytest.mark.parametrize("module,loop", [("epic", "_claim_game(url"), ("epic_fab", "_claim_listing(item)")])
-    def test_after_an_unsolved_captcha_the_store_opens_nothing_more(self, module, loop):
+    def test_epic_decides_after_an_unsolved_captcha_game_by_game(self):
+        # In the game, not the loop: only there is it known whether you already have it, so it is not counted as waiting.
+        assert "_captcha_holds(" not in self.CLAIM
+        assert "if waits_for_nobody(self.store_name) and not lost_before_next_run(self._ends_now) and not self._meeting:" in self.CLAIM
+
+    @pytest.mark.parametrize("module,loop,item", [("epic_fab", "_claim_listing(item)", '"asset"')])
+    def test_after_an_unsolved_captcha_only_items_on_their_last_run_are_opened(self, module, loop, item):
         source = (Path(__file__).resolve().parent.parent / "src" / "stores" / f"{module}.py").read_text(encoding="utf-8")
         run = re.sub(r"\s+", " ", source.split("async def run(", 1)[1].split("\n    async def ", 1)[0])
-        assert "if self._captcha_stops_store(" in run and "break" in run
-        assert run.index("_captcha_stops_store(") < run.index(f"await self.{loop}")
+        # Epic's two weekly games end at the same minute: the second one must not be lost to the first one's puzzle.
+        hold = run.index("self._captcha_holds(")
+        held = run.index(f"self._captcha_held(held, {item})", hold)
+        assert hold < run.index("held += 1 continue", hold) < run.index(f"await self.{loop}", hold) < held
+        assert "break" not in run[hold:held]
 
 
 class TestNoConsentIsGivenForYou:
@@ -616,7 +809,10 @@ class TestEpicIsClickedLikeAHand:
         assert 'f["x"] + box["x"]' in block and 'f["y"] + box["y"]' in block
 
     def test_every_mouse_click_goes_through_the_one_loop(self):
-        assert self._block("_click_until_taken").count("_human_click(") == 1
+        # The loop lives in BaseClaimer since 2026-10-31, so Fab clicks Epic's checkout the same way.
+        shared = (Path(__file__).resolve().parent.parent / "src" / "core" / "claimer.py").read_text(encoding="utf-8")
+        loop = shared.split("async def _click_until_taken", 1)[1].split(chr(10) + "    async def ", 1)[0]
+        assert loop.count("_human_click(") == 1
         assert "_cdp_click_found(text_finder(" in self._block("_cdp_click_element_by_text")
         assert "_click_until_taken(" in self._block("_cdp_click_in_frame")
         assert "type_=\"mousePressed\"" not in self.SOURCE
@@ -635,7 +831,8 @@ class TestEpicIsClickedLikeAHand:
         assert '_cdp_click_element_by_text("accept", timeout=1, exact=True)' in self._block("_handle_new_checkout")
 
     def test_the_script_click_skips_a_disabled_button(self):
-        assert "if (el && !el.disabled) {{ el.click()" in self.SOURCE
+        from src.core.claimer import BaseClaimer
+        assert "if (el && !el.disabled) { el.click()" in BaseClaimer._script_click_js("() => null")
 
 
 class TestTheFrameClickAimsAtItsOwnFrame:
@@ -700,6 +897,8 @@ class TestEveryClickIsChecked:
     CLICKABLE = {"x": 10, "y": 10, "key": "BUTTON|Get"}
 
     class _Stub:
+        logger = logging.getLogger("test")
+
         def __init__(self, boxes, script_ok=True, after_script=None):
             self.boxes, self.clicks, self.scripts, self.wheels = list(boxes), 0, 0, []
             self.script_ok, self.after_script = script_ok, after_script or [{"reason": "missing"}]
@@ -821,7 +1020,7 @@ class TestGamePagesAreOpenedSparingly:
 
         def __init__(self, challenge=(), cleared=False, tile=False, path="/"):
             self.challenge, self.cleared, self.tile, self.path = list(challenge), cleared, tile, path
-            self.notify_games, self._platform_labels = [], {}
+            self.notify_games, self._platform_labels, self._checkout_puzzles, self._game_ends = [], {}, set(), {}
             self.loads, self.asked, self.reads = [], [], 0
             self.page = self
 
@@ -960,7 +1159,7 @@ class TestOneAccountKey:
 
     @pytest.mark.parametrize("store,setting,count", [
         ("epic.py", "eg_email", 1), ("epic_fab.py", "eg_email", 2),
-        ("steam.py", "steam_username", 5), ("ubisoft.py", "ubi_email", 2),
+        ("steam.py", "steam_username", 7), ("ubisoft.py", "ubi_email", 2),
     ])
     def test_every_store_with_a_name_from_the_page_saves_under_its_setting(self, store, setting, count):
         source = (self.ROOT / "src" / "stores" / store).read_text(encoding="utf-8")

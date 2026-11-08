@@ -654,7 +654,7 @@ class UbisoftClaimer(BaseClaimer):
             logger.info("✓ Claimed '%s' successfully!", title)
             status = "claimed"
         else:
-            logger.warning("Claim of '%s' was not confirmed by the page, check it manually.", title)
+            logger.warning("Claim of '%s' was not confirmed by the page, trying again next run.", title)
             status = "failed:unconfirmed"
 
         self.notify_games.append({"title": title, "url": url, "status": status})

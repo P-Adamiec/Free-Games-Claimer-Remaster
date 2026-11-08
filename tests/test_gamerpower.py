@@ -262,7 +262,10 @@ class TestFanaticalClaimHonesty:
     def test_sign_in_is_judged_by_the_header_only(self):
         # Every giveaway lists "Create or Sign in to a Fanatical account" as a step, signed in or not (#71).
         assert "Create or Sign in to a Fanatical account" not in self.BLOCK
-        assert "if not await self._fanatical_signed_in():" in self.BLOCK
+        # The sign-in lives in _fanatical_session(), which the claim and the key look both use.
+        session = self.SOURCE.split("async def _fanatical_session", 1)[1].split("\n    async def ", 1)[0]
+        assert "if not await self._fanatical_signed_in():" in session
+        assert "if not await self._fanatical_session(url):" in self.BLOCK
 
     def test_the_claim_goes_through_the_checkout(self):
         claim = self.BLOCK.index('FAN_MARK_MAIN_JS, "Claim button"')
@@ -461,6 +464,7 @@ class TestASaleThatIsNoLongerFree:
         claimer = gp.GamerPowerClaimer.__new__(gp.GamerPowerClaimer)
         claimer.notify_games = []
         claimer.page = type("Page", (), {"get": staticmethod(_nothing)})()
+        monkeypatch.setattr(claimer, "_itch_recently_download_only", _no)
         monkeypatch.setattr(claimer, "_itch_session_ready", _yes)
         monkeypatch.setattr(claimer, "_itch_owns_this", _no)
         monkeypatch.setattr(claimer, "_itch_run_claim", _not_free)
@@ -1016,6 +1020,81 @@ class TestFanaticalCheckout:
         assert outcome[0] == "receipt"
         assert clicks == [("Proceed to checkout", 1), ("Complete order", 3)]
 
+    @staticmethod
+    def _checkout(reads):
+        clicks = []
+
+        class Stub:
+            async def sleep(self, seconds):
+                pass
+
+            async def _fanatical_click(self, script, label):
+                clicks.append(label)
+                return True
+
+        stub = Stub()
+
+        class Page:
+            async def evaluate(self, script):
+                return json.dumps(reads.pop(0) if reads else {"path": "https://www.fanatical.com/en/cart"})
+
+        stub.page = Page()
+        return asyncio.run(GamerPowerClaimer._fanatical_checkout(stub, "Letter Quest")), clicks
+
+    UPSELL = "https://www.fanatical.com/en/cart?upsell=true"
+
+    def test_the_deals_page_without_a_cart_total_goes_on_by_the_header(self):
+        # Live 4.11: "Don't miss these incredible PC Steam deals" showed no cart total, the bot waited and then asked you.
+        outcome, clicks = self._checkout([
+            {"path": "https://www.fanatical.com/en/cart", "total": "€0.00", "proceed": True},
+            {"path": self.UPSELL, "total": None, "navTotal": "€0.00", "pay": "Skip and Proceed To Checkout"},
+            {"path": "https://www.fanatical.com/en/receipt?authResult=AUTHORISED"},
+        ])
+        assert outcome[0] == "receipt" and clicks == ["Proceed to checkout", "Skip and Proceed To Checkout"]
+
+    def test_a_header_that_is_not_zero_is_never_ordered(self):
+        outcome, clicks = self._checkout([
+            {"path": "https://www.fanatical.com/en/cart", "total": "€0.00", "proceed": True},
+            {"path": self.UPSELL, "total": None, "navTotal": "€4.99", "pay": "Skip and Proceed To Checkout"},
+        ])
+        assert outcome[0] == "not-free" and clicks == ["Proceed to checkout"]
+
+    def test_without_any_total_on_the_deals_page_nothing_is_ordered(self):
+        outcome, clicks = self._checkout([
+            {"path": "https://www.fanatical.com/en/cart", "total": "€0.00", "proceed": True},
+            {"path": self.UPSELL, "total": None, "navTotal": None, "pay": "Skip and Proceed To Checkout"},
+        ])
+        assert outcome[0] == "stuck" and clicks == ["Proceed to checkout"]
+
+    def test_the_header_never_decides_alone(self):
+        # Review 4.11: a deals page as the first cart read, with a paid game in the cart and a stale "€0.00" header.
+        outcome, clicks = self._checkout([
+            {"path": self.UPSELL, "total": None, "navTotal": "€0.00", "pay": "Skip and Proceed To Checkout"},
+        ])
+        assert outcome[0] == "stuck" and clicks == []
+
+    def test_an_empty_header_is_waited_out_not_taken_for_a_price(self):
+        outcome, clicks = self._checkout([
+            {"path": "https://www.fanatical.com/en/cart", "total": "€0.00", "proceed": True},
+            {"path": self.UPSELL, "total": None, "navTotal": "", "pay": "Skip and Proceed To Checkout"},
+            {"path": self.UPSELL, "total": None, "navTotal": "€0.00", "pay": "Skip and Proceed To Checkout"},
+            {"path": "https://www.fanatical.com/en/receipt?authResult=AUTHORISED"},
+        ])
+        assert outcome[0] == "receipt" and clicks == ["Proceed to checkout", "Skip and Proceed To Checkout"]
+
+    def test_the_read_and_the_click_find_the_same_button(self):
+        from src.stores.gamerpower import FAN_CHECKOUT_STATE_JS, _FAN_PAY_FIND
+        assert _FAN_PAY_FIND in FAN_CHECKOUT_STATE_JS and _FAN_PAY_FIND in FAN_MARK_PAY_JS
+        assert "/^skip and proceed to checkout$/i" in _FAN_PAY_FIND
+
+    def test_the_header_counts_only_on_the_deals_page(self):
+        # Any other button with the cart total gone keeps the old rule: a total in the same read.
+        outcome, clicks = self._checkout([
+            {"path": "https://www.fanatical.com/en/cart", "total": "€0.00", "proceed": True},
+            {"path": "https://www.fanatical.com/en/cart", "total": None, "navTotal": "€0.00", "pay": "Complete order"},
+        ])
+        assert outcome[0] == "stuck" and clicks == ["Proceed to checkout"]
+
     def test_a_claim_that_never_reaches_the_cart_does_not_ask_you(self):
         # A refused claim used to wait minutes and then tell you the game was in your cart.
         assert 'if not await self._fanatical_click(FAN_MARK_MAIN_JS, "Claim button"):' in self.BLOCK
@@ -1337,3 +1416,431 @@ class TestDuplicateTitles:
     def test_a_title_with_no_latin_letters_never_matches(self):
         # It normalises to nothing, and nothing used to be a fragment of every title.
         assert title_key("東方紅魔郷") == "" and title_key(None) == ""
+
+
+class TestItchBundles:
+    """GamerPower's "Free itch.io Games Bundle" failed every run: itch.io hands a free bundle out as downloads only."""
+
+    def test_a_bundle_page_is_known_by_its_number(self):
+        from src.stores.gamerpower import itch_bundle_number
+        assert itch_bundle_number("https://itch.io/b/3955/itching-for-games-3") == "3955"
+        assert itch_bundle_number("https://dev.itch.io/b/12") == "" and itch_bundle_number("https://itch.io/s/1/sale") == ""
+        assert itch_bundle_number("https://evil.example/b/3955") == ""
+
+    def test_every_bundle_gets_an_id_of_its_own(self):
+        source = (Path(__file__).resolve().parent.parent / "src" / "stores" / "gamerpower.py").read_text(encoding="utf-8")
+        assert 'game_id = f"itch.io/b/{bundle}" if bundle else (itch_game_id(url) or giveaway_url)' in source
+
+    def test_only_the_free_path_is_ever_pressed(self):
+        from src.stores.gamerpower import ITCH_CLAIM_CONTROLS, ITCH_NO_THANKS
+        # The box also holds "Pay with Card", "Pay with PayPal", "Add $5" and "Add $20"; the finder knows only this one.
+        assert ".direct_download_btn" in ITCH_NO_THANKS and "/no thanks/i" in ITCH_NO_THANKS
+        assert "checkout_btn" not in ITCH_NO_THANKS and "add_btn" not in ITCH_NO_THANKS
+        # The claim controls of the games inside are counted for the log, never clicked.
+        assert ".click(" not in ITCH_CLAIM_CONTROLS and ITCH_CLAIM_CONTROLS.strip().endswith(".length")
+
+    class _Page:
+        def __init__(self, free_path=True):
+            self.free_path, self.visited = free_path, []
+
+        async def evaluate(self, script):
+            if "direct_download_btn" in script:
+                return self.free_path
+            if script.strip().endswith(".length"):
+                return 0
+            return ""
+
+        async def get(self, url):
+            self.visited.append(url)
+
+    def _walk(self, free_path=True, button=True):
+        from src.stores.gamerpower import GamerPowerClaimer
+        clicks, page = [], self._Page(free_path)
+
+        async def click(finder, label):
+            clicks.append(label)
+            return button
+
+        async def nothing(*args, **kwargs):
+            return "page"
+
+        stub = type("Stub", (), {})()
+        stub.page, stub._click_like_a_hand, stub.sleep, stub._page_brief = page, click, nothing, nothing
+        walked = asyncio.run(GamerPowerClaimer._itch_claim_bundle(stub, "Free itch.io Games Bundle"))
+        return walked, clicks, page.visited
+
+    def test_the_free_path_ends_as_a_download_only(self):
+        # Live 2.11: after "No thanks" My purchases still said "You haven't purchased any bundles yet".
+        walked, clicks, visited = self._walk()
+        assert walked == "download-only" and clicks == ["Get the Bundle", "No thanks, just take me to the downloads"]
+        assert visited == []
+
+    def test_without_a_free_path_nothing_more_is_pressed(self):
+        walked, clicks, visited = self._walk(free_path=False)
+        assert walked == "not-free" and clicks == ["Get the Bundle"] and visited == []
+
+    def test_a_page_without_the_button_is_blocked(self):
+        walked, clicks, _ = self._walk(button=False)
+        assert walked == "blocked" and clicks == ["Get the Bundle"]
+
+    def test_a_bundle_is_reported_once_as_a_download_only(self, monkeypatch):
+        from src.stores import gamerpower as gp
+
+        async def _yes(*_a, **_kw):
+            return True
+
+        async def _no(*_a, **_kw):
+            return False
+
+        async def _nothing(*_a, **_kw):
+            return None
+
+        async def _download_only(_title):
+            return "download-only"
+
+        remembered, loads = [], []
+
+        async def _remember(game_id, title, url, status):
+            remembered.append((game_id, status))
+            return True
+
+        async def _get(url):
+            loads.append(url)
+
+        monkeypatch.setattr(gp.cfg, "dryrun", False)
+        claimer = gp.GamerPowerClaimer.__new__(gp.GamerPowerClaimer)
+        claimer.notify_games = []
+        claimer.page = type("Page", (), {"get": staticmethod(_get)})()
+        for name, stub in (("_itch_recently_download_only", _no), ("_itch_session_ready", _yes),
+                           ("_itch_owns_this", _no), ("_itch_claim_bundle", _download_only),
+                           ("_remember_itchio", _remember), ("sleep", _nothing)):
+            monkeypatch.setattr(claimer, name, stub)
+
+        url = "https://itch.io/b/3955/itching-for-games-3"
+        asyncio.run(claimer._claim_itchio_game({"title": "Free itch.io Games Bundle", "final_url": url}))
+        assert remembered == [("itch.io/b/3955", "skipped:download-only")]
+        assert claimer.notify_games[0]["status"] == gp.download_only_status(True)
+        # No second visit to look for an ownership banner a bundle never gets.
+        assert loads == [url]
+
+
+class TestKnownDownloadOnlyIsNotOpenedAgain:
+    """A download-only itch.io giveaway was opened and walked through on every run."""
+
+    @pytest.fixture
+    def db(self, monkeypatch, tmp_path):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from src.core.database import Base
+        from src.stores import gamerpower as gp
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fgc.db'}")
+
+        async def create():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        asyncio.run(create())
+        monkeypatch.setattr(gp, "async_session", async_sessionmaker(engine, expire_on_commit=False))
+        yield gp
+        asyncio.run(engine.dispose())
+
+    @staticmethod
+    def _claimer(gp):
+        claimer = gp.GamerPowerClaimer.__new__(gp.GamerPowerClaimer)
+        claimer.user, claimer.notify_games = "GamerPower", []
+        return claimer
+
+    @staticmethod
+    def _row(gp, status, days_ago, user="GamerPower"):
+        from datetime import timedelta
+
+        from src.core.database import ClaimedGame
+
+        async def add():
+            async with gp.async_session() as session:
+                extra = {} if days_ago is None else {
+                    "page_checked": (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()}
+                session.add(ClaimedGame(store="itchio", user=user, game_id="itch.io/b/3955", title="Free itch.io Games Bundle",
+                                        url="https://itch.io/b/3955/itching-for-games-3", status=status, extra=json.dumps(extra)))
+                await session.commit()
+        asyncio.run(add())
+
+    @pytest.mark.parametrize("status,days,skipped", [
+        ("skipped:download-only", 1, True), ("skipped:download-only", 4, False), ("skipped:download-only", None, False),
+        ("failed:unconfirmed", 1, False), ("claimed", 1, False)])
+    def test_only_a_download_only_read_lately_is_left_alone(self, db, status, days, skipped):
+        self._row(db, status, days)
+        assert asyncio.run(self._claimer(db)._itch_recently_download_only("itch.io/b/3955")) is skipped
+
+    def test_another_user_s_row_does_not_count(self, db):
+        self._row(db, "skipped:download-only", 1, user="someone else")
+        assert asyncio.run(self._claimer(db)._itch_recently_download_only("itch.io/b/3955")) is False
+
+    def test_a_known_download_only_is_not_opened_at_all(self, db):
+        self._row(db, "skipped:download-only", 1)
+        claimer, loads = self._claimer(db), []
+
+        class Page:
+            async def get(self, url):
+                loads.append(url)
+        claimer.page = Page()
+        asyncio.run(claimer._claim_itchio_game({"title": "Free itch.io Games Bundle",
+                                                "final_url": "https://itch.io/b/3955/itching-for-games-3"}))
+        # Still listed as it was on the runs that opened it, which the summary hides unless asked to show it.
+        assert loads == [] and claimer.notify_games == [{"title": "Free itch.io Games Bundle (Itch.io)", "url":
+                                                         "https://itch.io/b/3955/itching-for-games-3", "status": "skipped:download-only"}]
+
+    def test_every_outcome_notes_when_the_page_was_read(self, db):
+        from sqlalchemy import select
+
+        from src.core.database import ClaimedGame
+
+        claimer = self._claimer(db)
+        assert asyncio.run(claimer._remember_itchio("itch.io/b/3955", "Free itch.io Games Bundle",
+                                                    "https://itch.io/b/3955/", "skipped:download-only")) is True
+
+        async def read():
+            async with db.async_session() as session:
+                return (await session.execute(select(ClaimedGame))).scalars().first()
+        assert "page_checked" in json.loads(asyncio.run(read()).extra)
+
+
+class TestASignInThatStaysClosedNamesWhatWaits:
+    def test_a_key_is_called_a_key(self, monkeypatch):
+        from src.core import run_state
+        from src.stores.gamerpower import GamerPowerClaimer
+        claimer = GamerPowerClaimer()
+
+        async def nothing(*_a, **_kw):
+            return False
+        claimer.page = type("Page", (), {"evaluate": staticmethod(nothing)})()
+        monkeypatch.setattr(claimer, "_human_challenge_present", nothing)
+        monkeypatch.setattr(claimer, "_wait_for_vnc_login", nothing)
+        assert asyncio.run(claimer._confirm_side_login("Fanatical", nothing, item="key", count=2)) is False
+        # Review 7.11: two keys waiting were reported as one.
+        assert [(store, item, n) for (store, _why, item), n in run_state.waiting_for_you().items()] == [("fanatical", "key", 2)]
+
+
+class TestASignInWithoutCredentialsCountsWhatWaits:
+    def test_the_keys_waiting_are_counted_too(self, monkeypatch):
+        # Review 8.11: without FANATICAL_EMAIL only a debug line said a key was waiting.
+        from src.core import run_state
+        from src.stores import gamerpower as gp
+        claimer = gp.GamerPowerClaimer()
+        monkeypatch.setattr(gp.cfg, "fanatical_email", "")
+        monkeypatch.setattr(gp.cfg, "fanatical_password", "")
+
+        async def nothing(*_a, **_kw):
+            return None
+
+        async def no(*_a, **_kw):
+            return False
+
+        class Page:
+            async def evaluate(self, _js):
+                return ""
+
+            async def get(self, _url):
+                return None
+        claimer.page = Page()
+        for name, stub in (("sleep", nothing), ("_fanatical_signed_in", no), ("_wait_for_vnc_login", no),
+                           ("_no_credentials_notice", lambda *_a: "")):
+            monkeypatch.setattr(claimer, name, stub)
+        assert asyncio.run(claimer._fanatical_session(gp.FAN_HOME_URL, item="key", count=2)) is False
+        assert [(store, item, n) for (store, _why, item), n in run_state.waiting_for_you().items()] == [("fanatical", "key", 2)]
+
+
+class TestAMissingFanaticalKeyIsFetchedLater:
+    """Owner, 4.11: a key Fanatical did not show at the claim is read from Order History & Keys and goes to Steam."""
+
+    @pytest.fixture
+    def db(self, monkeypatch, tmp_path):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from src.core.database import Base
+        from src.stores import gamerpower as gp
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fgc.db'}")
+
+        async def create():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        asyncio.run(create())
+        monkeypatch.setattr(gp, "async_session", async_sessionmaker(engine, expire_on_commit=False))
+        monkeypatch.setattr(gp.cfg, "dryrun", False)
+        yield gp
+        asyncio.run(engine.dispose())
+
+    @staticmethod
+    def _row(gp, code=None, extra="{}", status="claimed", game_id="letter-quest-grimms-journey-remastered"):
+        from src.core.database import ClaimedGame
+
+        async def add():
+            async with gp.async_session() as session:
+                session.add(ClaimedGame(store="fanatical", user="GamerPower", game_id=game_id,
+                                        title="Letter Quest: Grimm's Journey Remastered", url="", status=status,
+                                        code=code, extra=extra))
+                await session.commit()
+        asyncio.run(add())
+
+    @staticmethod
+    def _read(gp):
+        from sqlalchemy import select
+
+        from src.core.database import ClaimedGame
+
+        async def read():
+            async with gp.async_session() as session:
+                return (await session.execute(select(ClaimedGame))).scalars().first()
+        return asyncio.run(read())
+
+    def _claimer(self, gp, item=None, key="ABCDE-FGHIJ-KLMNO", signed_in=True, said="", status="COMPLETE"):
+        claimer = gp.GamerPowerClaimer.__new__(gp.GamerPowerClaimer)
+        claimer.user, claimer.notify_games, claimer.visits = "GamerPower", [], []
+        claimer._fan_reveal_said = ""
+
+        async def session(url, item="giveaway", count=1):
+            claimer.visits.append(url)
+            claimer.session_item = item
+            return signed_in
+
+        async def nothing(*_a, **_kw):
+            return None
+
+        async def get(url):
+            claimer.visits.append(url)
+
+        claimer.sleep = nothing
+        claimer.page = type("Page", (), {"get": staticmethod(get)})()
+
+        async def orders():
+            return [{"_id": "o1", "status": "COMPLETE", "items": [{"name": "Letter Quest: Grimm's Journey Remastered"}]}]
+
+        async def order_item(oid, game_id, title, ours=False):
+            return {"oid": oid, "bid": None, "status": status, "item": item or {"_id": "p1", "drm": {"steam": True}}}
+
+        async def reveal(found, title):
+            claimer.revealed = True
+            claimer._fan_reveal_said = said
+            return key
+
+        claimer._fanatical_session, claimer._fanatical_orders = session, orders
+        claimer._fanatical_order_item, claimer._fanatical_reveal_key = order_item, reveal
+        return claimer
+
+    def test_a_claim_without_its_key_is_due_and_a_keyed_one_is_not(self, db):
+        self._row(db)
+        self._row(db, code="ABCDE-FGHIJ-KLMNO", game_id="spooky-cats")
+        due = asyncio.run(self._claimer(db)._fanatical_keys_due())
+        assert [row.game_id for row in due] == ["letter-quest-grimms-journey-remastered"]
+
+    def test_the_key_from_the_orders_is_left_for_steam(self, db):
+        from src.stores.steam import is_waiting_steam_key
+        self._row(db)
+        claimer = self._claimer(db)
+        asyncio.run(claimer._fanatical_collect_keys(asyncio.run(claimer._fanatical_keys_due())))
+        row = self._read(db)
+        # The shop first, then Order History & Keys, the way a person gets there.
+        assert claimer.visits == [db.FAN_HOME_URL, db.FAN_ORDERS_URL] and row.code == "ABCDE-FGHIJ-KLMNO"
+        # A failed sign-in here is reported as a key waiting, not a giveaway.
+        assert claimer.session_item == "key"
+        assert is_waiting_steam_key(row.status, row.code, row.extra)
+
+    def test_a_key_that_still_does_not_show_is_looked_for_again_later(self, db):
+        self._row(db)
+        claimer = self._claimer(db, key="")
+        asyncio.run(claimer._fanatical_collect_keys(asyncio.run(claimer._fanatical_keys_due())))
+        assert not self._read(db).code and asyncio.run(claimer._fanatical_keys_due()) == []
+
+    def test_a_bundle_or_another_store_s_key_is_not_looked_for_again(self, db):
+        self._row(db)
+        claimer = self._claimer(db, item={"_id": "p1", "type": "bundle"})
+        asyncio.run(claimer._fanatical_collect_keys(asyncio.run(claimer._fanatical_keys_due())))
+        assert json.loads(self._read(db).extra)["key_skip"] and not self._read(db).code
+
+    def test_an_e_mailed_code_is_left_to_you_at_once(self, db):
+        # Only you can type that code; asking again would only send more mail.
+        self._row(db)
+        claimer = self._claimer(db, key="", said="email")
+        asyncio.run(claimer._fanatical_collect_keys(asyncio.run(claimer._fanatical_keys_due())))
+        assert "e-mails a code" in json.loads(self._read(db).extra)["key_skip"]
+
+    def test_a_key_that_never_shows_is_given_up_after_five_looks(self, db):
+        self._row(db, extra=json.dumps({"key_looks": 4}))
+        claimer = self._claimer(db, key="")
+        asyncio.run(claimer._fanatical_collect_keys(asyncio.run(claimer._fanatical_keys_due())))
+        extra = json.loads(self._read(db).extra)
+        assert extra["key_looks"] == 5 and "after 5 looks" in extra["key_skip"]
+
+    def test_an_unfinished_order_is_not_revealed(self, db):
+        self._row(db)
+        claimer = self._claimer(db, status="INITIALISED")
+        asyncio.run(claimer._fanatical_collect_keys(asyncio.run(claimer._fanatical_keys_due())))
+        assert not getattr(claimer, "revealed", False) and not self._read(db).code
+
+    def test_owned_rows_and_other_users_are_not_due(self, db):
+        self._row(db, status="existed")
+        self._row(db, game_id="other", status="claimed and activated")
+        assert asyncio.run(self._claimer(db)._fanatical_keys_due()) == []
+
+    def test_the_side_stores_run_even_when_gamerpower_found_nothing_new(self):
+        # Review 4.11: "if sides and routed" never reached the key look once every giveaway was done.
+        source = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        side = source.split("# Last: the sites with no module of their own", 1)[1][:400]
+        assert "if sides:" in side and "if sides and routed:" not in source
+
+    def test_a_dry_run_reveals_nothing(self, db, monkeypatch):
+        monkeypatch.setattr(db.cfg, "dryrun", True)
+        self._row(db)
+        claimer = self._claimer(db)
+        asyncio.run(claimer._fanatical_collect_keys(asyncio.run(claimer._fanatical_keys_due())))
+        assert claimer.visits == [] and not self._read(db).code
+
+    def test_fanatical_opens_for_a_missing_key_alone(self, monkeypatch):
+        from src.stores import gamerpower as gp
+        claimer, started, collected = gp.GamerPowerClaimer.__new__(gp.GamerPowerClaimer), [], []
+
+        async def due():
+            return ["row"]
+
+        async def start(*_a, **_kw):
+            started.append(True)
+
+        async def collect(rows):
+            collected.append(rows)
+
+        async def nothing(*_a, **_kw):
+            return None
+
+        claimer.notify_games = []
+        monkeypatch.setattr(claimer, "_fanatical_keys_due", due)
+        monkeypatch.setattr(claimer, "_side_store_selected", lambda store: store == "fanatical")
+        monkeypatch.setattr(claimer, "start_browser", start)
+        monkeypatch.setattr(claimer, "_fanatical_collect_keys", collect)
+        monkeypatch.setattr(claimer, "close_browser", nothing)
+        asyncio.run(claimer.run({}))
+        assert started == [True] and collected == [["row"]]
+
+    def test_a_fanatical_prompt_nobody_answered_skips_the_key_look(self, monkeypatch):
+        from src.core import run_state
+        from src.stores import gamerpower as gp
+        claimer, collected = gp.GamerPowerClaimer.__new__(gp.GamerPowerClaimer), []
+
+        async def due():
+            return ["row"]
+
+        async def nothing(*_a, **_kw):
+            return None
+
+        async def collect(rows):
+            collected.append(rows)
+
+        claimer.notify_games = []
+        run_state.mark_unanswered("fanatical")
+        monkeypatch.setattr(claimer, "_fanatical_keys_due", due)
+        monkeypatch.setattr(claimer, "_side_store_selected", lambda store: store == "fanatical")
+        monkeypatch.setattr(claimer, "start_browser", nothing)
+        monkeypatch.setattr(claimer, "_fanatical_collect_keys", collect)
+        monkeypatch.setattr(claimer, "close_browser", nothing)
+        asyncio.run(claimer.run({}))
+        assert collected == []

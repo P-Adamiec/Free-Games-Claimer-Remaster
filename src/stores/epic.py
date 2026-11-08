@@ -12,10 +12,14 @@ import httpx
 import nodriver as uc
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.core.claimer import (BaseClaimer, CHALLENGE_JS, OTP_KEY_ATTEMPTS, account_key, older_than, row_extra,
-                              track_missing_base)
+from src.core.claimer import (BaseClaimer, CAPTCHA_ANSWER_JS, CHALLENGE_JS, OTP_KEY_ATTEMPTS, account_key, answer_filled,
+                              captcha_answer_note, challenge_needs_you, giveaway_end, mark_page_checked, RECHECK_DAYS,
+                              older_than, row_extra, text_finder, track_missing_base)
 from src.core.config import cfg
-from src.core.run_state import CAPTCHA_UNSOLVED, needs_you, waits_for_nobody
+from src.core.display import vnc_viewers
+from src.core.run_state import (CAPTCHA_ENDS, CAPTCHA_UNSOLVED, book, booking_until, ends_before_next_run, is_booked,
+                                lost_before_next_run, mark_answered, mark_unanswered, needs_you, next_run, unbook_title,
+                                utc_text, waits_for_nobody)
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
 from src.stores.epic_mobile import fetch_mobile_free_games
@@ -31,10 +35,10 @@ URL_LOGIN = (
     "&noHostRedirect=true&redirectUrl=" + URL_CLAIM
 )
 
-# A game you have, or one blocked in your region, has its page read again only after this many days.
-RECHECK_DAYS = 3
 # What a page said that does not change within a week's promotion.
 RECHECKED = ("claimed", "existed", "skipped:region")
+# Not yours to get anyway, so after a captcha they wait without being counted as waiting for you.
+NOT_CLAIMABLE = ("failed:missing_base", "skipped:not-free")
 
 
 # Reads the product page's main action button. The order matters: an "In Library" chip in a
@@ -84,53 +88,21 @@ JSON.stringify((() => {
 })())
 """
 
-# A checked spot to click __FINDER__'s element at, or why not: missing, disabled, hidden, offscreen (dy) or covered.
-BOX_JS = """
-JSON.stringify((() => {
-    const el = (__FINDER__)();
-    if (!el) return { reason: 'missing' };
-    if (el.disabled) return { reason: 'disabled' };
-    const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return { reason: 'hidden' };
-    if (r.top < 0 || r.bottom > innerHeight) return { reason: 'offscreen', dy: Math.round(r.top + r.height / 2 - innerHeight / 2) };
-    const x0 = Math.max(r.left, 1), x1 = Math.min(r.right, innerWidth - 1);
-    const y0 = Math.max(r.top, 1), y1 = Math.min(r.bottom, innerHeight - 1);
-    if (x1 <= x0 || y1 <= y0) return { reason: 'hidden' };
-    for (let i = 0; i < 8; i++) {
-        const x = Math.round(x0 + (x1 - x0) * (0.2 + Math.random() * 0.6));
-        const y = Math.round(y0 + (y1 - y0) * (0.2 + Math.random() * 0.6));
-        const hit = document.elementFromPoint(x, y);
-        const link = hit && hit.closest('a');
-        if (hit && (hit === el || el.contains(hit)) && !(link && link !== el && el.contains(link)))
-            return { x, y, key: el.tagName + '|' + (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60) };
-    }
-    return { reason: 'covered' };
-})())
-"""
-
-# The last resort when the wheel cannot move a page, e.g. inside a dialog that locks scrolling.
-SCROLL_INTO_VIEW_JS = "(() => { const el = (__FINDER__)(); if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' }); })()"
-
-# A visible, enabled element of this tag whose text is the wanted one, or (unless exact) contains it.
-TEXT_FINDER = r"""() => {
-    const norm = b => (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const usable = b => { const r = b.getBoundingClientRect(), s = getComputedStyle(b);
-        return !b.disabled && r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
-    const all = [...document.querySelectorAll(__TAG__)].filter(usable);
-    return all.find(b => norm(b) === __TEXT__)__INCLUDES__;
-}"""
-
-
-def text_finder(text: str, tag: str = "button", exact: bool = False) -> str:
-    """A finder for BOX_JS: the button whose text is `text`, or contains it unless exact."""
-    want = json.dumps(text.strip().lower())
-    return (TEXT_FINDER.replace("__TAG__", json.dumps(tag)).replace("__TEXT__", want)
-            .replace("__INCLUDES__", "" if exact else f" || all.find(b => norm(b).includes({want}))"))
-
-
 def tile_finder(slug: str) -> str:
     """A finder for BOX_JS: a shown link to this game's page, like its tile on the free games list."""
     return TILE_FINDER.replace("__SHOWN__", SHOWN).replace("__WANT__", json.dumps("/" + slug.strip("/").lower()))
+
+
+def game_ends(free_games: list[dict], extra_games: list[dict] | None) -> dict:
+    """When each game's giveaway ends, by slug: Epic's own date first, GamerPower's only for a game Epic gave none."""
+    ends = {g["url"].rstrip("/").split("/")[-1]: giveaway_end(g.get("ends")) for g in free_games}
+    for g in extra_games or []:
+        slug = (g.get("final_url") or "").rstrip("/").split("/")[-1]
+        if slug and ends.get(slug) is None:
+            # GamerPower names only the day (23:59, while Epic ended Sorry We're Closed at 16:00 UTC), so its start counts.
+            end = giveaway_end(g.get("end_date"))
+            ends[slug] = end.replace(hour=0, minute=0, second=0, microsecond=0) if end else None
+    return ends
 
 
 def masked_email(email: str | None) -> str:
@@ -186,6 +158,8 @@ SAVED_ACCOUNT_FINDER = r"""() => {
 USE_ANOTHER_ACCOUNT = "() => [...document.querySelectorAll('#use-different-account')].filter(__SHOWN__)[0]".replace(
     "__SHOWN__", SHOWN)
 HAS_SAVED_ACCOUNTS_JS = "!!document.querySelector('[id^=\"account-\"]')"
+# What Epic prints when it will not take what was sent around a check (#46, #100).
+STALE_ANSWER_JS = "(document.body?.innerText || '').toLowerCase().includes('refresh the page')"
 FIND_ADD_TO_LIBRARY = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b =>
     (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase().includes('add to library'))""".replace("__SHOWN__", SHOWN)
 FIND_I_ACCEPT = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__).find(b => {
@@ -271,10 +245,32 @@ class EpicGamesClaimer(BaseClaimer):
         super().__init__()
         # Mobile game URL -> "Android"/"iOS", so claims can be told apart (same title on every platform).
         self._platform_labels: dict[str, str] = {}
+        # Games whose checkout puzzle you were already asked to solve this run, so a second one does not ask again.
+        self._checkout_asked: set[str] = set()
+        # Games whose checkout check did not clear this run, so it is not waited for twice; the puzzles among them stop the run.
+        self._checkout_stuck: set[str] = set()
+        self._checkout_puzzles: set[str] = set()
+        # Puzzles that went to you over VNC and vanished with no answer, per game: solved or expired, the order decides.
+        self._checkout_handed: dict[str, int] = {}
+        # When each game's giveaway ends (by slug), and that of the game being claimed, for a puzzle on its last chance.
+        self._game_ends: dict[str, datetime | None] = {}
+        self._ends_now: datetime | None = None
+        self._claiming_url = ""
+        self._from_list = False
+        # A meeting in noVNC claims only the kept games; with you there every puzzle is yours at once.
+        self._meeting = False
+        self._with_you = False
+        # Who watched noVNC when you were last asked, so only a later connection counts as you coming.
+        self._seen_at_prompt: set | None = None
 
-    async def run(self, extra_games: list | None = None) -> None:
-        """Main entry point: detect free games and claim them."""
+    async def run(self, extra_games: list | None = None, booked_items: list | None = None, with_you: bool = False) -> None:
+        """Main entry point: detect free games and claim them, or only the games kept for a meeting in noVNC."""
         logger.debug("Starting Epic Games claiming flow")
+        if booked_items is not None:
+            self._meeting, self._with_you = True, with_you
+            # You connected, so the prompt nobody answered earlier in this run does not hold back the sign-in or this one.
+            if with_you:
+                mark_answered(self.store_name)
         try:
             # Epic REQUIRES a visible browser window (headful mode).
             # Running headless triggers captcha challenges from their anti-bot system.
@@ -296,6 +292,22 @@ class EpicGamesClaimer(BaseClaimer):
                 logger.error("Aborting Epic Games flow due to login failure.")
                 if cfg.notify_errors:
                     await self.notify("epic-games: could not sign in, no games were claimed.")
+                return
+
+            if booked_items is not None:
+                held = 0
+                for item in booked_items:
+                    url = item["data"]
+                    self._game_ends[url.rstrip("/").split("/")[-1]] = item["ends"]
+                    if item.get("platform"):
+                        self._platform_labels[url] = item["platform"]
+                    # A puzzle nobody answered at this meeting either: only a game kept on its last run is still opened.
+                    if waits_for_nobody(self.store_name) and not item["last_chance"]:
+                        held += 1
+                        self.notify_games.append({"title": item["title"], "url": url, "status": "failed:captcha"})
+                        continue
+                    await self._claim_game(url, from_list=item.get("from_list", False))
+                self._captcha_held(held, "game")
                 return
 
             # Step 2: Find which games are currently free
@@ -325,6 +337,7 @@ class EpicGamesClaimer(BaseClaimer):
             # --- Claim each game, then whatever GamerPower found for Epic ---
             # Mobile games have no tile on the free games list, so they are opened by their address.
             todo = [(game["url"], game["url"] not in self._platform_labels) for game in free_games]
+            self._game_ends = game_ends(free_games, extra_games)
             handled = {url.rstrip("/").split("/")[-1] for url, _ in todo}
             for game in (extra_games or []):
                 if game["final_url"].rstrip("/").split("/")[-1] in handled:
@@ -332,9 +345,7 @@ class EpicGamesClaimer(BaseClaimer):
                     continue
                 logger.info("🎮 [GamerPower] '%s' → Epic Games", game.get("title", "Unknown"))
                 todo.append((game["final_url"], False))
-            for index, (url, from_list) in enumerate(todo):
-                if self._captcha_stops_store(len(todo) - index, "game"):
-                    break
+            for url, from_list in todo:
                 await self._claim_game(url, from_list=from_list)
 
         except Exception as exc:
@@ -496,13 +507,16 @@ class EpicGamesClaimer(BaseClaimer):
         mfa_manual = False
         account_choice = False
         other_account_tried = False
+        # One automatic finish after a check you cleared; another check means Epic does not trust this sign-in (#100).
+        resumed_after_check = False
         for attempt in range(3):
             # A prompt nobody answered means nobody will answer the next two either.
             if waits_for_nobody(self.store_name):
                 logger.warning("Epic is waiting for you, so the remaining attempts are skipped.")
                 needs_you(self.store_name, 0, "game")
                 return False
-            logger.warning("Not signed in – attempting automated login (attempt %d/3)…", attempt + 1)
+            # The first try is routine after a session ran out, only a further one means something is in the way.
+            (logger.info if attempt == 0 else logger.warning)("Not signed in – attempting automated login (attempt %d/3)…", attempt + 1)
 
             if attempt > 0:
                 await self.page.get("https://store.epicgames.com/")
@@ -547,11 +561,11 @@ class EpicGamesClaimer(BaseClaimer):
                         account_choice = True
                         break
 
-                # 2FA code screen: fill in the TOTP if EG_OTP_KEY is set, otherwise hand it to the user.
-                if await self._mfa_prompt_present():
+                # 2FA code screen: fill in the TOTP if EG_OTP_KEY is set, otherwise hand it to the user; a check on it comes first.
+                if await self._mfa_prompt_present() and not await self._human_challenge_present():
                     if not cfg.eg_otp_key or otp_tried >= OTP_KEY_ATTEMPTS:
-                        # Seed gone or absent: one recovery code, then it is over to you.
-                        if not backup_tried and await self._fill_backup_code():
+                        # Seed gone or absent: one recovery code, then it is over to you; never one after a check (#100).
+                        if not backup_tried and not resumed_after_check and await self._fill_backup_code():
                             backup_tried = True
                             await self.sleep(3)
                             continue
@@ -601,10 +615,15 @@ class EpicGamesClaimer(BaseClaimer):
                 except Exception:
                     pass
 
-                # A check is yours to clear, and then the bot sends the filled form itself.
+                # A check is yours to clear, and then the bot finishes the sign-in itself, once per run.
                 if wait_sec >= 4 and await self._human_challenge_present():
                     logger.warning("Captcha / security challenge detected during Epic login.")
-                    if await self._wait_out_challenge("Epic", store_key=self.store_name)                             and await self._press_sign_in():
+                    if resumed_after_check:
+                        # Another check after the bot finished once: it may still pass by itself, but it is never asked twice.
+                        if await self._wait_out_challenge("Epic", store_key=self.store_name, ask=False):
+                            continue
+                    elif await self._wait_out_challenge("Epic", store_key=self.store_name) and await self._resume_after_check():
+                        resumed_after_check = True
                         continue
                     challenge_blocked = True
                     break
@@ -612,7 +631,7 @@ class EpicGamesClaimer(BaseClaimer):
                 await self.sleep(1)
 
             # The wait loop can also run out of time with the code screen still up (issue #46).
-            if not mfa_manual and await self._mfa_prompt_present():
+            if not (mfa_manual or challenge_blocked) and await self._mfa_prompt_present():
                 mfa_manual = True
 
             # A code screen or a captcha is yours to finish, so the page is left exactly as it stands.
@@ -652,7 +671,9 @@ class EpicGamesClaimer(BaseClaimer):
         else:
             custom_msg = self._vnc_notice(
                 "Epic Games: login needs you",
-                "A captcha or security challenge is blocking automated sign-in. Open the browser, solve it and finish logging in.",
+                "A captcha or security challenge is blocking automated sign-in. Open the browser, solve it and finish logging in. "
+                "If Epic says 'Incorrect response. Please refresh the page.', click the reload arrow in the browser window "
+                "and sign in again.",
             )
         if await self._wait_for_vnc_login(_is_logged_in, custom_msg=custom_msg):
             self.user = await _get_display_name() or cfg.eg_email or "EpicUser"
@@ -693,6 +714,7 @@ class EpicGamesClaimer(BaseClaimer):
         try:
             first_box = await self.page.select('input[name="code-input-0"]', timeout=5)
             if not first_box:
+                logger.debug("No code boxes on the page, so no code was typed.")
                 return False
             await first_box.clear_input()
             await self.sleep(0.5)
@@ -773,15 +795,43 @@ class EpicGamesClaimer(BaseClaimer):
 
     async def _press_sign_in(self) -> bool:
         """Send the sign-in form again, for when a human check interrupted one you had filled."""
-        # No text fallback: "Sign in" also matches "Sign in with Apple" (#72).
-        button = await self.page.select("#sign-in", timeout=5)
+        # No text fallback: "Sign in" also matches "Sign in with Apple" (#72); #continue is the e-mail step's button (#100).
+        button = await self.page.select("#sign-in", timeout=5) or await self.page.select("#continue", timeout=1)
         if not button:
-            logger.debug("No sign-in button came back after the check.")
+            logger.debug("Neither the sign-in nor the continue button came back after the check.")
             return False
         logger.info("Human check cleared, finishing the sign-in.")
         await button.click()
         await self.sleep(6)
         return True
+
+    async def _resume_after_check(self) -> bool:
+        """Finish a sign-in a human check interrupted, once: the step it stopped, or a reload when Epic asks for one (#100)."""
+        if url_has_allowed_host(str(await self.page.evaluate("window.location.href") or ""), "store.epicgames.com"):
+            return True
+        stale = False
+        # Epic's answer to the check can come a moment after the check itself is gone.
+        for _ in range(4):
+            if stale := bool(await self.page.evaluate(STALE_ANSWER_JS)):
+                break
+            await self.sleep(1)
+        logger.debug("After the check Epic shows: %s; refresh asked: %s", await self._mfa_error_text() or "no message", stale)
+        if stale:
+            await self.page.reload(ignore_cache=False)
+            await self.sleep(4)
+        if await self.page.evaluate(HAS_SAVED_ACCOUNTS_JS):
+            return True
+        if await self._mfa_prompt_present():
+            # Without EG_OTP_KEY the code is yours, so the screen is left alone for you.
+            if cfg.eg_otp_key and await self._fill_totp():
+                logger.info("Human check cleared, entering a fresh code.")
+            return True
+        # The form goes through the bot's own steps again: they skip what is filled and type what is missing (#100).
+        if await self.page.select("#email, #password", timeout=5):
+            logger.info("Human check cleared, signing in again.")
+            await self._do_stealth_login()
+            return True
+        return await self._press_sign_in()
 
     async def _do_stealth_login(self) -> None:
         """Fill in email and password using browser-native methods.
@@ -931,7 +981,7 @@ class EpicGamesClaimer(BaseClaimer):
                     continue
 
                 # Check each promotional offer for an active 100%-off (free) deal
-                is_free_now = False
+                is_free_now, free_until = False, ""
                 for group in offers:
                     for offer in group.get("promotionalOffers", []):
                         discount = offer.get("discountSetting", {}).get("discountPercentage")
@@ -943,10 +993,10 @@ class EpicGamesClaimer(BaseClaimer):
                                 start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
                                 end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
                                 if start_dt <= now <= end_dt:
-                                    is_free_now = True
+                                    is_free_now, free_until = True, end
                             except (ValueError, TypeError):
                                 # If dates are unparseable, trust the discount
-                                is_free_now = True
+                                is_free_now, free_until = True, ""
 
                 if not is_free_now:
                     continue
@@ -955,7 +1005,7 @@ class EpicGamesClaimer(BaseClaimer):
                 url = self._build_game_url(el)
                 if url and not any(g["url"] == url for g in free_games):
                     title = el.get("title", "Unknown")
-                    free_games.append({"url": url, "title": title})
+                    free_games.append({"url": url, "title": title, "ends": free_until})
 
             logger.debug("Promo API: %d element(s), %d currently free: %s",
                          len(elements), len(free_games), [g["url"] for g in free_games])
@@ -1116,35 +1166,117 @@ class EpicGamesClaimer(BaseClaimer):
                 return True
         return False
 
-    async def _checkout_challenge_present(self) -> bool:
-        """A human check on the page, or inside the checkout frame where the page check cannot look."""
-        if await self._human_challenge_present():
-            return True
+    async def _checkout_challenge_reason(self) -> str:
+        """What reads as a human check on the page, or inside the checkout frame where the page check cannot look."""
+        reason = await self._human_challenge_reason()
+        if reason:
+            return reason
         try:
             frame_id = self._find_purchase_frame(await self.page.send(uc.cdp.page.get_frame_tree()))
             if not frame_id:
-                return False
+                return ""
             ctx_id = await self.page.send(
                 uc.cdp.page.create_isolated_world(frame_id=frame_id, grant_univeral_access=True)
             )
-            return bool(await self._eval_in_frame(ctx_id, CHALLENGE_JS))
+            found = str(await self._eval_in_frame(ctx_id, CHALLENGE_JS) or "")
+            return f"checkout frame, {found}" if found else ""
         except Exception as exc:
             logger.debug("Could not look for a human check in the checkout frame: %s", exc)
+            return ""
+
+    async def _checkout_challenge_present(self) -> bool:
+        """A human check on the page or in the checkout frame."""
+        return bool(await self._checkout_challenge_reason())
+
+    async def _captcha_answer_lengths(self) -> list:
+        """How long the captcha answer is on the page and in the checkout frame, for the log."""
+        lengths = []
+        try:
+            lengths.append(await self.page.evaluate(CAPTCHA_ANSWER_JS))
+            frame_id = self._find_purchase_frame(await self.page.send(uc.cdp.page.get_frame_tree()))
+            if frame_id:
+                ctx_id = await self.page.send(
+                    uc.cdp.page.create_isolated_world(frame_id=frame_id, grant_univeral_access=True)
+                )
+                lengths.append(await self._eval_in_frame(ctx_id, CAPTCHA_ANSWER_JS))
+        except Exception as exc:
+            logger.debug("Could not read the captcha answer field: %s", exc)
+        return lengths
+
+    def _book(self, title: str, url: str, ends: datetime | None, last_chance: bool) -> bool:
+        """Keep a game whose puzzle nobody solved for a meeting with you in noVNC; False when there is no time for one."""
+        viewers = vnc_viewers()
+        if self._meeting or not url or viewers is None:
+            # Outside the container nobody can be seen opening noVNC, so there is no meeting to wait for.
+            if viewers is None:
+                logger.debug("No noVNC to watch here, so '%s' is not kept for a meeting.", title)
             return False
+        until = booking_until(ends, last_chance)
+        if until is None:
+            logger.debug("No noVNC meeting for '%s': %s.", title,
+                         "a single run does not wait" if next_run() is None else f"too little time is left (ends {ends})")
+            return False
+        seen = self._seen_at_prompt if self._seen_at_prompt is not None else viewers
+        # The tile click and the platform tag come back at the meeting, so the game opens the way it did today.
+        if book(self.store_name, {"title": title, "data": url, "ends": ends, "last_chance": last_chance, "until": until,
+                                  "seen": set(seen), "from_list": self._from_list, "platform": self._platform_labels.get(url)}):
+            logger.info("'%s' waits for you in noVNC until %s: once you connect, the bot opens its checkout again.",
+                        title, utc_text(until))
+        return True
 
     async def _clear_checkout_challenge(self, title: str) -> bool:
-        """Hand a checkout captcha to you over VNC. True when there was none or it got solved."""
-        if not await self._checkout_challenge_present():
+        """Wait out a checkout check that passes by itself; a puzzle waits for the next run, or for you with EG_CAPTCHA_ASK."""
+        if title in self._checkout_stuck:
+            logger.debug("The checkout check for '%s' already did not clear in this run.", title)
+            return False
+        reason = await self._checkout_challenge_reason()
+        if not reason:
             return True
-        logger.debug("Human check on the checkout for '%s'.", title)
-        return await self._wait_out_challenge("Epic", store_key=self.store_name,
-                                              present_fn=self._checkout_challenge_present)
+        logger.debug("Human check on the checkout for '%s': %s", title, reason)
+        # A Cloudflare check passes by itself after about two minutes (#95); a puzzle only expires unsolved (TODO 67).
+        person = challenge_needs_you(reason)
+        last_chance = ends_before_next_run(self._ends_now)
+        # On its last run a game gets a second ask, never a third: an expired puzzle reads as an answer (TODO 67).
+        again = last_chance and self._checkout_handed.get(title, 0) < 2
+        ask = (title not in self._checkout_asked or again) and (cfg.eg_captcha_ask or not person or last_chance)
+        if person and self._meeting:
+            # At a meeting you are there; the bot's own last try asks nobody.
+            ask = self._with_you
+        if person and ask:
+            self._checkout_asked.add(title)
+            self._seen_at_prompt = vnc_viewers() or set()
+            if last_chance and not cfg.eg_captcha_ask and not waits_for_nobody(self.store_name):
+                ends = self._ends_now.astimezone(timezone.utc)
+                # A GamerPower end names only the day, kept at its start, so only the day is shown.
+                shown = ends.strftime("%Y-%m-%d") if (ends.hour, ends.minute) == (0, 0) else ends.strftime("%Y-%m-%d %H:%M UTC")
+                why = "before the next run" if next_run() else "and this single run does not wait"
+                logger.info("'%s' is free only until %s, %s, so you are asked to solve its captcha.", title, shown, why)
+        elif person:
+            logger.debug("A puzzle in the checkout for '%s' is not handed to you (EG_CAPTCHA_ASK off, or asked once).", title)
+        cleared = await self._wait_out_challenge(f"Epic ('{title}')", settle=12 if person else 180, store_key=self.store_name,
+                                                 present_fn=self._checkout_challenge_present,
+                                                 reason_fn=self._checkout_challenge_reason, ask=ask)
+        if not cleared:
+            self._checkout_stuck.add(title)
+            if person:
+                self._checkout_puzzles.add(title)
+                # A puzzle that was yours and stayed unsolved waits for you in noVNC.
+                if cfg.eg_captcha_ask or last_chance:
+                    self._book(title, self._claiming_url, self._ends_now, last_chance)
+        elif person and ask and self._handed_over:
+            # Solved or expired (after about two minutes) look alike here; a filled answer is a solve, else the order decides.
+            lengths = await self._captcha_answer_lengths()
+            logger.debug("The puzzle for '%s' is gone: %s.", title, captcha_answer_note(lengths))
+            if not answer_filled(lengths):
+                self._checkout_handed[title] = self._checkout_handed.get(title, 0) + 1
+        return cleared
 
     # Retry up to 2 times with exponential backoff if claiming fails
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=3, max=15), reraise=True)
     async def _claim_game(self, url: str, from_list: bool = False) -> None:
         """Claim a single free game by navigating to its page and clicking through the purchase flow."""
         self._click_counts = {}
+        self._from_list = from_list
         # Extract the game identifier from the URL (e.g. "fortnite" from ".../p/fortnite")
         game_id = url.rstrip("/").split("/")[-1]
 
@@ -1162,8 +1294,31 @@ class EpicGamesClaimer(BaseClaimer):
                 if obj.status != "skipped:region":
                     self.notify_games.append(owned_entry)
                 return
-            extra["page_checked"] = datetime.now(timezone.utc).isoformat()
-            obj.extra = json.dumps(extra)
+            self._ends_now = self._game_ends.get(game_id)
+            self._claiming_url = url
+            last_chance = ends_before_next_run(self._ends_now)
+            # After a puzzle nobody answered only a known last run is opened, where a puzzle costs nothing; a single run cannot tell one.
+            if waits_for_nobody(self.store_name) and not lost_before_next_run(self._ends_now) and not self._meeting:
+                if known or obj.status in NOT_CLAIMABLE:
+                    logger.debug("'%s' is %s, its check waits for the next run after a captcha.", game_id, obj.status)
+                    if known and obj.status != "skipped:region":
+                        self.notify_games.append(owned_entry)
+                # With EG_CAPTCHA_ASK the game is yours anyway, so it joins your noVNC meeting unopened.
+                elif not (cfg.eg_captcha_ask and self._book(title_from_slug(game_id), url, self._ends_now, False)):
+                    logger.info("'%s' waits for the next run after a captcha in Epic's checkout.", title_from_slug(game_id))
+                    needs_you(self.store_name, 1, "game", why=CAPTCHA_UNSOLVED)
+                return
+            # Each further checkout could draw another puzzle, so after one a game that needs a visit waits, unless this is its last run.
+            if self._checkout_puzzles and not cfg.eg_captcha_ask and not last_chance:
+                if known or obj.status in NOT_CLAIMABLE:
+                    logger.debug("'%s' is %s, its check waits for the next run after a captcha.", game_id, obj.status)
+                    if known and obj.status != "skipped:region":
+                        self.notify_games.append(owned_entry)
+                else:
+                    logger.info("'%s' waits for the next run after a captcha in Epic's checkout.", title_from_slug(game_id))
+                    needs_you(self.store_name, 1, "game", why=CAPTCHA_UNSOLVED)
+                return
+            mark_page_checked(obj)
 
             # A game you have, or cannot get in your region, is not worth asking you to solve a security check.
             if not await self._open_game_page(url, ask=not known, from_list=from_list):
@@ -1175,9 +1330,11 @@ class EpicGamesClaimer(BaseClaimer):
                     if obj.status != "skipped:region":
                         self.notify_games.append(owned_entry)
                 else:
-                    logger.warning("Security check on '%s' not cleared, trying again next run.", title)
+                    lost = lost_before_next_run(self._ends_now)
+                    logger.warning("Security check on '%s' not cleared, %s.", title,
+                                   "and its giveaway ends before the next run" if lost else "trying again next run")
                     self.notify_games.append({"title": title, "url": url, "status": "failed"})
-                    needs_you(self.store_name, 1, "game", why=CAPTCHA_UNSOLVED)
+                    needs_you(self.store_name, 1, "game", why=CAPTCHA_ENDS if lost else CAPTCHA_UNSOLVED)
                 await session.commit()
                 return
 
@@ -1304,25 +1461,41 @@ class EpicGamesClaimer(BaseClaimer):
 
             # The checkout page only says what it thinks happened, the library says what is true.
             # A checkout that did not finish needs one look, not three reloads of a page on a session under watch.
-            if await self._confirm_in_library(url, tries=3 if checkout_ok else 1):
+            # A puzzle you may have solved deserves the library's full time to catch up.
+            if await self._confirm_in_library(url, tries=3 if checkout_ok or title in self._checkout_handed else 1):
                 logger.info("✓ Claimed '%s' successfully!", title)
                 obj.status = "claimed"
                 obj.updated_at = datetime.now(timezone.utc)
                 notify_game["status"] = "claimed"
+                unbook_title(self.store_name, title)
             else:
+                # A puzzle handed to you that vanished with no answer and no order behind it expired unsolved.
+                if not checkout_ok and title in self._checkout_handed:
+                    self._checkout_puzzles.add(title)
+                    mark_unanswered(self.store_name)
+                    self._book(title, url, self._ends_now, ends_before_next_run(self._ends_now))
                 # Finishing it is the bot's job: a failed row is tried again on every run while the game is free.
                 if checkout_ok:
                     logger.warning("Claim of '%s' was not confirmed by the page, trying again next run.", title)
                     obj.status = "failed:unconfirmed"
                     await self.take_screenshot(f"epic_unconfirmed_{game_id}")
+                elif title in self._checkout_puzzles:
+                    later = "it waits for you in noVNC" if is_booked(self.store_name, title) else "trying again next run"
+                    logger.warning("A captcha in Epic's checkout stopped '%s', %s.", title, later)
+                    obj.status = "failed"
+                    await self.take_screenshot(f"epic_failed_{game_id}")
                 else:
                     logger.error("Could not claim '%s', trying again next run.", title)
                     obj.status = "failed"
                     await self.take_screenshot(f"epic_failed_{game_id}")
                 notify_game["status"] = "failed"
-                # A captcha nobody answered is the one part that was yours, so the summary says so.
-                if waits_for_nobody(self.store_name):
-                    needs_you(self.store_name, 1, "game", why=CAPTCHA_UNSOLVED)
+                if is_booked(self.store_name, title):
+                    # It waits for you in noVNC, listed apart in the summary; the meeting reports how it ended.
+                    self.notify_games.remove(notify_game)
+                # A captcha left unsolved is the one part a person could do, so the summary says so.
+                elif waits_for_nobody(self.store_name) or title in self._checkout_puzzles:
+                    lost = lost_before_next_run(self._ends_now)
+                    needs_you(self.store_name, 1, "game", why=CAPTCHA_ENDS if lost else CAPTCHA_UNSOLVED)
 
             await session.commit()
 
@@ -1558,106 +1731,6 @@ class EpicGamesClaimer(BaseClaimer):
         except Exception:
             logger.exception("Error in new checkout flow for '%s'.", title)
             return False
-
-    async def _read_box(self, run_js, finder: str) -> dict:
-        """BOX_JS for this finder in the page or the checkout frame; an unreadable page says so."""
-        try:
-            raw = await run_js(BOX_JS.replace("__FINDER__", finder))
-        except Exception as e:
-            return {"reason": f"unreadable ({e})"}
-        try:
-            return json.loads(raw) if isinstance(raw, str) else {"reason": "unreadable"}
-        except ValueError:
-            return {"reason": "unreadable"}
-
-    async def _page_wheel_point(self) -> tuple:
-        """A spot over the middle of the page for the mouse wheel."""
-        try:
-            vw, vh = json.loads(await self.page.evaluate("JSON.stringify([innerWidth, innerHeight])"))
-        except Exception:
-            vw, vh = 1280, 720
-        return vw * random.uniform(0.35, 0.65), vh * random.uniform(0.35, 0.65)
-
-    async def _bring_into_view(self, read, run_js, wheel_point, finder: str, label: str) -> dict:
-        """Scroll an off-screen element into view with the mouse wheel, the jump only when the wheel moves nothing."""
-        box = await read()
-        for _ in range(6):
-            if box.get("reason") != "offscreen":
-                return box
-            point = await wheel_point()
-            if not point:
-                break
-            await self._wheel_scroll(point[0], point[1], box["dy"])
-            moved = await read()
-            if moved.get("reason") == "offscreen" and abs(moved.get("dy", 0) - box["dy"]) < 5:
-                break
-            box = moved
-        if box.get("reason") == "offscreen":
-            logger.debug("The wheel does not move '%s' into view, scrolling to it directly.", label)
-            await run_js(SCROLL_INTO_VIEW_JS.replace("__FINDER__", finder))
-            box = await read()
-        return box
-
-    async def _click_took(self, read, label: str, key: str = "", before: str = "") -> bool:
-        """True after two reads in a row show the clicked element gone, disabled, covered or replaced by another one.
-
-        A script-clicked hidden element must change, not just stay hidden, to count.
-        """
-        settled = 0
-        for _ in range(8):
-            await self.sleep(0.5)
-            box = await read()
-            reason = box.get("reason", "")
-            replaced = "x" in box and key and box.get("key") != key
-            gone = reason in ("missing", "disabled", "hidden", "covered") or reason.startswith("unreadable")
-            settled = settled + 1 if replaced or (gone and reason != before) else 0
-            if settled >= 2:
-                return True
-        logger.debug("'%s' is still there and clickable after the click, it did not take.", label)
-        return False
-
-    async def _click_until_taken(self, read, run_js, wheel_point, to_page, finder: str, label: str,
-                                 tries: int = 1, allow_script: bool = False) -> bool:
-        """Click with the mouse until the click takes, at most twice per button in one checkout.
-
-        A covered element (an overlay or the captcha) is waited out and never clicked through; a script click is only
-        for a hidden element, or, when allowed, for one two mouse clicks could not move.
-        """
-        clicks = self.__dict__.setdefault("_click_counts", {})
-        reason, key = "missing", ""
-        for attempt in range(max(1, tries)):
-            if attempt:
-                await self.sleep(1)
-            box = await self._bring_into_view(read, run_js, wheel_point, finder, label)
-            if "x" not in box:
-                reason = box.get("reason", "missing")
-                if reason == "hidden":
-                    break
-                continue
-            if clicks.get(label, 0) >= 2:
-                reason = "not taken"
-                break
-            point = await to_page(box)
-            if not point:
-                reason = "covered on the page"
-                continue
-            key = box.get("key", "")
-            await self._human_click(*point)
-            clicks[label] = clicks.get(label, 0) + 1
-            if await self._click_took(read, label, key):
-                logger.debug("Clicked '%s' with the mouse.", label)
-                return True
-            reason = "not taken"
-        if reason == "hidden" or (allow_script and reason == "not taken"):
-            if await run_js(self._script_click_js(finder)) is True and await self._click_took(read, label, key, reason):
-                logger.debug("'%s' is %s, clicked by script.", label, reason)
-                return True
-        logger.debug("'%s' not clicked: %s.", label, reason)
-        return False
-
-    @staticmethod
-    def _script_click_js(finder: str) -> str:
-        return f"(() => {{ const el = ({finder})(); if (el && !el.disabled) {{ el.click(); return true; }} return false; }})()"
 
     async def _cdp_click_found(self, finder: str, label: str, allow_script: bool = False, tries: int = 1) -> bool:
         """Click on the page with the mouse until it takes, see _click_until_taken."""
@@ -1901,4 +1974,11 @@ async def claim_epic(extra_games: list | None = None) -> dict:
     """Convenience entry point."""
     claimer = EpicGamesClaimer()
     await claimer.run(extra_games)
+    return {"store": "Epic Games", "user": claimer.user, "games": claimer.notify_games}
+
+
+async def claim_epic_booked(items: list, with_you: bool) -> dict:
+    """A meeting in noVNC for the games whose puzzle nobody solved: with you there, or the bot's own last try."""
+    claimer = EpicGamesClaimer()
+    await claimer.run(booked_items=items, with_you=with_you)
     return {"store": "Epic Games", "user": claimer.user, "games": claimer.notify_games}

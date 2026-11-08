@@ -101,6 +101,8 @@ class PrimeGamingClaimer(BaseClaimer):
                                 if (navigator.credentials) { navigator.credentials.get = noop; navigator.credentials.create = noop; }
                             } catch (e) {}
                             (function () {
+                                // Only Amazon's sign-in pages carry these forms; watching Luna's own page froze it (PR #97).
+                                if (!location.pathname.includes('/ap/')) return;
                                 // Remove the wrong sign-in forms; leave only form[name="signIn"] (password).
                                 const KILL = ['form[name="signInWithPasskeyButton"]', 'form[name="signInWithMShopButton"]', '#auth-signin-via-passkey-section', '#auth-signin-via-passkey-btn'];
                                 const sweep = () => { try {
@@ -257,7 +259,7 @@ class PrimeGamingClaimer(BaseClaimer):
             data = {}
         if data.get("loggedIn"):
             self.user = data.get("user") or self.user or "unknown"
-            logger.debug("Luna signed-in check: first name present (%s)", self.user)
+            logger.debug("Luna signed-in check: first name present")
             return True
         logger.debug("Luna signed-in check: no account first name on the page")
         return False

@@ -43,6 +43,8 @@ RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\nAcquire::http::Ti
         virtualgl turbovnc ratpoison \
         # noVNC + websockify = VNC viewer accessible through a web browser
         novnc websockify \
+        # Color emoji, two common desktop fonts and Noto CJK, which every Android phone and most Linux desktops have (#93)
+        fonts-noto-color-emoji fonts-cantarell fonts-crosextra-carlito fonts-noto-cjk \
     # ── Install browser: Google Chrome on x86/x64, Chromium on ARM (Raspberry Pi) ──
     # Each browser package pulls the shared libraries it needs, under whatever name the release gives them.
     && ARCH=$(dpkg --print-architecture) \
@@ -120,7 +122,7 @@ ENV SHOW=1
 
 # ── Health check: Docker uses this to know if the container is still working ──
 # It checks that python3 is running AND that the noVNC web server is responding
-HEALTHCHECK --interval=10s --timeout=5s CMD pgrep python3 && curl --fail http://localhost:7080 || exit 1
+HEALTHCHECK --interval=10s --timeout=5s CMD pgrep python3 && curl --fail "http://localhost:${NOVNC_PORT:-7080}" || exit 1
 
 # ── Container startup: run the entrypoint script first, then start the bot ──
 ENTRYPOINT ["docker-entrypoint.sh"]

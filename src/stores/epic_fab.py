@@ -8,15 +8,21 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+from datetime import timezone
 
 import nodriver as uc
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, account_key
+from src.core.claimer import (BaseClaimer, CAPTCHA_ANSWER_JS, CHALLENGE_JS, OTP_KEY_ATTEMPTS, account_key, answer_filled,
+                              captcha_answer_note, challenge_needs_you, giveaway_end, mark_page_checked, read_lately)
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
-from src.core.run_state import CAPTCHA_UNSOLVED, needs_you
+from src.core.display import vnc_viewers
+from src.core.run_state import (CAPTCHA_ENDS, CAPTCHA_UNSOLVED, book, booking_until, ends_before_next_run, is_booked,
+                                lost_before_next_run, mark_answered, mark_unanswered, needs_you, next_run, unbook_title,
+                                utc_text, waits_for_nobody)
 from src.core.url_security import url_has_allowed_host
-from src.stores.epic import checkout_total_is_zero
+from src.stores.epic import FRAME_HIT_JS, FRAME_ORIGIN_JS, SHOWN, checkout_total_is_zero, saved_account_finder
 
 logger = logging.getLogger("fgc.fab")
 
@@ -44,29 +50,6 @@ function () {
             .map(b => (b.innerText || '').trim()).filter(Boolean).slice(0, 10),
         text: this.body ? (this.body.innerText || '').replace(/\\s+/g, ' ') : '',
     });
-}
-"""
-
-CHECKOUT_CLICK_JS = """
-function () {
-    const btn = [...this.querySelectorAll('button, a[role=button]')]
-        .find(b => /add to library|place order|get now/i.test((b.innerText || '').trim()));
-    if (!btn || btn.disabled) return JSON.stringify({clicked: false});
-    btn.click();
-    return JSON.stringify({clicked: true, label: (btn.innerText || '').trim()});
-}
-"""
-
-# Add to library then asks to waive the EU right of withdrawal, the order waits on it.
-CHECKOUT_CONSENT_JS = """
-function () {
-    const text = this.body ? (this.body.innerText || '') : '';
-    if (!/right of withdrawal/i.test(text)) return JSON.stringify({present: false});
-    const btn = [...this.querySelectorAll('button')]
-        .find(b => /^(i accept|accept|agree)$/i.test((b.innerText || '').trim()));
-    if (!btn || btn.disabled) return JSON.stringify({present: true, clicked: false});
-    btn.click();
-    return JSON.stringify({present: true, clicked: true, label: (btn.innerText || '').trim()});
 }
 """
 
@@ -121,6 +104,45 @@ def _seller_name(user) -> str:
     return str(user or "").strip()
 
 
+# Buttons a person clicks with the mouse; the scripts above stay as the fallback when a mouse click does not take.
+BUY_NOW_FINDER = r"""() => [...document.querySelectorAll('button, a[role=button]')]
+    .find(b => /^(buy now|get|add to my library)$/i.test((b.innerText || '').trim()))"""
+# What Buy now changes: Epic's checkout frame and the dialogs on screen (the licence); compared before and after the click.
+BUY_NOW_STATE_JS = r"""(document.querySelector('iframe[src*="/payment/web/purchase"]') ? 'frame' : 'page') + ':' + [...document.querySelectorAll(
+    '[class*="Modal-root" i], [role=dialog], dialog')].filter(m => m.getBoundingClientRect().width > 0).length"""
+EULA_MODAL = r"""[...document.querySelectorAll('[class*="Modal-root" i], [role=dialog], dialog')]
+    .filter(m => { const r = m.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+    .find(m => /end user license agreement/i.test(m.innerText || ''))"""
+# The licence's required box, found as EULA_ACCEPT_JS finds it; the marketing boxes are never it.
+EULA_BOX_FINDER = r"""() => {
+    const modal = __MODAL__;
+    if (!modal) return null;
+    const labelFor = box => {
+        const byFor = box.id ? [...modal.querySelectorAll('label')].find(l => l.htmlFor === box.id) : null;
+        const wrap = box.closest('label') || box.parentElement;
+        return ((byFor && byFor.innerText) || (wrap && wrap.innerText) || '').replace(/\s+/g, ' ').trim();
+    };
+    const required = [...modal.querySelectorAll('input[type=checkbox]')]
+        .find(b => /agree/i.test(labelFor(b)) && !/news|survey|special offers|subscri/i.test(labelFor(b)));
+    return required && !required.checked ? required : null;
+}""".replace("__MODAL__", EULA_MODAL)
+EULA_ACCEPT_FINDER = r"""() => { const modal = __MODAL__;
+    return modal ? [...modal.querySelectorAll('button')].find(b => !b.disabled && /^(accept|agree|i agree)$/i.test((b.innerText || '').trim())) : null; }
+""".replace("__MODAL__", EULA_MODAL)
+EULA_OPEN_JS = "!!(" + EULA_MODAL + ")"
+# Epic's own buttons on its sign-in pages, which Fab hands over to.
+EPIC_SUBMIT_FINDER = r"""() => { const byId = document.querySelector('#sign-in, #continue');
+    if (byId && !byId.disabled) return byId;
+    return [...document.querySelectorAll('button')].find(b => !b.disabled && /^(sign in|continue|log in)$/i.test((b.innerText || '').trim())); }"""
+EPIC_CONTINUE_FINDER = r"""() => [...document.querySelectorAll('button, a[role=button]')].find(b => /^continue$/i.test((b.innerText || '').trim()))"""
+# Inside the checkout frame: the button for the order and the one for the EU waiver, only ones a person can see.
+CHECKOUT_ADD_FINDER = r"""() => [...document.querySelectorAll('button, a[role=button]')].filter(__SHOWN__)
+    .find(b => /add to library|place order|get now/i.test((b.innerText || '').trim()))""".replace("__SHOWN__", SHOWN)
+CHECKOUT_ACCEPT_FINDER = r"""() => [...document.querySelectorAll('button')].filter(__SHOWN__)
+    .find(b => /^(i accept|accept|agree)$/i.test((b.innerText || '').trim()))""".replace("__SHOWN__", SHOWN)
+CHECKOUT_CONSENT_OPEN_JS = r"""function () { return /right of withdrawal/i.test(this.body ? (this.body.innerText || '') : ''); }"""
+
+
 def parse_free_listings(blade: dict) -> list[dict]:
     """Read the limited-time free assets out of Fab's free content blade."""
     if not isinstance(blade, dict):
@@ -142,12 +164,16 @@ def parse_free_listings(blade: dict) -> list[dict]:
         if not uid:
             skipped.append(title or "<no title>")
             continue
+        licenses = [lic for lic in listing.get("licenses") or [] if isinstance(lic, dict)]
         listings.append({
             "title": title or "Fab asset",
             "url": URL_LISTING.format(uid=uid),
             "uid": uid,
             "seller": _seller_name(listing.get("user")),
             "listing_type": str(listing.get("listingType") or "").strip(),
+            # When the free price ends, for a captcha on its last run; empty when the blade does not say.
+            "ends": next((str((lic.get("priceTier") or {}).get("discountEndDate") or "") for lic in licenses
+                          if (lic.get("priceTier") or {}).get("discountEndDate")), ""),
         })
 
     if skipped:
@@ -163,6 +189,19 @@ class FabClaimer(BaseClaimer):
     store_name = "fab"
     # Fab signs in with an Epic account, so it rides on the Epic profile's session.
     profile_name = "epic"
+    # Set once a puzzle stopped Epic's checkout in this run, so the rest waits for the next run.
+    _checkout_puzzle = False
+    # When the asset being claimed stops being free, for a puzzle on its last run.
+    _ends_now = None
+    # Set when a puzzle for this asset went to you and vanished with no answer, so an asset that did not land is a captcha.
+    _puzzle_asked = False
+    # The asset being claimed, kept for a meeting in noVNC when its puzzle finds nobody.
+    _claiming = None
+    # A meeting in noVNC claims only the kept assets; with you there every puzzle is yours at once.
+    _meeting = False
+    _with_you = False
+    # Who watched noVNC when you were last asked, so only a later connection counts as you coming.
+    _seen_at_prompt = None
 
     PAGE_STATE_JS = r"""
         (() => {
@@ -179,9 +218,14 @@ class FabClaimer(BaseClaimer):
         })()
     """
 
-    async def run(self) -> None:
-        """Main entry point for the Fab claiming flow."""
+    async def run(self, booked_items: list | None = None, with_you: bool = False) -> None:
+        """Main entry point for the Fab claiming flow, or only the assets kept for a meeting in noVNC."""
         logger.debug("Starting Fab claiming flow")
+        if booked_items is not None:
+            self._meeting, self._with_you = True, with_you
+            # You connected, so the prompt nobody answered earlier in this run does not hold this one back.
+            if with_you:
+                mark_answered(self.store_name)
         try:
             # Checkout fronts hCaptcha, which software rendering triggers. Same flags as epic.py.
             await self.start_browser(
@@ -194,21 +238,63 @@ class FabClaimer(BaseClaimer):
             await self.page.get(URL_FREE)
             await self.sleep(5)
 
-            listings = await self._detect_free_listings()
+            listings = [kept["data"] for kept in booked_items] if booked_items is not None else await self._detect_free_listings()
             if not listings:
                 logger.info("No free assets available right now.")
                 return
             logger.info("Found %d free Fab asset(s): %s", len(listings),
                         ", ".join(item["title"] for item in listings))
 
+            # An asset you have is opened again only every few days, and with nothing to open there is no sign-in either.
+            if booked_items is None:
+                due = []
+                for item in listings:
+                    if await self._read_lately(item["uid"]):
+                        logger.debug("'%s' is on record and its page was read lately, not opened this run.", item["title"])
+                        self.notify_games.append({"title": item["title"], "url": item["url"], "status": "existed"})
+                    else:
+                        due.append(item)
+                listings = due
+                if not listings:
+                    logger.info("Fab claimer finished.")
+                    return
+
             if not await self._ensure_logged_in():
                 logger.error("Aborting Fab claim flow due to login failure.")
                 return
 
-            for index, item in enumerate(listings):
-                if self._captcha_stops_store(len(listings) - index, "asset"):
-                    break
+            if booked_items is not None:
+                held = 0
+                for kept in booked_items:
+                    # A puzzle nobody answered at this meeting either: only an asset kept on its last run is still opened.
+                    if waits_for_nobody(self.store_name) and not kept["last_chance"]:
+                        held += 1
+                        self.notify_games.append({"title": kept["title"], "url": kept["data"].get("url", ""),
+                                                  "status": "failed:captcha"})
+                        continue
+                    await self._claim_listing(kept["data"])
+                self._captcha_held(held, "asset")
+                return
+
+            held = 0
+            for item in listings:
+                ends = giveaway_end(item.get("ends"))
+                # On its last run an asset is still opened: with nobody there a puzzle ends it at once.
+                if self._captcha_holds(ends):
+                    # With EG_CAPTCHA_ASK an asset you lack is yours anyway, so it joins your noVNC meeting unopened.
+                    if await self._already_recorded(item["uid"]):
+                        continue
+                    if not (cfg.eg_captcha_ask and self._book(item["title"], item, ends, False)):
+                        held += 1
+                    continue
+                # Each further checkout could draw another puzzle, so after one an asset you lack waits for the next run.
+                if self._checkout_puzzle and not cfg.eg_captcha_ask and not ends_before_next_run(ends):
+                    if not await self._already_recorded(item["uid"]):
+                        logger.info("'%s' waits for the next run after a captcha in Epic's checkout.", item["title"])
+                        needs_you(self.store_name, 1, "asset", why=CAPTCHA_UNSOLVED)
+                    continue
                 await self._claim_listing(item)
+            self._captcha_held(held, "asset")
 
             logger.info("Fab claimer finished.")
 
@@ -386,7 +472,9 @@ class FabClaimer(BaseClaimer):
         return await self._await_login_outcome()
 
     async def _submit_epic_form(self) -> bool:
-        """Press the button that submits whichever Epic screen is showing."""
+        """Press the button that submits whichever Epic screen is showing, with the mouse first."""
+        if await self._click_like_a_hand(EPIC_SUBMIT_FINDER, "Epic sign-in button"):
+            return True
         try:
             return bool(await self.page.evaluate("""
                 (() => {
@@ -409,7 +497,10 @@ class FabClaimer(BaseClaimer):
         if "/id/login/switch-account" not in url.lower():
             return False
         logger.debug("Epic is asking which account to continue with, confirming.")
-        clicked = await self.page.evaluate("""
+        # Continue, or on a list of saved accounts the tile of EG_EMAIL, as Epic itself picks it.
+        clicked = (await self._click_like_a_hand(EPIC_CONTINUE_FINDER, "continue as this account")
+                   or await self._click_like_a_hand(saved_account_finder(cfg.eg_email), "saved account")
+                   or await self.page.evaluate("""
             (() => {
                 const btn = [...document.querySelectorAll('button, a[role=button]')]
                     .find(b => /^continue$/i.test((b.innerText || '').trim()));
@@ -419,7 +510,7 @@ class FabClaimer(BaseClaimer):
                 if (tile) { tile.click(); return true; }
                 return false;
             })()
-        """)
+        """))
         if clicked:
             await self.sleep(5)
         else:
@@ -530,6 +621,16 @@ class FabClaimer(BaseClaimer):
     async def _claim_listing(self, item: dict) -> None:
         """Open one asset page, confirm it really is free, then claim it."""
         title, uid, url = item["title"], item["uid"], item["url"]
+        self._ends_now = giveaway_end(item.get("ends"))
+        self._puzzle_asked = False
+        self._claiming = item
+        # Each asset's checkout gets its own two mouse clicks per button; live 3.11 the third asset found them spent.
+        self._click_counts = {}
+        # Signed in by hand there is no EG_EMAIL, so the record under the account's name is found only after sign-in.
+        if await self._read_lately(uid):
+            logger.debug("'%s' is on record and its page was read lately, not opened this run.", title)
+            self.notify_games.append({"title": title, "url": url, "status": "existed"})
+            return
         logger.debug("Opening Fab listing: %s (%s by %s)", url, item.get("listing_type"), item.get("seller"))
 
         await self.page.get(url)
@@ -538,7 +639,8 @@ class FabClaimer(BaseClaimer):
         if await self._human_challenge_present() and not await self._wait_out_challenge("Fab"):
             logger.warning("A security check is blocking the Fab page for '%s'.", title)
             self.notify_games.append({"title": title, "url": url, "status": "failed:blocked"})
-            needs_you(self.store_name, 1, "asset", why=CAPTCHA_UNSOLVED)
+            lost = lost_before_next_run(self._ends_now)
+            needs_you(self.store_name, 1, "asset", why=CAPTCHA_ENDS if lost else CAPTCHA_UNSOLVED)
             return
 
         state = await self._page_state()
@@ -560,6 +662,7 @@ class FabClaimer(BaseClaimer):
             logger.info("'%s' already in library.", title)
             logger.debug("Recorded by an earlier run, not claiming again.")
             self.notify_games.append({"title": title, "url": url, "status": "existed"})
+            await self._remember(uid, title, url, "existed")
             return
 
         if cfg.dryrun:
@@ -585,6 +688,12 @@ class FabClaimer(BaseClaimer):
         if checkout == "not-free":
             self.notify_games.append({"title": title, "url": url, "status": "skipped:not-free"})
             return
+        if checkout == "captcha":
+            self._report_captcha(title, url)
+            return
+        if checkout == "eula":
+            self.notify_games.append({"title": title, "url": url, "status": "failed:eula"})
+            return
         if not checkout:
             logger.warning("Epic's checkout did not offer '%s' for the library.", title)
             self.notify_games.append({"title": title, "url": url, "status": "failed:checkout"})
@@ -597,12 +706,20 @@ class FabClaimer(BaseClaimer):
         if uid in await self._owned_uids():
             logger.info("✓ Claimed '%s' successfully!", title)
             status = "claimed"
+            unbook_title(self.store_name, title)
+        elif self._puzzle_asked:
+            # A puzzle handed to you that vanished with no asset behind it expired unsolved.
+            self._checkout_puzzle = True
+            mark_unanswered(self.store_name)
+            self._book(title, item, self._ends_now, ends_before_next_run(self._ends_now))
+            self._report_captcha(title, url)
+            return
         else:
-            logger.warning("Claim of '%s' was not confirmed by the page, check it manually.", title)
+            logger.warning("Claim of '%s' was not confirmed by the page, trying again next run.", title)
             status = "failed:unconfirmed"
 
         self.notify_games.append({"title": title, "url": url, "status": status})
-        if status != "failed:unconfirmed":
+        if status == "claimed":
             await self._remember(uid, title, url, status)
 
     async def _accept_eula(self) -> bool:
@@ -633,6 +750,16 @@ class FabClaimer(BaseClaimer):
             return False
 
         logger.debug("Accepting Fab's End User License Agreement (FAB_ACCEPT_EULA is on).")
+        # The required box, then Accept, with the mouse; EULA_ACCEPT_JS finishes whatever the mouse did not.
+        if await self._click_like_a_hand(EULA_BOX_FINDER, "licence agreement box"):
+            await self.sleep(1)
+        if await self._click_like_a_hand(EULA_ACCEPT_FINDER, "accept the licence"):
+            for _ in range(5):
+                await self.sleep(1)
+                if await self.page.evaluate(EULA_OPEN_JS) is not True:
+                    logger.debug("Licence modal accepted with the mouse.")
+                    await self.sleep(6)
+                    return True
         raw = await self.page.evaluate(EULA_ACCEPT_JS)
         result = json.loads(raw) if isinstance(raw, str) else {}
         logger.debug("Licence modal: agreement ticked=%s, marketing left alone=%s, Accept clicked=%s",
@@ -670,17 +797,20 @@ class FabClaimer(BaseClaimer):
             return None
         for node in self._walk_nodes(doc):
             if node.node_name == "IFRAME" and CHECKOUT_PATH in self._node_attrs(node).get("src", ""):
+                # The <iframe> itself, kept to know where the frame sits on the page for a mouse click.
+                self._checkout_iframe = node
                 return getattr(node, "content_document", None)
         return None
 
-    async def _checkout_eval(self, document, function_declaration: str):
-        """Run JS inside the checkout frame and parse what it returns."""
+    async def _checkout_eval(self, document, function_declaration: str, *args):
+        """Run JS on a node of the pierced page (the checkout frame's document, or the <iframe>) and parse what it returns."""
         try:
             handle = await self.page.send(uc.cdp.dom.resolve_node(node_id=document.node_id))
             result = await self.page.send(uc.cdp.runtime.call_function_on(
                 function_declaration=function_declaration,
                 object_id=handle.object_id,
                 return_by_value=True,
+                arguments=[uc.cdp.runtime.CallArgument(value=a) for a in args] or None,
             ))
             if isinstance(result, tuple):
                 result = result[0]
@@ -690,8 +820,129 @@ class FabClaimer(BaseClaimer):
             logger.debug("Could not evaluate inside the checkout frame: %s", exc)
             return None
 
+    async def _click_in_checkout(self, document, finder: str, label: str) -> bool:
+        """Click a button in Epic's checkout frame with Epic's own mouse loop: its spot in the frame plus where the frame sits."""
+        async def run_js(expression):
+            # Stringified, so the frame's answer comes back exactly as the page's own evaluate gives it.
+            return await self._checkout_eval(document, "function () { return JSON.stringify(" + expression + "); }")
+
+        async def read():
+            return await self._read_box(run_js, finder)
+
+        async def frame():
+            iframe = getattr(self, "_checkout_iframe", None)
+            return await self._checkout_eval(iframe, FRAME_ORIGIN_JS) if iframe is not None else None
+
+        async def wheel_point():
+            f = await frame()
+            if not f or f["bottom"] - f["top"] < 40:
+                return None
+            return (f["x"] + f["w"] * random.uniform(0.3, 0.7), f["top"] + (f["bottom"] - f["top"]) * random.uniform(0.3, 0.7))
+
+        async def to_page(box):
+            f = await frame()
+            if not f:
+                return None
+            px, py = round(f["x"] + box["x"]), round(f["y"] + box["y"])
+            if await self._checkout_eval(self._checkout_iframe, FRAME_HIT_JS, px, py) is True:
+                return px, py
+            logger.debug("Point (%d, %d) is not on the checkout frame at %s.", px, py, f)
+            return None
+
+        return await self._click_until_taken(read, run_js, wheel_point, to_page, finder, f"{label} (checkout frame)",
+                                             tries=2, allow_script=True)
+
+    async def _checkout_challenge_reason(self) -> str:
+        """What reads as a human check on the page, or inside Epic's checkout frame where the page check cannot look."""
+        reason = await self._human_challenge_reason()
+        if reason:
+            return reason
+        document = await self._checkout_document()
+        found = await self._checkout_eval(document, f"function () {{ return JSON.stringify({CHALLENGE_JS}); }}") if document else ""
+        return f"checkout frame, {found}" if found else ""
+
+    def _report_captcha(self, title: str, url: str) -> None:
+        """Log and list an asset a puzzle stopped; one kept for a noVNC meeting is told apart in the summary."""
+        kept = is_booked(self.store_name, title)
+        logger.warning("A captcha in Epic's checkout stopped '%s', %s.", title,
+                       "it waits for you in noVNC" if kept else "trying again next run")
+        # A kept asset is listed apart in the summary, and its meeting reports how it ended.
+        if not kept:
+            self.notify_games.append({"title": title, "url": url, "status": "failed:captcha"})
+            lost = lost_before_next_run(self._ends_now)
+            needs_you(self.store_name, 1, "asset", why=CAPTCHA_ENDS if lost else CAPTCHA_UNSOLVED)
+
+    def _book(self, title: str, item, ends, last_chance: bool) -> bool:
+        """Keep an asset whose puzzle nobody solved for a meeting with you in noVNC; False when there is no time for one."""
+        viewers = vnc_viewers()
+        if self._meeting or not item or viewers is None:
+            # Outside the container nobody can be seen opening noVNC, so there is no meeting to wait for.
+            if viewers is None:
+                logger.debug("No noVNC to watch here, so '%s' is not kept for a meeting.", title)
+            return False
+        until = booking_until(ends, last_chance)
+        if until is None:
+            logger.debug("No noVNC meeting for '%s': %s.", title,
+                         "a single run does not wait" if next_run() is None else f"too little time is left (ends {ends})")
+            return False
+        seen = self._seen_at_prompt if self._seen_at_prompt is not None else viewers
+        if book(self.store_name, {"title": title, "data": item, "ends": ends, "last_chance": last_chance,
+                                  "until": until, "seen": set(seen)}):
+            logger.info("'%s' waits for you in noVNC until %s: once you connect, the bot opens its checkout again.",
+                        title, utc_text(until))
+        return True
+
+    async def _clear_checkout_challenge(self, title: str) -> bool:
+        """Like Epic: a check that passes by itself is waited out, a puzzle waits for the next run or for you with EG_CAPTCHA_ASK."""
+        reason = await self._checkout_challenge_reason()
+        if not reason:
+            return True
+        logger.debug("Human check on Epic's checkout for '%s': %s", title, reason)
+        person = challenge_needs_you(reason)
+
+        async def present() -> bool:
+            return bool(await self._checkout_challenge_reason())
+
+        last_chance = ends_before_next_run(self._ends_now)
+        ask = cfg.eg_captcha_ask or not person or last_chance
+        if person and self._meeting:
+            # At a meeting you are there; the bot's own last try asks nobody.
+            ask = self._with_you
+        if person and ask:
+            self._seen_at_prompt = vnc_viewers() or set()
+        if person and ask and last_chance and not cfg.eg_captcha_ask and not waits_for_nobody(self.store_name):
+            logger.info("'%s' is free only until %s, %s, so you are asked to solve its captcha.",
+                        title, self._ends_now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                        "before the next run" if next_run() else "and this single run does not wait")
+        cleared = await self._wait_out_challenge(f"Fab ('{title}')", settle=12 if person else 180, present_fn=present,
+                                                 reason_fn=self._checkout_challenge_reason, ask=ask)
+        if not cleared and person:
+            self._checkout_puzzle = True
+            # A puzzle that was yours and stayed unsolved waits for you in noVNC.
+            if cfg.eg_captcha_ask or last_chance:
+                self._book(title, self._claiming, self._ends_now, last_chance)
+        elif person and ask and self._handed_over:
+            # Solved or expired (after about two minutes) look alike here; a filled answer is a solve, else the asset decides.
+            lengths = await self._captcha_answer_lengths()
+            logger.debug("The puzzle for '%s' is gone: %s.", title, captcha_answer_note(lengths))
+            self._puzzle_asked = not answer_filled(lengths)
+        return cleared
+
+    async def _captcha_answer_lengths(self) -> list:
+        """How long the captcha answer is on the page and in Epic's checkout frame, for the log."""
+        lengths = []
+        try:
+            lengths.append(await self.page.evaluate(CAPTCHA_ANSWER_JS))
+            document = await self._checkout_document()
+            if document:
+                # In parentheses: a return followed by a line break returns nothing.
+                lengths.append(await self._checkout_eval(document, f"function () {{ return ({CAPTCHA_ANSWER_JS}); }}"))
+        except Exception as exc:
+            logger.debug("Could not read the captcha answer field: %s", exc)
+        return lengths
+
     async def _complete_checkout(self, title: str = "") -> bool | str:
-        """Press "Add to library" in Epic's checkout frame, or answer "not-free" when its total is not zero."""
+        """Press "Add to library" in Epic's checkout frame; "not-free" at a total above zero, "captcha" after a puzzle, "eula" without FAB_ACCEPT_EULA."""
         # The same frame sells assets, so only a total of zero is ever ordered; an unreadable one is not.
         document, state, free = None, {}, None
         for attempt in range(5):
@@ -715,33 +966,44 @@ class FabClaimer(BaseClaimer):
             logger.warning("Could not read the total in Epic's checkout, nothing was ordered.")
             return False
 
-        result = await self._checkout_eval(document, CHECKOUT_CLICK_JS) or {}
-        if not result.get("clicked"):
-            logger.debug("No add-to-library button in the checkout frame.")
+        if not await self._click_in_checkout(document, CHECKOUT_ADD_FINDER, "add to library"):
             return False
-        logger.debug("Clicked %r in the checkout frame.", result.get("label"))
         await self.sleep(6)
+        if not await self._clear_checkout_challenge(title):
+            return "captcha"
 
         # The order then waits on the EU right-of-withdrawal waiver.
         document = await self._checkout_document()
         if document is None:
             return True
-        consent = await self._checkout_eval(document, CHECKOUT_CONSENT_JS) or {}
-        if not consent.get("present"):
+        present = bool(await self._checkout_eval(document, CHECKOUT_CONSENT_OPEN_JS))
+        if not present:
             await self.sleep(6)
-            return True
+            # The order can still draw a puzzle once it is placed.
+            return True if await self._clear_checkout_challenge(title) else "captcha"
         if not cfg.fab_accept_eula:
             logger.warning("Epic asks to waive the right of withdrawal and FAB_ACCEPT_EULA is off.")
+            return "eula"
+        if not await self._click_in_checkout(document, CHECKOUT_ACCEPT_FINDER, "accept the waiver"):
+            logger.debug("Right-of-withdrawal dialog is open but its accept button could not be pressed.")
             return False
-        if not consent.get("clicked"):
-            logger.debug("Right-of-withdrawal dialog is open but has no usable accept button: %r", consent)
-            return False
-        logger.debug("Accepted the right-of-withdrawal waiver (%r).", consent.get("label"))
+        logger.debug("Accepted the right-of-withdrawal waiver.")
         await self.sleep(8)
-        return True
+        return True if await self._clear_checkout_challenge(title) else "captcha"
 
     async def _click_buy_now(self) -> bool:
-        """Click the button that starts the free checkout."""
+        """Click the button that starts the free checkout with the mouse, by script when that did not take."""
+        before = await self.page.evaluate(BUY_NOW_STATE_JS)
+        if await self._click_like_a_hand(BUY_NOW_FINDER, "buy now"):
+            for _ in range(12):
+                await self.sleep(1)
+                if await self.page.evaluate(BUY_NOW_STATE_JS) != before:
+                    return True
+            logger.debug("Nothing opened after the mouse click on the buy button, pressing it by script.")
+        elif (await self._read_box(self.page.evaluate, BUY_NOW_FINDER)).get("reason") == "covered":
+            # Something lies over the button, a person could not press it either.
+            logger.debug("The buy button is covered, not pressing it by script.")
+            return False
         try:
             raw = await self.page.evaluate("""
                 (() => {
@@ -763,8 +1025,8 @@ class FabClaimer(BaseClaimer):
             logger.debug("Clicking the Fab buy button failed: %s", exc)
             return False
 
-    async def _already_recorded(self, uid: str) -> bool:
-        """True when an earlier run already stored this asset for this account."""
+    async def _record(self, uid: str):
+        """This asset's row for this account, None when no earlier run stored it."""
         from sqlalchemy import select
 
         from src.core.database import ClaimedGame
@@ -777,7 +1039,15 @@ class FabClaimer(BaseClaimer):
                     ClaimedGame.game_id == uid,
                 )
             )
-            return result.scalar_one_or_none() is not None
+            return result.scalar_one_or_none()
+
+    async def _read_lately(self, uid: str) -> bool:
+        """True for an asset on record whose page was read in the last few days."""
+        return read_lately(await self._record(uid), ("claimed", "existed"))
+
+    async def _already_recorded(self, uid: str) -> bool:
+        """True when an earlier run already stored this asset for this account."""
+        return await self._record(uid) is not None
 
     async def _remember(self, uid: str, title: str, url: str, status: str) -> None:
         """Record the asset so later runs can tell it apart from a new one."""
@@ -791,8 +1061,10 @@ class FabClaimer(BaseClaimer):
                 url=url,
                 status=status,
             )
-            if not created and obj.status != status:
+            # A claim the bot made stays a claim when a later run finds the asset owned.
+            if not created and obj.status != status and not (obj.status == "claimed" and status == "existed"):
                 obj.status = status
+            mark_page_checked(obj)
             await session.commit()
             logger.debug("DB %s '%s' (status=%s).", "stored" if created else "already had", uid, obj.status)
 
@@ -801,4 +1073,11 @@ async def claim_fab() -> dict:
     """Convenience entry point."""
     claimer = FabClaimer()
     await claimer.run()
+    return {"store": "Fab", "user": claimer.user, "games": claimer.notify_games}
+
+
+async def claim_fab_booked(items: list, with_you: bool) -> dict:
+    """A meeting in noVNC for the assets whose puzzle nobody solved: with you there, or the bot's own last try."""
+    claimer = FabClaimer()
+    await claimer.run(booked_items=items, with_you=with_you)
     return {"store": "Fab", "user": claimer.user, "games": claimer.notify_games}

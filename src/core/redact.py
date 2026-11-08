@@ -1,10 +1,11 @@
-"""Keeps passwords, sign-in names, notification tokens and game codes out of the log, whichever library writes the line.
+"""Keeps passwords, sign-in names, notification tokens, game codes and a public noVNC address out of the log, whichever library writes the line.
 
 Notifications are yours and keep everything in full; only the log, which ends up in bug reports, is masked.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import traceback
@@ -79,6 +80,17 @@ def url_secrets(url: str) -> list:
     return [p for p in pieces if len(p) >= 6 and "." not in p and not (p.isalpha() and p.islower() and len(p) <= 8)]
 
 
+def public_host(host: str) -> bool:
+    """True when a host can be reached from the internet: localhost, private addresses and home network names cannot."""
+    host = str(host or "").strip().strip("[]").lower()
+    if not host or host == "localhost" or ("." not in host and ":" not in host):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return not host.endswith((".local", ".lan", ".home", ".internal", ".localdomain"))
+
+
 def hide_settings(cfg) -> None:
     """Hide every password, two-factor secret, sign-in name and notification token set in .env."""
     for name in dir(cfg):
@@ -95,6 +107,12 @@ def hide_settings(cfg) -> None:
     for url in [cfg.discord_webhook or ""] + str(cfg.notify_url or "").split(","):
         for piece in url_secrets(url):
             hide(piece)
+    # The noVNC link opens a browser signed in to your stores, so a public one stays out of logs attached to issues.
+    vnc = urlsplit(str(getattr(cfg, "vnc_url", "") or ""))
+    for credential in (vnc.username, vnc.password):
+        hide(credential)
+    if public_host(vnc.hostname or ""):
+        hide(vnc.hostname)
 
 
 class RedactFilter(logging.Filter):

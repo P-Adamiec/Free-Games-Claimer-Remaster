@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core import redact as redaction
-from src.core.redact import RedactFilter, hide, hide_account, hide_settings, mask_account, mask_code, redact
+from src.core.redact import RedactFilter, hide, hide_account, hide_settings, mask_account, mask_code, public_host, redact
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -66,6 +66,19 @@ class TestEveryLogSiteUsesIt:
         # Epic falls back to EG_EMAIL when it shows no profile name, and these lines run for every game.
         source = (ROOT / "src" / "core" / "database.py").read_text(encoding="utf-8")
         assert source.count("mask_account(user)") == 2
+
+    def test_a_name_read_from_a_page_is_not_logged_before_the_mask(self):
+        # Prime and GOG logged the name in their sign-in checks, one line before log_signed_in() masked it.
+        for path in sorted((ROOT / "src" / "stores").glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("debug", "info", "warning", "error")
+                        and ast.unparse(node.func.value).endswith("logger")):
+                    continue
+                args = " ".join(ast.unparse(a) for a in node.args[1:])
+                assert ".get('user')" not in args, f"{path.name}:{node.lineno}"
+        prime = (ROOT / "src" / "stores" / "prime.py").read_text(encoding="utf-8")
+        assert "self.user)" not in prime.split("async def _is_signed_in", 1)[1].split("\n    async def ", 1)[0]
 
     def test_no_call_site_was_left_behind(self):
         # Every "Logging in as" and "Signed in as" call has to go through the mask. The
@@ -186,6 +199,28 @@ class TestTheMask:
 
     def test_an_ntfy_topic_is_a_secret_too(self):
         assert redact("POST /freegames2026 HTTP/1.1") == "POST /*** HTTP/1.1"
+
+    @pytest.mark.parametrize("vnc_url,line,masked", [
+        ("https://vnc.example.com/?autoconnect=true", "Open https://vnc.example.com/?autoconnect=true to finish",
+         "Open https://***/?autoconnect=true to finish"),
+        ("http://93.184.216.34:7080/?autoconnect=true", "Open http://93.184.216.34:7080/?autoconnect=true now",
+         "Open http://***:7080/?autoconnect=true now"),
+        ("http://localhost:7080/?autoconnect=true", "Open http://localhost:7080/", "Open http://localhost:7080/"),
+        ("http://192.168.1.10:7080/?autoconnect=true", "Open http://192.168.1.10:7080/", "Open http://192.168.1.10:7080/"),
+        ("https://fgcuser:S3cretVnc@vnc.example.com/?autoconnect=true", "Open https://fgcuser:S3cretVnc@vnc.example.com/",
+         "Open https://***:***@***/"),
+    ])
+    def test_a_public_novnc_address_leaves_the_log_and_a_local_one_stays(self, vnc_url, line, masked):
+        hide_settings(SimpleNamespace(**vars(self.CFG), vnc_url=vnc_url))
+        assert redact(line) == masked
+
+    @pytest.mark.parametrize("host,public", [
+        ("vnc.example.com", True), ("93.184.216.34", True), ("[2606:4700::1]", True),
+        ("localhost", False), ("192.168.1.10", False), ("10.0.0.5", False), ("127.0.0.1", False),
+        ("nas", False), ("nas.local", False), ("fgc.lan", False), ("", False),
+    ])
+    def test_public_host(self, host, public):
+        assert public_host(host) is public
 
     def test_only_whole_words_and_nothing_short(self):
         hide("abcd")

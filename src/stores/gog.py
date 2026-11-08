@@ -144,8 +144,7 @@ class GOGClaimer(BaseClaimer):
             if result.get("error"):
                 logger.debug("GOG account menu unreachable from this page: %s", result["error"])
                 return False
-            logger.debug("GOG account menu: loggedIn=%s, user='%s'",
-                         result.get("loggedIn"), result.get("user"))
+            logger.debug("GOG account menu: loggedIn=%s", result.get("loggedIn"))
 
             if result.get("loggedIn"):
                 self.user = str(result.get("user") or "").strip() or "GOG User"

@@ -972,6 +972,7 @@ class AliExpressClaimer(BaseClaimer):
                         hasXmanT: names.includes('xman_t'),
                         cookieCount: names.length,
                         challenge: names.includes('x5sec') || punishUrl || !!challengeEl,
+                        onScreen: punishUrl || !!challengeEl,
                         pluginsLen: navigator.plugins.length,
                         touchPoints: navigator.maxTouchPoints,
                         blockedAppUrls: (window.__fgcBlockedApp || []),
@@ -997,6 +998,9 @@ class AliExpressClaimer(BaseClaimer):
                 self.logger.warning(
                     "⚠️ AliExpress issued a security challenge (x5sec/punish) – "
                     "this session is being risk-scored. This is the root cause of the 1-coin cap.")
+            # The x5sec cookie outlives the check, so only a slider or block page on screen is counted.
+            if data.get("onScreen"):
+                await self._count_check(self.store_name, "AliExpress slider or block page", puzzle=True)
         except Exception as e:
             self.logger.debug("Diagnostics probe failed: %s", e)
 

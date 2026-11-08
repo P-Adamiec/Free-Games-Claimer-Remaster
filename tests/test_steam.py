@@ -2,14 +2,18 @@
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import src.stores.steam as steam
+from src.core.database import Base, ClaimedGame
 from src.stores.steam import (DEMO_JS, GAMES_ONLY, KEY_OUTCOMES, REMEMBER_ME_JS, REMEMBER_ME_STATE_JS, STORE_FREE_SEARCH,
                               SteamClaimer, activation_outcome, base_game_button_js, claim_order, free_search_games,
-                              is_waiting_steam_key)
+                              is_waiting_steam_key, mark_page_checked)
 
 SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "steam.py").read_text(encoding="utf-8")
 
@@ -154,6 +158,9 @@ class TestAFailedSignInStopsTheRun:
 
         async def _dismiss_cookie_banner(self):
             pass
+
+        async def _recently_skipped(self, kind, number):
+            return False
 
         async def _wait_for_vnc_login(self, check_fn, custom_msg=None):
             return self.vnc_answer
@@ -433,3 +440,114 @@ class TestOnlyRealGiveaways:
     def test_without_steam_dlc_a_dlc_page_is_left_alone_first(self):
         guard = self.CLAIM.index("if not cfg.steam_claim_dlc and")
         assert guard < self.CLAIM.index("price_check_raw = await") < self.CLAIM.index("await self._ensure_base_game(")
+
+
+class TestKnownSkipsAreNotOpenedAgain:
+    """A paid GamerPower find and a DLC without its base game were opened on every run (log, 2026-10-23/24)."""
+
+    CLAIM = SOURCE.split("async def _claim_game", 1)[1].split("\n    async def ", 1)[0]
+
+    @pytest.fixture
+    def db(self, monkeypatch, tmp_path):
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fgc.db'}")
+        asyncio.run(self._create(engine))
+        monkeypatch.setattr(steam, "async_session", async_sessionmaker(engine, expire_on_commit=False))
+        monkeypatch.setattr(steam.cfg, "steam_username", "player")
+        yield engine
+        asyncio.run(engine.dispose())
+
+    @staticmethod
+    async def _create(engine):
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    URL = "https://store.steampowered.com/app/4114140/Gear_Club/"
+
+    @staticmethod
+    def _row(status, checked_hours_ago, url=URL):
+        async def add():
+            async with steam.async_session() as session:
+                extra = {} if checked_hours_ago is None else {
+                    "page_checked": (datetime.now(timezone.utc) - timedelta(hours=checked_hours_ago)).isoformat()}
+                session.add(ClaimedGame(store="steam", user="player", game_id="4114140", title="Gear.Club Signature Pack",
+                                        url=url, status=status, extra=json.dumps(extra)))
+                await session.commit()
+        asyncio.run(add())
+
+    @staticmethod
+    def _skipped(kind="app", claimer=None):
+        return asyncio.run((claimer or SteamClaimer())._recently_skipped(kind, "4114140"))
+
+    # 19 hours: a twice-daily run a day later reads a few seconds under 24, so the limit sits well below it.
+    @pytest.mark.parametrize("status,hours,skipped", [
+        ("skipped:paid", 2, True), ("failed:missing_base", 19, True),
+        ("skipped:paid", 21, False), ("failed:missing_base", 30, False),
+        ("skipped:paid", None, False), ("failed", 2, False), ("claimed", 2, False)])
+    def test_only_a_known_skip_read_lately_is_left_alone(self, db, status, hours, skipped):
+        self._row(status, hours)
+        assert self._skipped() is skipped
+
+    def test_another_account_s_row_does_not_count(self, db, monkeypatch):
+        self._row("skipped:paid", 2)
+        monkeypatch.setattr(steam.cfg, "steam_username", "someone else")
+        assert self._skipped() is False
+
+    def test_a_package_with_the_same_number_is_another_page(self, db):
+        self._row("skipped:paid", 2)
+        assert self._skipped("sub") is False
+
+    def test_a_paid_page_steam_s_search_lists_free_now_is_opened(self, db):
+        # GamerPower can list a giveaway hours before it starts; Steam's own search shows when it has.
+        self._row("skipped:paid", 2)
+        claimer = SteamClaimer()
+        claimer._free_in_search = frozenset({("app", "4114140")})
+        assert self._skipped(claimer=claimer) is False
+
+    def test_the_search_says_nothing_about_a_missing_base_game(self, db):
+        self._row("failed:missing_base", 2)
+        claimer = SteamClaimer()
+        claimer._free_in_search = frozenset({("app", "4114140")})
+        assert self._skipped(claimer=claimer) is True
+
+    def test_a_known_skip_is_not_opened_at_all(self, db):
+        self._row("skipped:paid", 2)
+        claimer, loads = SteamClaimer(), []
+
+        class Page:
+            async def get(self, url):
+                loads.append(url)
+        claimer.page = Page()
+        asyncio.run(claimer._claim_game({"title": "Gear.Club", "source": "gamerpower",
+                                         "url": "https://store.steampowered.com/app/4114140/Gear_Club/"}))
+        assert loads == [] and claimer.notify_games == []
+
+    def test_the_check_comes_before_the_page_is_opened(self):
+        assert self.CLAIM.index("await self._recently_skipped(") < self.CLAIM.index("await self.page.get(url)")
+
+    def test_a_paid_page_is_remembered_outside_a_dry_run(self):
+        paid = self.CLAIM.split('notify_game["status"] = "skipped:paid"', 1)[1].split("return", 1)[0]
+        assert "if not cfg.dryrun:" in paid and 'status="skipped:paid"' in paid and "mark_page_checked(obj)" in paid
+        # A package sharing a game's number must not overwrite the row of a game you have.
+        assert 'obj.status == "existed" or obj.status.startswith("claimed")' in paid
+
+    def test_the_search_s_free_pages_are_kept_for_the_check(self):
+        run = SOURCE.split("async def run(", 1)[1].split("\n    async def ", 1)[0]
+        assert run.index("self._free_in_search = ") < run.index("await self._claim_game(game)")
+        assert "logger.warning" not in self.CLAIM.split("hasPaidBlock\")", 1)[1].split("return", 1)[0]
+
+    def test_a_dlc_without_its_base_game_notes_when_it_was_read(self):
+        missing = self.CLAIM.split("track_missing_base(obj, remember=not cfg.dryrun)", 1)[1].split("await session.commit()", 1)[0]
+        assert "if not cfg.dryrun:" in missing and "mark_page_checked(obj)" in missing
+
+    def test_the_date_goes_into_the_row_s_extra(self):
+        row = ClaimedGame(store="steam", user="player", game_id="1", title="x", extra=json.dumps({"missing_base_reported": "a"}))
+        mark_page_checked(row, now=datetime(2026, 10, 28, tzinfo=timezone.utc))
+        assert json.loads(row.extra) == {"missing_base_reported": "a", "page_checked": "2026-10-28T00:00:00+00:00"}
+
+
+class TestAClaimStaysAClaim:
+    def test_a_game_the_bot_claimed_is_not_turned_into_existed(self):
+        # Review 8.11: Epic, Fab and Unity keep "claimed" when a later run finds the game owned; Steam overwrote it.
+        source = (Path(__file__).resolve().parent.parent / "src" / "stores" / "steam.py").read_text(encoding="utf-8")
+        owned = source.split("if owned.get(\"owned\"):", 1)[1].split("return", 1)[0]
+        assert 'if not obj.status.startswith("claimed"):' in owned and owned.count('obj.status = "existed"') == 1

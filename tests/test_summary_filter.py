@@ -173,7 +173,7 @@ class TestNeededYouArrivesWithoutGames:
     SOURCE = MAIN_PY.read_text(encoding="utf-8")
 
     def test_the_summary_is_built_when_only_a_store_waited(self):
-        assert "if cfg.notify_summary and (aggregated_results or waiting_for_you()):" in self.SOURCE
+        assert "if cfg.notify_summary and (aggregated_results or waiting_for_you() or booked()):" in self.SOURCE
 
 
 class TestTheRunBannerNamesEverySite:

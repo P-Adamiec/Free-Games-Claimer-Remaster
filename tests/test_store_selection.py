@@ -46,7 +46,8 @@ class TestDefaultSelection:
     def test_new_stores_are_not_silently_left_out(self):
         # Anything in the registry is either a default or a deliberate opt-in.
         # Fab and Unity hand out assets for game developers, not games, so they run only when named.
-        opt_in = {"unity", "fab"}
+        # Microsoft Rewards runs against Microsoft's terms, at the user's own risk, so only when named.
+        opt_in = {"unity", "fab", "msrewards"}
         missing = sorted(set(_registry_keys()) - set(_default_stores()) - opt_in)
         assert not missing, (
             f"{missing} exist in ALL_CLAIMERS but run neither by default nor as a known opt-in. "
@@ -57,7 +58,7 @@ class TestDefaultSelection:
     def test_each_expected_store_is_present(self, store):
         assert store in _default_stores()
 
-    @pytest.mark.parametrize("store", ["fab", "unity"])
+    @pytest.mark.parametrize("store", ["fab", "unity", "msrewards"])
     def test_the_asset_stores_are_opt_in(self, store):
         assert store not in _default_stores()
 
@@ -99,7 +100,7 @@ class TestRunOrder:
         assert "if sides or any(key in GP_TARGETS for key in selected)" in guard
 
     def test_the_big_stores_are_handed_their_own_finds(self):
-        assert "await func(routed.get(key)) if key in GP_TARGETS else await func()" in self.RUN
+        assert "await within_limit(name, func(routed.get(key)) if key in GP_TARGETS else func(), _store_key(name))" in self.RUN
 
     def test_the_side_stores_come_after_the_gog_codes(self):
         assert self.RUN.index("redeem_pending_codes") < self.RUN.index("claim_side_stores(routed)")

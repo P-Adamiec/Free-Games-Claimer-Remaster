@@ -274,3 +274,20 @@ class TestOnlyBuyNowStartsTheCheckout:
         start = source.split("async def _start_checkout", 1)[1].split("\n    async def ", 1)[0]
         clicker = start.split('"""')[3]  # the script that picks the button
         assert "/^buy now$/i" in clicker and "add to cart" not in clicker.lower()
+
+
+class TestOwnershipIsCheckedOnTheStore:
+    """PR #97 by @ccsimplyspolit: the entitlements API path is relative, and from pay.unity.com it hits the wrong host."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "unity.py").read_text(encoding="utf-8")
+
+    def test_it_leaves_the_payment_host_before_reading_ownership(self):
+        after_pay = self.SOURCE.split("if not await self._pay_now(", 1)[1].split("in await self._owned_ids():", 1)[0]
+        assert "url_has_allowed_host(landed, STORE_HOST)" in after_pay
+        assert "await self.page.get(URL_ORDERS)" in after_pay
+        assert after_pay.index("await self.sleep(12)") < after_pay.index("await self.page.get(URL_ORDERS)")
+
+    def test_the_ownership_check_is_relative_to_the_page(self):
+        # Why the step above matters: _fetch_json() asks the API from whatever page is open.
+        fetch = self.SOURCE.split("async def _fetch_json", 1)[1].split("\n    async def ", 1)[0]
+        assert "fetch({json.dumps(path)}" in fetch and "API_ENTITLEMENTS" in self.SOURCE

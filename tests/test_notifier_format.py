@@ -209,12 +209,13 @@ class TestDiscordLinkPreviews:
 class TestFailureScreenshots:
     """DEBUG_SCREENSHOTS sends the screenshot a failure leaves, never one taken after a claim or a skip; off by default."""
 
-    def _take(self, monkeypatch, tmp_path, on, failed=True):
+    def _take(self, monkeypatch, tmp_path, on, failed=True, debug=True):
         import asyncio
         import logging
 
         import src.core.claimer as claimer
         monkeypatch.setattr(claimer.cfg, "debug_screenshots", on)
+        monkeypatch.setattr(claimer.cfg, "debug", debug)
 
         class Store:
             store_name, logger = "steam", logging.getLogger("test")
@@ -222,8 +223,9 @@ class TestFailureScreenshots:
             def __init__(self):
                 self.page, self.sent = self, []
 
-            async def save_screenshot(self, path):
-                Path(path).write_bytes(b"png")
+            async def send(self, command):
+                import base64
+                return base64.b64encode(b"jpg").decode()
 
             def screenshot_path(self, *parts):
                 return tmp_path.joinpath(*parts)
@@ -237,7 +239,9 @@ class TestFailureScreenshots:
 
     def test_the_screenshot_goes_out_when_asked(self, monkeypatch, tmp_path):
         shot, sent = self._take(monkeypatch, tmp_path, True)
-        assert shot.exists() and sent == [("📸 steam: `steam_fail_Game.png`", shot)]
+        import re
+        assert re.fullmatch(r"steam_fail_Game_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.jpg", shot.name)
+        assert shot.exists() and sent == [(f"📸 steam: `{shot.name}`", shot)]
 
     def test_a_screenshot_after_a_claim_stays_on_disk(self, monkeypatch, tmp_path):
         shot, sent = self._take(monkeypatch, tmp_path, True, failed=False)
@@ -251,6 +255,23 @@ class TestFailureScreenshots:
     def test_claims_and_skips_are_not_failures(self, store, name):
         source = (ROOT / "src" / "stores" / store).read_text(encoding="utf-8")
         assert f"take_screenshot({name})" not in source and f"take_screenshot({name}, failed=False)" in source
+
+    def test_screenshots_older_than_three_months_are_deleted(self, monkeypatch, tmp_path):
+        import os
+        import time
+
+        old, recent, note = tmp_path / "epic_fail_old.jpg", tmp_path / "epic_fail_new.png", tmp_path / "notes.txt"
+        for f in (old, recent, note):
+            f.write_bytes(b"x")
+        stamp = time.time() - 91 * 86400
+        os.utime(old, (stamp, stamp))
+        os.utime(note, (stamp, stamp))
+        shot, _ = self._take(monkeypatch, tmp_path, False)
+        assert not old.exists() and recent.exists() and note.exists() and shot.exists()
+
+    def test_without_debug_no_screenshot_is_taken_or_sent(self, monkeypatch, tmp_path):
+        shot, sent = self._take(monkeypatch, tmp_path, True, debug=False)
+        assert shot is None and sent == [] and not list(tmp_path.iterdir())
 
     def test_nothing_is_sent_by_default(self, monkeypatch, tmp_path):
         shot, sent = self._take(monkeypatch, tmp_path, False)

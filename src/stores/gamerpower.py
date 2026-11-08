@@ -6,6 +6,7 @@ redemption sites (Fanatical, Alienware Arena, Itch.io, IndieGala)
 according to user configuration.
 """
 import json
+import random
 import re
 import httpx
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,8 @@ import nodriver as uc
 
 from sqlalchemy import select
 
-from src.core.claimer import BaseClaimer, OTP_KEY_ATTEMPTS, mask_account
+from src.core.claimer import (BaseClaimer, OTP_KEY_ATTEMPTS, RECHECK_DAYS, mark_page_checked, mask_account, older_than,
+                              row_extra)
 from src.core.redact import hide_account
 from src.core.config import cfg
 from src.core.database import async_session, ClaimedGame, get_or_create
@@ -415,22 +417,30 @@ FAN_GIVEAWAY_JS = """
 """
 
 # The cart's total as shown and which checkout control it offers: the upsell link or the pay button itself.
+# The pay button: "Proceed To Checkout" without an upsell, "Skip and Proceed To Checkout" after it; never the upsell's own ADD.
+_FAN_PAY_FIND = ("[...document.querySelectorAll('button#api-button')].find(vis)"
+                 " || [...document.querySelectorAll('button')].filter(vis)"
+                 ".find(x => /^skip and proceed to checkout$/i.test((x.innerText || '').replace(/\\s+/g, ' ').trim()))")
+
 FAN_CHECKOUT_STATE_JS = """
     (() => {
         const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
         const total = [...document.querySelectorAll('.checkout-total .summary-number')].find(vis);
-        const pay = [...document.querySelectorAll('button#api-button')].find(vis);
+        // The header's cart sum, for the deals page that can hide the cart's own total.
+        const navTotal = [...document.querySelectorAll('.nav-cart-btn .nav-cart-total')].find(vis);
+        const pay = __PAY__;
         const proceed = [...document.querySelectorAll('a')].filter(vis)
             .some(x => /^proceed to checkout$/i.test((x.innerText || '').trim()));
         return JSON.stringify({
             path: location.href,  // the full address, so fanatical_page() can check the host
             total: total ? (total.innerText || '').trim() : null,
+            navTotal: navTotal ? (navTotal.innerText || '').trim() : null,
             pay: pay ? (pay.innerText || '').replace(/\\s+/g, ' ').trim() : '',
             payDisabled: !!(pay && pay.disabled),
             proceed,
         });
     })()
-"""
+""".replace("__PAY__", _FAN_PAY_FIND)
 
 # Each marks the one visible control for nodriver's click: the giveaway button, the cart's upsell link, the pay button.
 _FAN_MARK = """
@@ -449,12 +459,16 @@ FAN_MARK_MAIN_JS = _FAN_MARK.replace(
 FAN_MARK_PROCEED_JS = _FAN_MARK.replace(
     "__FIND__", "[...document.querySelectorAll('a')].filter(vis)"
     ".find(x => /^proceed to checkout$/i.test((x.innerText || '').trim()))")
-# "Proceed To Checkout" without an upsell, "Skip and Proceed To Checkout" after it; never the upsell's own ADD.
-FAN_MARK_PAY_JS = _FAN_MARK.replace(
-    "__FIND__", "[...document.querySelectorAll('button#api-button')].find(vis)")
+FAN_MARK_PAY_JS = _FAN_MARK.replace("__FIND__", _FAN_PAY_FIND)
 
 # Where you connect Steam to Fanatical once; the bot never does it for you.
 FAN_LINKED_ACCOUNTS_URL = "https://www.fanatical.com/en/account/linked-accounts"
+# Order History & Keys: where a key Fanatical did not show at the claim is looked for again, at most this often.
+FAN_ORDERS_URL = "https://www.fanatical.com/en/orders"
+FAN_HOME_URL = "https://www.fanatical.com/en/"
+FAN_KEY_RECHECK_HOURS = 20
+# After this many looks a key that never showed is left to you in your Fanatical library.
+FAN_KEY_LOOKS = 5
 
 STEAM_KEY_RE = re.compile(r"^[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$")
 OTHER_DRM = ("epic", "gog", "uplay", "ubisoft", "origin", "ea app", "battle.net", "microsoft", "xbox", "rockstar")
@@ -564,6 +578,25 @@ def fanatical_item_is_steam(item: dict) -> bool:
 ITCH_OWNED_JS = """
     (() => !!document.querySelector('.purchase_banner, .ownership_reason'))()
 """
+
+
+# A free itch.io bundle (itch.io/b/3955/...): "Get the Bundle", then its free path, never one of the payment buttons.
+ITCH_BUNDLE_PATH = re.compile(r"^/b/(\d+)(?:/|$)")
+ITCH_GET_BUNDLE = "() => [...document.querySelectorAll('button.buy_bundle_btn')].find(b => b.getClientRects().length)"
+ITCH_NO_THANKS = r"""() => [...document.querySelectorAll('.lightbox .direct_download_btn')]
+    .find(b => b.getClientRects().length && /no thanks/i.test(b.innerText || ''))"""
+# Only counted, never pressed: a bundle's download page may list one per game, and none of them is the bundle.
+ITCH_CLAIM_CONTROLS = r"""[...document.querySelectorAll('a, button')]
+    .filter(x => !x.querySelector('a, button') && /^claim( game)?$/i.test((x.textContent || '').replace(/\s+/g, ' ').trim()))
+    .length"""
+
+
+def itch_bundle_number(url: str) -> str:
+    """The number of an itch.io bundle page (itch.io/b/3955/...), empty for anything else."""
+    if not url_has_allowed_host(str(url or ""), "itch.io"):
+        return ""
+    found = ITCH_BUNDLE_PATH.match(urlparse(str(url)).path)
+    return found.group(1) if found else ""
 
 
 def download_only_status(first_time: bool) -> str:
@@ -714,6 +747,8 @@ async def discover_giveaways() -> dict:
             "instructions": item.get("instructions", "") or "",
             "type": item.get("type", "") or "",
             "platforms": item.get("platforms", "") or "",
+            # When the giveaway ends ("N/A" when it does not say), so a captcha on its last run can still ask you.
+            "end_date": item.get("end_date", "") or "",
         } for item in kept]
 
         logger.debug("GamerPower API returned %d giveaway(s)", len(games))
@@ -789,6 +824,8 @@ class GamerPowerClaimer(BaseClaimer):
         self._itch_unreachable = False
         self._ig_session_noted = False
         self._fan_session_noted = False
+        # Why the last key reveal gave no key ("email" when Fanatical e-mailed a code), for the later look.
+        self._fan_reveal_said = ""
 
     async def run(self, routed: dict | None = None) -> None:
         """Claim the giveaways that land on sites with no store module of their own."""
@@ -803,7 +840,8 @@ class GamerPowerClaimer(BaseClaimer):
                     else:
                         (logger.debug if game.get("remembered") else logger.info)(
                             "⏭️ [GamerPower] '%s' → %s, not part of this run, skipping", game.get("title", "Unknown"), label)
-            if not work:
+            keys_due = await self._fanatical_keys_due() if self._side_store_selected("fanatical") and not cfg.dryrun else []
+            if not work and not keys_due:
                 return
 
             # One browser for all of them: these sites are claimed page by page, not in batches.
@@ -818,6 +856,9 @@ class GamerPowerClaimer(BaseClaimer):
                     needs_you(store, 1, "giveaway", why=NO_ANSWER)
                     continue
                 await self._process_side_store(store, game)
+            # A key Fanatical did not show at the claim is read from your orders, so Steam can still activate it.
+            if keys_due and not waits_for_nobody("fanatical"):
+                await self._fanatical_collect_keys(keys_due)
         except Exception as exc:
             logger.exception("Fatal error in GamerPower")
             if cfg.notify_errors:
@@ -993,7 +1034,7 @@ class GamerPowerClaimer(BaseClaimer):
 
     async def _confirm_side_login(self, label: str, check_fn, backup_codes: list | None = None,
                                  backup_file: str = "", otp_key: str | None = None,
-                                 credentials: tuple | None = None) -> bool:
+                                 credentials: tuple | None = None, item: str = "giveaway", count: int = 1) -> bool:
         """Finish a side-store login: answer a code screen if one shows, else hand over via VNC."""
         if await check_fn():
             return True
@@ -1042,8 +1083,8 @@ class GamerPowerClaimer(BaseClaimer):
             login_help_message(label, code_screen, tried_backup))
         if await self._wait_for_vnc_login(check_fn, custom_msg=msg, store_key=side_store_key(label)):
             return True
-        logger.warning("[%s] Still not signed in, skipping this giveaway.", label)
-        needs_you(side_store_key(label), 1, "giveaway")
+        logger.warning("[%s] Still not signed in, skipping %s.", label, f"this {item}" if count == 1 else f"these {count} {item}s")
+        needs_you(side_store_key(label), count, item)
         return False
 
     async def _type_otp(self, label: str, code: str) -> bool:
@@ -1216,6 +1257,7 @@ class GamerPowerClaimer(BaseClaimer):
         data = answer.get("data")
         key = steam_key_in(data)
         detail = answer.get("reason") or answer.get("error") or ""
+        self._fan_reveal_said = "email" if isinstance(data, dict) and data.get("key") == "email" else str(answer.get("reason") or "")
         logger.debug("[Fanatical] Key reveal for '%s' answered %s %s, Steam key found: %s",
                      title, answer.get("status"), detail[:120], bool(key))
         if answer.get("reason") == "email-unconfirmed":
@@ -1319,6 +1361,7 @@ class GamerPowerClaimer(BaseClaimer):
     async def _fanatical_checkout(self, title: str) -> tuple[str, str]:
         """Check the free cart out as its page does: ("receipt", its address), else "not-free", "no-cart" or "stuck"."""
         cart_seen = free_seen = moved = paid = False
+        last: dict = {}
         for attempt in range(25):
             await self.sleep(3)
             try:
@@ -1338,24 +1381,33 @@ class GamerPowerClaimer(BaseClaimer):
                     logger.debug("[Fanatical] Still on %s after the claim click.", path)
                     return "no-cart", ""
                 continue
-            cart_seen = True
-            if state.get("total") is not None:
-                total = fanatical_price(state["total"])
-                logger.debug("[Fanatical] Cart total %s (%s).", state["total"], total)
+            cart_seen, last = True, state
+            total_text = state.get("total")
+            # The deals page can hide the cart's own total (live 4.11): the header's sum then confirms the cart's zero, never decides alone.
+            if total_text is None and free_seen and re.match(r"skip and proceed", str(state.get("pay") or ""), re.I):
+                total_text = state.get("navTotal") or None
+            if total_text is not None:
+                total = fanatical_price(total_text)
+                logger.debug("[Fanatical] Cart total %s (%s)%s.", total_text, total,
+                             "" if state.get("total") is not None else ", from the header on the deals page")
                 if total is None:
                     logger.warning("[Fanatical] Could not read your cart's total, so '%s' was left in it.", title)
                     return "not-free", ""
                 if total != 0:
-                    logger.warning("[Fanatical] Your cart costs %s, so '%s' was left in it.", state["total"], title)
+                    logger.warning("[Fanatical] Your cart costs %s, so '%s' was left in it.", total_text, title)
                     return "not-free", ""
                 free_seen = True
             if not free_seen or paid:
                 continue
             # Paying needs this very read to show the total as zero, an earlier read is not enough.
-            if state.get("pay") and not state.get("payDisabled") and state.get("total") is not None:
+            if state.get("pay") and not state.get("payDisabled") and total_text is not None:
                 paid = moved = await self._fanatical_click(FAN_MARK_PAY_JS, state["pay"])
             elif state.get("proceed"):
                 moved = await self._fanatical_click(FAN_MARK_PROCEED_JS, "Proceed to checkout") or moved
+        if cart_seen:
+            logger.debug("[Fanatical] The checkout stayed in the cart: total %r, header %r, button %r (disabled %s), "
+                         "proceed link %s.", last.get("total"), last.get("navTotal"), last.get("pay"),
+                         last.get("payDisabled"), last.get("proceed"))
         return ("stuck" if cart_seen else "no-cart"), ""
 
     async def _fanatical_complete_order(self, game_id: str, title: str, oid: str = "",
@@ -1452,8 +1504,45 @@ class GamerPowerClaimer(BaseClaimer):
             )
             first_time = created or obj.status != status
             obj.status = status
+            mark_page_checked(obj)
             await session.commit()
         return first_time
+
+    async def _itch_recently_download_only(self, game_id: str) -> bool:
+        """True for a giveaway that was a download only when its page was read lately, so it is not opened again yet."""
+        async with async_session() as session:
+            row = (await session.execute(select(ClaimedGame).where(
+                ClaimedGame.store == "itchio", ClaimedGame.user == self.user,
+                ClaimedGame.game_id == game_id))).scalars().first()
+        if row is None or row.status != "skipped:download-only":
+            return False
+        checked = row_extra(row).get("page_checked")
+        if older_than(checked, RECHECK_DAYS):
+            return False
+        logger.debug("[Itch.io] '%s' was a download only when read %s, not opened again yet.", row.title, checked)
+        return True
+
+    async def _itch_claim_bundle(self, title: str) -> str:
+        """Walk a free bundle's own path: Get the Bundle, then "No thanks". Returns "download-only", "not-free" or "blocked"."""
+        if not await self._click_like_a_hand(ITCH_GET_BUNDLE, "Get the Bundle"):
+            logger.warning("[Itch.io] '%s' has no Get the Bundle button on its page.", title)
+            logger.debug("[Itch.io] Bundle page without the button: %s", await self._page_brief())
+            return "blocked"
+        for _ in range(8):
+            await self.sleep(1)
+            if await self.page.evaluate(f"!!({ITCH_NO_THANKS})()") is True:
+                break
+        else:
+            # Only a bundle you may take for $0 offers this path; anything else wants money and is left alone.
+            return "not-free"
+        await self.sleep(random.uniform(1.5, 3))
+        if not await self._click_like_a_hand(ITCH_NO_THANKS, "No thanks, just take me to the downloads"):
+            return "blocked"
+        await self.sleep(6)
+        # Checked live 2.11: itch.io lists no free bundle among your purchases, and a price of $0 opens no checkout.
+        logger.debug("[Itch.io] Bundle download page: %s, claim controls on it: %s",
+                     await self._page_brief(), await self.page.evaluate(ITCH_CLAIM_CONTROLS))
+        return "download-only"
 
     async def _itch_run_claim(self, title: str) -> str:
         """Walk itch.io's claim chain. Returns "clicked", "download-only", "not-free" or "blocked"."""
@@ -1503,6 +1592,122 @@ class GamerPowerClaimer(BaseClaimer):
         await self.sleep(7)
         return "clicked"
 
+    async def _fanatical_session(self, url: str, item: str = "giveaway", count: int = 1) -> bool:
+        """Open `url` on Fanatical signed in, the way a claim starts; False when the sign-in did not finish."""
+        # The host alone is not enough: staying on the previous game's page would judge this one by that page.
+        current_url = str(await self.page.evaluate("window.location.href") or "")
+        if not current_url.startswith(url):
+            await self.page.get(url)
+            await self.sleep(4)
+
+        # The cookie wall covers the header, so it goes first either way.
+        await self.page.evaluate("""
+            (() => {
+                const b = [...document.querySelectorAll('button, a')].find(x =>
+                    (x.textContent || '').includes('Reject All Non-Essential') ||
+                    (x.textContent || '').includes('Reject All'));
+                if (b) b.click();
+            })()
+        """)
+        await self.sleep(2)
+
+        # Every giveaway lists "Create or Sign in" as its first step, done or not, so only the header decides.
+        if not await self._fanatical_signed_in():
+            email = cfg.fanatical_email
+            password = cfg.fanatical_password
+            if email and password:
+                logger.info("[Fanatical] Logging in as %s…", mask_account(email))
+                await self._fanatical_login(email, password)
+                # Fanatical issues no recovery codes, so only the authenticator secret gets the bot past its code screen.
+                if not await self._confirm_side_login("Fanatical", self._fanatical_signed_in,
+                                                      otp_key=cfg.fanatical_otp_key,
+                                                      credentials=(email, password), item=item, count=count):
+                    return False
+                self._log_side_signed_in("Fanatical", email)
+            else:
+                logger.warning("[Fanatical] No credentials set (FANATICAL_EMAIL/PASSWORD). Waiting for VNC...")
+                if not await self._wait_for_vnc_login(
+                        self._fanatical_signed_in, custom_msg=self._no_credentials_notice("Fanatical", "FANATICAL"),
+                        store_key="fanatical"):
+                    needs_you("fanatical", count, item)
+                    return False
+            self._fan_session_noted = True
+        elif not self._fan_session_noted:
+            self._log_side_signed_in("Fanatical", cfg.fanatical_email)
+            self._fan_session_noted = True
+
+        current_url = str(await self.page.evaluate("window.location.href") or "")
+        if not current_url.startswith(url):
+            await self.page.get(url)
+            await self.sleep(4)
+        return True
+
+    async def _fanatical_keys_due(self) -> list:
+        """Fanatical games claimed without their key, not looked for in the last hours, as database rows."""
+        async with async_session() as session:
+            rows = (await session.execute(select(ClaimedGame).where(
+                ClaimedGame.store == "fanatical", ClaimedGame.user == self.user,
+                ClaimedGame.status == "claimed"))).scalars().all()
+        due = [row for row in rows if not row.code and not row_extra(row).get("key_skip")
+               and older_than(row_extra(row).get("key_checked"), FAN_KEY_RECHECK_HOURS / 24)]
+        logger.debug("[Fanatical] %d claimed game(s) without a key, %d due for a look.",
+                     sum(1 for row in rows if not row.code), len(due))
+        return due
+
+    async def _fanatical_collect_keys(self, rows: list) -> None:
+        """Look the missing keys up in your orders, as Order History & Keys does, and leave Steam ones for Steam."""
+        if cfg.dryrun:
+            logger.info("DRYRUN – would look for %d Fanatical key(s) in your orders.", len(rows))
+            return
+        # The shop first, as a person would come to Order History & Keys, never a cold jump to an account page.
+        if not await self._fanatical_session(FAN_HOME_URL, item="key", count=len(rows)):
+            logger.debug("[Fanatical] The sign-in did not finish, %d missing key(s) wait for the next run.", len(rows))
+            return
+        await self.sleep(random.uniform(3, 7))
+        await self.page.get(FAN_ORDERS_URL)
+        await self.sleep(random.uniform(4, 8))
+        orders = await self._fanatical_orders()
+        if orders is None:
+            logger.debug("[Fanatical] Orders could not be read, the missing keys wait for the next run.")
+            return
+        for row in rows:
+            found = find_fanatical_item(orders, row.game_id, row.title)
+            detail = await self._fanatical_order_item(found["oid"], row.game_id, row.title) if found else None
+            extra = row_extra(row)
+            extra["key_checked"] = datetime.now(timezone.utc).isoformat()
+            extra["key_looks"] = int(extra.get("key_looks") or 0) + 1
+            key = ""
+            if not found:
+                logger.debug("[Fanatical] '%s' is not in your orders yet, looked for again later.", row.title)
+            elif not detail or detail["status"] != "COMPLETE":
+                logger.debug("[Fanatical] The order for '%s' would not load or is not complete (%s).",
+                             row.title, detail["status"] if detail else "no answer")
+            elif not detail["item"].get("_id") or detail["item"].get("type") == "bundle" \
+                    or not fanatical_item_is_steam(detail["item"]):
+                # A bundle or a key for another store is yours to take from the library, it is not looked for again.
+                extra["key_skip"] = "not a single Steam key"
+                logger.debug("[Fanatical] '%s' is not a single Steam key, left in your library.", row.title)
+            else:
+                await self.sleep(random.uniform(2, 5))
+                self._fan_reveal_said = ""
+                key = await self._fanatical_reveal_key(detail, row.title)
+                # A code Fanatical e-mails only you can type in, asking again would only send more mail.
+                if not key and self._fan_reveal_said == "email":
+                    extra["key_skip"] = "Fanatical e-mails a code to reveal it"
+            if not key and not extra.get("key_skip") and extra["key_looks"] >= FAN_KEY_LOOKS:
+                extra["key_skip"] = f"not shown after {FAN_KEY_LOOKS} looks"
+                logger.info("[Fanatical] The key for '%s' did not show after %d looks, it stays in your Fanatical library.",
+                            row.title, FAN_KEY_LOOKS)
+            async with async_session() as session:
+                obj = await session.get(ClaimedGame, row.id)
+                if key:
+                    obj.code = key
+                    extra["external_store"] = "steam"
+                    logger.info("[Fanatical] Found the Steam key for '%s' in your orders%s.", row.title,
+                                ", Steam activates it at the end of this run" if is_store_active("steam") else "")
+                obj.extra = json.dumps(extra)
+                await session.commit()
+
     async def _claim_fanatical_game(self, game: dict) -> None:
         title = game.get("title", "Unknown")
         url = game.get("final_url") or game.get("url", "")
@@ -1513,52 +1718,8 @@ class GamerPowerClaimer(BaseClaimer):
         self.notify_games.append(notify_game)
 
         try:
-            # The host alone is not enough: staying on the previous game's page would judge
-            # this one by that page.
-            current_url = str(await self.page.evaluate("window.location.href") or "")
-            if not current_url.startswith(url):
-                await self.page.get(url)
-                await self.sleep(4)
-
-            # The cookie wall covers the header, so it goes first either way.
-            await self.page.evaluate("""
-                (() => {
-                    const b = [...document.querySelectorAll('button, a')].find(x =>
-                        (x.textContent || '').includes('Reject All Non-Essential') ||
-                        (x.textContent || '').includes('Reject All'));
-                    if (b) b.click();
-                })()
-            """)
-            await self.sleep(2)
-
-            # Every giveaway lists "Create or Sign in" as its first step, done or not, so only the header decides.
-            if not await self._fanatical_signed_in():
-                email = cfg.fanatical_email
-                password = cfg.fanatical_password
-                if email and password:
-                    logger.info("[Fanatical] Logging in as %s…", mask_account(email))
-                    await self._fanatical_login(email, password)
-                    # Fanatical issues no recovery codes, so only the authenticator secret gets the bot past its code screen.
-                    if not await self._confirm_side_login("Fanatical", self._fanatical_signed_in,
-                                                          otp_key=cfg.fanatical_otp_key,
-                                                          credentials=(email, password)):
-                        return
-                    self._log_side_signed_in("Fanatical", email)
-                else:
-                    logger.warning("[Fanatical] No credentials set (FANATICAL_EMAIL/PASSWORD). Waiting for VNC...")
-                    if not await self._wait_for_vnc_login(
-                            self._fanatical_signed_in, custom_msg=self._no_credentials_notice("Fanatical", "FANATICAL"),
-                            store_key="fanatical"):
-                        return
-                self._fan_session_noted = True
-            elif not self._fan_session_noted:
-                self._log_side_signed_in("Fanatical", cfg.fanatical_email)
-                self._fan_session_noted = True
-
-            current_url = str(await self.page.evaluate("window.location.href") or "")
-            if not current_url.startswith(url):
-                await self.page.get(url)
-                await self.sleep(4)
+            if not await self._fanatical_session(url):
+                return
 
             # Ownership comes from a COMPLETE order; one left INITIALISED by an unfinished checkout is not yours.
             orders = await self._fanatical_orders()
@@ -1768,7 +1929,8 @@ class GamerPowerClaimer(BaseClaimer):
             # Cloudflare's "Just a moment" page has no logout link, so judging it read as signed out (#59).
             if await self._human_challenge_present():
                 logger.debug("[Itch.io] Waiting for the Cloudflare check to pass before judging the session.")
-                if not await self._wait_out_challenge("Itch.io", store_key="itchio"):
+                # itch.io's check passes by itself, but it can take up to 2.5 minutes (#59).
+                if not await self._wait_out_challenge("Itch.io", store_key="itchio", settle=180):
                     return False
             # No logout link is not "signed out": an error or timeout page has no login link either.
             state = await self._itch_state_after_load()
@@ -1813,8 +1975,13 @@ class GamerPowerClaimer(BaseClaimer):
         title = game.get("title", "Unknown")
         url = game.get("final_url") or game.get("url", "")
         giveaway_url = game.get("giveaway_url", url)
-        game_id = itch_game_id(url) or giveaway_url
+        bundle = itch_bundle_number(url)
+        # Every bundle page starts with /b/, so a bundle is known by its number, not by itch_game_id().
+        game_id = f"itch.io/b/{bundle}" if bundle else (itch_game_id(url) or giveaway_url)
 
+        if await self._itch_recently_download_only(game_id):
+            self.notify_games.append({"title": f"{title} (Itch.io)", "url": url, "status": "skipped:download-only"})
+            return
         notify_game = {"title": f"{title} (Itch.io)", "url": url, "status": "failed"}
         self.notify_games.append(notify_game)
 
@@ -1851,18 +2018,19 @@ class GamerPowerClaimer(BaseClaimer):
                 notify_game["status"] = "available (dry run)"
                 return
 
-            walked = await self._itch_run_claim(title)
+            walked = await (self._itch_claim_bundle(title) if bundle else self._itch_run_claim(title))
             if walked == "not-free":
                 # GamerPower keeps listing a sale after it drops below 100%, that is no news for you.
                 logger.info("[Itch.io] '%s' is not free on itch.io right now, skipping.", title)
                 self.notify_games.remove(notify_game)
                 return
 
-            # The claim only counts when itch.io says the game is on the account. Clicking
-            # through the downloads without claiming leaves you with a file and nothing else.
-            await self.page.get(url)
-            await self.sleep(5)
-            owned = await self._itch_owns_this()
+            # The claim only counts when itch.io says the game is on the account; a bundle never gets that far.
+            owned = False
+            if not bundle:
+                await self.page.get(url)
+                await self.sleep(5)
+                owned = await self._itch_owns_this()
 
             if owned:
                 logger.info("✓ [Itch.io] Claimed '%s'!", title)

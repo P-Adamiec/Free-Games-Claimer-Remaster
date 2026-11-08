@@ -64,6 +64,33 @@ def port_is_open(port: int | str, host: str = "127.0.0.1") -> bool:
         return False
 
 
+def viewer_sockets(table: str, port: int | str) -> set[str]:
+    """The socket numbers of connections established to the VNC port, read from a /proc/net/tcp table."""
+    want = f"{int(port):04X}"
+    found = set()
+    for line in table.splitlines()[1:]:
+        fields = line.split()
+        # local address, remote address, state (01 is ESTABLISHED), ..., inode
+        if len(fields) > 9 and fields[1].rsplit(":", 1)[-1].upper() == want and fields[3] == "01":
+            found.add(fields[9])
+    return found
+
+
+def vnc_viewers() -> set[str] | None:
+    """Who is watching the screen right now, as socket numbers; None where there is no /proc to ask (outside the container)."""
+    port = os.environ.get("VNC_PORT", "5900")
+    tables = [Path("/proc/net/tcp"), Path("/proc/net/tcp6")]
+    if not tables[0].exists():
+        return None
+    found = set()
+    for table in tables:
+        try:
+            found |= viewer_sockets(table.read_text(), port)
+        except Exception as exc:
+            logger.debug("Could not read %s: %s", table, exc)
+    return found
+
+
 def screen_state() -> str:
     """One readable summary of the screen and its two ports, for the log."""
     number = display_number()

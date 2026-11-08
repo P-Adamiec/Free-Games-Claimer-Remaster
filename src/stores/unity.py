@@ -10,7 +10,7 @@ import json
 import logging
 import re
 
-from src.core.claimer import BaseClaimer
+from src.core.claimer import BaseClaimer, mark_page_checked, read_lately
 from src.core.config import cfg
 from src.core.database import async_session, get_or_create
 from src.core.url_security import url_has_allowed_host
@@ -419,6 +419,11 @@ class UnityClaimer(BaseClaimer):
         """Open the asset page, confirm it is the giveaway, then claim it with the coupon."""
         title, slug, url = asset["title"], asset["slug"], asset["url"]
         package_id = asset.get("package_id") or ""
+        # The sale page is read every run for its coupon; the page of an asset you have only every few days.
+        if await self._read_lately(slug):
+            logger.debug("'%s' is on record and its page was read lately, not opened this run.", title)
+            self.notify_games.append({"title": title, "url": url, "status": "existed"})
+            return
         logger.debug("Opening Unity asset page: %s", url)
 
         await self.page.get(url)
@@ -451,6 +456,7 @@ class UnityClaimer(BaseClaimer):
             logger.info("'%s' already in library.", title)
             logger.debug("Recorded by an earlier run, not claiming again.")
             self.notify_games.append({"title": title, "url": url, "status": "existed"})
+            await self._remember(slug, title, url, "existed")
             return
 
         if cfg.dryrun:
@@ -496,11 +502,17 @@ class UnityClaimer(BaseClaimer):
             return
 
         await self.sleep(12)
+        # The entitlements API is asked from the page itself, and pay.unity.com is the wrong host for it (PR #97).
+        landed = await self._current_url()
+        if not url_has_allowed_host(landed, STORE_HOST):
+            logger.debug("The checkout ended on %s, back to the orders page before checking ownership.", landed[:100])
+            await self.page.get(URL_ORDERS)
+            await self.sleep(6)
         if package_id and package_id in await self._owned_ids():
             logger.info("✓ Claimed '%s' successfully!", title)
             status = "claimed"
         else:
-            logger.warning("Claim of '%s' was not confirmed by the entitlements API, check it manually.", title)
+            logger.warning("Claim of '%s' was not confirmed by the entitlements API, trying again next run.", title)
             status = "failed:unconfirmed"
 
         self.notify_games.append({"title": title, "url": url, "status": status})
@@ -717,8 +729,8 @@ class UnityClaimer(BaseClaimer):
             logger.debug("Could not press Pay now: %s", exc)
             return False
 
-    async def _already_recorded(self, slug: str) -> bool:
-        """True when an earlier run already stored this asset for this account."""
+    async def _record(self, slug: str):
+        """This asset's row for this account, None when no earlier run stored it."""
         from sqlalchemy import select
 
         from src.core.database import ClaimedGame
@@ -731,7 +743,15 @@ class UnityClaimer(BaseClaimer):
                     ClaimedGame.game_id == slug,
                 )
             )
-            return result.scalar_one_or_none() is not None
+            return result.scalar_one_or_none()
+
+    async def _read_lately(self, slug: str) -> bool:
+        """True for an asset on record whose page was read in the last few days."""
+        return read_lately(await self._record(slug), ("claimed", "existed"))
+
+    async def _already_recorded(self, slug: str) -> bool:
+        """True when an earlier run already stored this asset for this account."""
+        return await self._record(slug) is not None
 
     async def _remember(self, slug: str, title: str, url: str, status: str) -> None:
         """Record the asset so later runs can tell it apart from a new one."""
@@ -745,8 +765,10 @@ class UnityClaimer(BaseClaimer):
                 url=url,
                 status=status,
             )
-            if not created and obj.status != status:
+            # A claim the bot made stays a claim when a later run finds the asset owned.
+            if not created and obj.status != status and not (obj.status == "claimed" and status == "existed"):
                 obj.status = status
+            mark_page_checked(obj)
             await session.commit()
             logger.debug("DB %s '%s' (status=%s).", "stored" if created else "already had", slug, obj.status)
 

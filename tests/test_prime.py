@@ -164,3 +164,17 @@ class TestACodeNotReadIsLookedForAgain:
 
     def test_the_dead_filter_is_gone(self):
         assert "existing_codes_map" not in self.SOURCE
+
+
+class TestPasskeyBlockerStaysOnSignInPages:
+    """PR #97 by @ccsimplyspolit: the form sweep watched every change of Luna's claims page and froze it."""
+
+    SOURCE = (ROOT / "src" / "stores" / "prime.py").read_text(encoding="utf-8")
+    SCRIPT = SOURCE.split("add_script_to_evaluate_on_new_document", 1)[1].split("Passkey neutralization", 1)[0]
+
+    def test_the_sweep_returns_before_watching_outside_sign_in_pages(self):
+        sweep = self.SCRIPT.split("(function () {", 1)[1]
+        assert sweep.index("if (!location.pathname.includes('/ap/')) return;") < sweep.index("new MutationObserver(sweep)")
+
+    def test_webauthn_is_still_switched_off_on_every_page(self):
+        assert self.SCRIPT.index("PublicKeyCredential") < self.SCRIPT.index("(function () {")

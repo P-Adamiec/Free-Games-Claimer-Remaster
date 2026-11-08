@@ -1,0 +1,88 @@
+name: New store or reward
+description: A store, launcher or reward program the bot could claim from.
+title: "[New store]: "
+labels: ["type: feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The bot runs a real browser and signs in with your own account, so it can only do what a website lets you do by hand: rewards that live only in a phone app or on a console are out of its reach. Several stores forbid bots in their terms ([DISCLAIMER.md](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/blob/main/DISCLAIMER.md)), so the risk to the account weighs in every decision. The more of this you fill in, the sooner I can tell whether it can be done.
+  - type: checkboxes
+    id: newest
+    attributes:
+      label: Before you suggest it
+      options:
+        - label: I checked the newest version and the [CHANGELOG](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/blob/main/CHANGELOG.md), and the bot does not claim from this store yet.
+          required: true
+        - label: I searched the [open and closed issues](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues?q=is%3Aissue) and nobody suggested it yet.
+          required: true
+  - type: input
+    id: name
+    attributes:
+      label: Store or program
+      placeholder: My Nintendo Platinum Points
+    validations:
+      required: true
+  - type: input
+    id: address
+    attributes:
+      label: Where you claim it
+      description: "The address you open in your browser to claim, for example https://my.nintendo.com/missions."
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it happens
+      options:
+        - On the website, in a browser
+        - In a phone app only
+        - On a console or in a launcher only
+        - I am not sure
+    validations:
+      required: true
+  - type: textarea
+    id: free
+    attributes:
+      label: What is free, and how often
+      description: "What you get (games, points, coins), how often a new one comes (daily, weekly, monthly) and how long it stays."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you do by hand
+      description: "Every click from opening the page to having the reward, in order. Say where you sign in and whether it asks for a code or a captcha."
+    validations:
+      required: true
+  - type: dropdown
+    id: needs
+    attributes:
+      label: What claiming needs
+      description: Pick everything that applies.
+      multiple: true
+      options:
+        - A paid subscription (for example PS Plus or Nintendo Switch Online)
+        - Nothing beyond a free account
+        - A console, phone or other device linked to the account
+        - A payment method on the account, or a free trial
+        - A certain country or region
+        - A minimum level, points or earlier purchases
+        - I am not sure
+    validations:
+      required: true
+  - type: input
+    id: region
+    attributes:
+      label: Your account's country
+      description: Some rewards differ by region.
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: "The page where you claim and the button you press. A screenshot of a signed-in page shows your name, e-mail or points, so blur those first. Never post passwords or codes."
+  - type: textarea
+    id: found
+    attributes:
+      label: Other tools that do this
+      description: A script, browser extension or another project that already claims from this store, with a link.

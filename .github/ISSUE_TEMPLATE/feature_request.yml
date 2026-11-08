@@ -1,11 +1,14 @@
 name: Feature idea
-description: Something new the bot could do.
+description: Something new the bot could do in a store it already supports, or in its notifications and setup.
+title: "[Feature]: "
 labels: ["type: feature"]
 body:
   - type: markdown
     attributes:
       value: |
         I read and think through every idea myself. The more of this you fill in, the sooner I can understand it and see how it fits the bot.
+
+        A new store or reward program? Use the [New store or reward](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues/new?template=new_store.yml) form instead.
   - type: checkboxes
     id: newest
     attributes:
@@ -15,13 +18,6 @@ body:
           required: true
         - label: I searched the [open and closed issues](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster/issues?q=is%3Aissue) and nobody suggested it yet.
           required: true
-  - type: textarea
-    id: what
-    attributes:
-      label: What the bot should do
-      description: One or two sentences are enough.
-    validations:
-      required: true
   - type: dropdown
     id: store
     attributes:
@@ -34,6 +30,7 @@ body:
         - Prime Gaming
         - GOG
         - Microsoft Store
+        - Microsoft Rewards
         - Ubisoft
         - Unity Asset Store
         - AliExpress
@@ -45,24 +42,25 @@ body:
         - GamerPower
         - Notifications
         - Docker, VNC or setup
-        - A new store
         - Something else
     validations:
       required: true
   - type: textarea
-    id: why
+    id: problem
     attributes:
-      label: Why you need it
-      description: The problem it solves for you, or what you do by hand today.
+      label: What bothers you today
+      description: The problem and how often you run into it, with a log line if there is one. For something the bot does not do at all, what you do by hand instead.
     validations:
       required: true
   - type: textarea
-    id: how
+    id: wanted
     attributes:
-      label: How you would use it
-      description: The setting you would change, and what you would expect to see in the log or in the notification.
+      label: What you would like the bot to do
+      description: What it should do, and what you would see in the log or the notification. A setting name you have in mind is welcome here too.
+    validations:
+      required: true
   - type: textarea
-    id: found
+    id: links
     attributes:
-      label: What you already found
-      description: Links to the store page, an API, or another project that does something similar. If it depends on a service or tool I would have to set up and test first, tell me how it works for you.
+      label: Links that help
+      description: A pull request, another project that does this, or a line in our code.

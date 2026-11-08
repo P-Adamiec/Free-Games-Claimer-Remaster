@@ -17,7 +17,7 @@ ENV_EXAMPLE = (ROOT / ".env.example").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 # Handled by Docker, not by config.py: the image tag, TurboVNC's own password and the user the entrypoint switches to.
-DOCKER_ONLY = {"FGC_TAG", "VNC_PASSWORD", "PUID", "PGID"}
+DOCKER_ONLY = {"FGC_TAG", "PUID", "PGID"}
 
 
 def _config_vars() -> list[str]:
@@ -80,8 +80,8 @@ class TestIssueForms:
     FORMS = sorted(p for p in FOLDER.glob("*.yml") if p.name != "config.yml")
     LABELS = {"type: bug", "type: feature", "type: question", "type: docs"}
 
-    def test_the_three_forms_are_there(self):
-        assert [p.name for p in self.FORMS] == ["bug_report.yml", "feature_request.yml", "other.yml"]
+    def test_the_four_forms_are_there(self):
+        assert [p.name for p in self.FORMS] == ["bug_report.yml", "feature_request.yml", "new_store.yml", "other.yml"]
 
     @pytest.mark.parametrize("path", FORMS, ids=lambda p: p.name)
     def test_every_form_reads_and_asks_for_the_newest_version(self, path):

@@ -280,3 +280,12 @@ class TestQuotedValues:
         _reload(monkeypatch)
         import os
         assert os.environ["SOMETHING_ELSE"] == "'kept'"
+
+
+class TestEpicCaptchaAsk:
+    def test_off_by_default_so_a_puzzle_waits_for_the_next_run(self, monkeypatch):
+        assert _reload(monkeypatch).eg_captcha_ask is False
+
+    def test_on_asks_you_over_vnc(self, monkeypatch):
+        assert _reload(monkeypatch, EG_CAPTCHA_ASK="true").eg_captcha_ask is True
+

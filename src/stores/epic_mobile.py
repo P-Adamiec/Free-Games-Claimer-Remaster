@@ -27,15 +27,22 @@ VALID_PLATFORMS = ("android", "ios")
 PLATFORM_LABELS = {"android": "Android", "ios": "iOS"}
 
 
-def _is_claimable_free(content: dict) -> bool:
-    """True when the offer is currently a 0-price 'Claim', not the paid entry that follows the promo."""
+def _free_claim(content: dict) -> dict | None:
+    """The offer's current 0-price 'Claim' entry, not the paid entry that follows the promo; None when there is none."""
     for entry in content.get("purchase") or []:
-        if not isinstance(entry, dict):
-            continue
-        price = (entry.get("price") or {}).get("decimalPrice")
-        if entry.get("purchaseType") == "Claim" and price == 0:
-            return True
-    return False
+        if isinstance(entry, dict) and entry.get("purchaseType") == "Claim" and (entry.get("price") or {}).get("decimalPrice") == 0:
+            return entry
+    return None
+
+
+def _is_claimable_free(content: dict) -> bool:
+    """True when the offer is currently a 0-price 'Claim'."""
+    return _free_claim(content) is not None
+
+
+def _free_until(content: dict) -> str:
+    """When the free Claim offer ends, as Epic writes it; empty when the offer does not say."""
+    return str(((_free_claim(content) or {}).get("discount") or {}).get("discountEndDate") or "")
 
 
 def parse_free_games(data: dict, platform: str = "") -> list[dict]:
@@ -59,6 +66,7 @@ def parse_free_games(data: dict, platform: str = "") -> list[dict]:
                 "url": PRODUCT_URL.format(slug=slug),
                 "platform": platform,
                 "label": label,
+                "ends": _free_until(content),
             })
     return games
 

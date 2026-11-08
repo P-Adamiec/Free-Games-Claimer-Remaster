@@ -6,11 +6,12 @@ Pins two live traps: the payload keeps each listing's original price, and only
 
 import asyncio
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from src.stores.epic_fab import CHECKOUT_CLICK_JS, CHECKOUT_STATE_JS, FabClaimer, _seller_name, parse_free_listings
+from src.stores.epic_fab import CHECKOUT_CONSENT_OPEN_JS, CHECKOUT_STATE_JS, FabClaimer, _seller_name, parse_free_listings
 
 # What /i/blades/free_content_blade served on 2026-08-08, trimmed to the fields used.
 BLADE = {
@@ -51,6 +52,7 @@ class TestRealBlade:
             "uid": "a7000a7c-c5fe-45f3-b8df-3e85c576b6c1",
             "seller": "Denys Rutkovskyi",
             "listing_type": "3d-model",
+            "ends": "",
         }
 
     def test_seller_comes_from_the_nested_object(self):
@@ -100,7 +102,7 @@ class TestBrokenPayloads:
         payload = dict(BLADE, tiles=[{"listing": {"uid": "abc"}}])
         assert parse_free_listings(payload) == [{
             "title": "Fab asset", "url": "https://www.fab.com/listings/abc",
-            "uid": "abc", "seller": "", "listing_type": "",
+            "uid": "abc", "seller": "", "listing_type": "", "ends": "",
         }]
 
 
@@ -167,13 +169,19 @@ class TestCheckoutOrdersOnlyAtZero:
         async def _checkout_document(self):
             return object()
 
+        async def _clear_checkout_challenge(self, title):
+            return True
+
         async def _checkout_eval(self, document, script):
             if script == CHECKOUT_STATE_JS:
                 return {"text": self.texts.pop(0) if len(self.texts) > 1 else self.texts[0], "buttons": ["Place Order"]}
-            if script == CHECKOUT_CLICK_JS:
-                self.clicked.append("Place Order")
-                return {"clicked": True, "label": "Place Order"}
-            return {"present": False}
+            if script == CHECKOUT_CONSENT_OPEN_JS:
+                return False
+            return None
+
+        async def _click_in_checkout(self, document, finder, label):
+            self.clicked.append("Place Order")
+            return True
 
     def _checkout(self, *texts):
         stub = self._Stub(texts)
@@ -199,3 +207,265 @@ class TestCheckoutOrdersOnlyAtZero:
         stub = self._Stub([text])
         assert asyncio.run(FabClaimer._complete_checkout(stub, "Armored Stone Golem - Dark Fantasy Boss")) is True
         assert stub.clicked == ["Place Order"]
+
+
+class TestFabSeesAPuzzleInEpicsCheckout:
+    """Fab looked only at its own page, so a puzzle inside Epic's checkout frame went unseen (2026-10-30)."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "epic_fab.py").read_text(encoding="utf-8")
+
+    def _clear(self, monkeypatch, reason, ask_setting=False):
+        from src.stores import epic_fab
+        monkeypatch.setattr(epic_fab.cfg, "eg_captcha_ask", ask_setting)
+        waited = []
+
+        async def read():
+            return reason
+
+        async def wait_out(label, **kwargs):
+            waited.append((kwargs["settle"], kwargs["ask"]))
+            return False
+
+        stub = type("Stub", (), {"_meeting": False, "_with_you": False, "_claiming": {"uid": "abc"}, "_seen_at_prompt": None, "_book": FabClaimer._book, "store_name": "fab", "_checkout_puzzle": False, "_ends_now": None})()
+        stub._checkout_challenge_reason, stub._wait_out_challenge = read, wait_out
+        cleared = asyncio.run(FabClaimer._clear_checkout_challenge(stub, "Asset"))
+        return cleared, waited, stub._checkout_puzzle
+
+    @pytest.mark.parametrize("ask_setting,expected", [(False, (12, False)), (True, (12, True))])
+    def test_a_puzzle_waits_for_the_next_run_unless_eg_captcha_ask(self, monkeypatch, ask_setting, expected):
+        cleared, waited, flagged = self._clear(monkeypatch, "checkout frame, frame: https://newassets.hcaptcha.com/x", ask_setting)
+        assert cleared is False and waited == [expected] and flagged is True
+
+    def test_a_check_that_passes_by_itself_gets_three_minutes(self, monkeypatch):
+        cleared, waited, flagged = self._clear(monkeypatch, "page title: just a moment...")
+        assert waited == [(180, True)] and flagged is False
+
+    def test_a_puzzle_that_went_by_itself_does_not_stop_the_run(self, monkeypatch):
+        from src.stores import epic_fab
+        monkeypatch.setattr(epic_fab.cfg, "eg_captcha_ask", False)
+
+        async def read():
+            return "checkout frame, frame: https://newassets.hcaptcha.com/x"
+
+        async def gone(label, **kwargs):
+            return True
+
+        stub = type("Stub", (), {"_meeting": False, "_with_you": False, "_claiming": {"uid": "abc"}, "_seen_at_prompt": None, "_book": FabClaimer._book, "store_name": "fab", "_checkout_puzzle": False, "_ends_now": None})()
+        stub._checkout_challenge_reason, stub._wait_out_challenge = read, gone
+        assert asyncio.run(FabClaimer._clear_checkout_challenge(stub, "Asset")) is True and stub._checkout_puzzle is False
+
+    def test_the_frame_is_looked_at_again_once_the_order_is_placed(self):
+        # An EU account places the order with the waiver, and that can draw the puzzle too.
+        checkout = self.SOURCE.split("async def _complete_checkout", 1)[1].split("\n    async def ", 1)[0]
+        assert checkout.count('else "captcha"') == 2
+
+    def test_the_frame_is_looked_at_right_after_add_to_library(self):
+        checkout = self.SOURCE.split("async def _complete_checkout", 1)[1].split("\n    async def ", 1)[0]
+        assert checkout.index("CHECKOUT_ADD_FINDER") < checkout.index("if not await self._clear_checkout_challenge(title):")
+        assert 'return "captcha"' in checkout
+
+    @pytest.mark.parametrize("handed,answer,noted", [(True, [-1, 0], True), (True, [-1, 2187], False), (False, [-1, 0], False)])
+    def test_only_a_puzzle_that_went_to_you_and_left_no_answer_is_noted(self, monkeypatch, handed, answer, noted):
+        # Not handed: it cleared in the first seconds, no VNC notice. A filled answer field: you solved it.
+        from src.stores import epic_fab
+        monkeypatch.setattr(epic_fab.cfg, "eg_captcha_ask", True)
+
+        async def read():
+            return "checkout frame, frame: https://newassets.hcaptcha.com/x"
+
+        async def gone(label, **kwargs):
+            stub._handed_over = handed
+            return True
+
+        async def lengths():
+            return answer
+
+        stub = type("Stub", (), {"_meeting": False, "_with_you": False, "_claiming": {"uid": "abc"}, "_seen_at_prompt": None, "_book": FabClaimer._book, "store_name": "fab", "_checkout_puzzle": False, "_ends_now": None, "_puzzle_asked": False})()
+        stub._checkout_challenge_reason, stub._wait_out_challenge, stub._captcha_answer_lengths = read, gone, lengths
+        assert asyncio.run(FabClaimer._clear_checkout_challenge(stub, "Asset")) is True
+        assert stub._puzzle_asked is noted and stub._checkout_puzzle is False
+
+    def test_the_answer_field_is_read_inside_parentheses(self):
+        # Checked in Chrome 2.11: "return" and a line break returned nothing, so the field always read as missing.
+        assert "return ({CAPTCHA_ANSWER_JS})" in self.SOURCE
+
+    def test_after_a_puzzle_only_assets_you_lack_wait_for_the_next_run(self):
+        run = self.SOURCE.split("async def run(", 1)[1].split("\n    async def ", 1)[0]
+        stop = run.index("if self._checkout_puzzle and not cfg.eg_captcha_ask")
+        assert stop < run.index("await self._already_recorded(item[\"uid\"])", stop) < run.index("await self._claim_listing(item)")
+
+
+
+class TestAnExpiredPuzzleIsNotASolvedOne:
+    """A puzzle handed to you vanishes when it expires too, about two minutes later (TODO 67)."""
+
+    def _claim(self, monkeypatch, asked, viewers=frozenset(), scheduled=True):
+        from src.core import run_state
+        from src.stores import epic_fab
+        monkeypatch.setattr(epic_fab.cfg, "dryrun", False)
+        monkeypatch.setattr(epic_fab, "vnc_viewers", lambda: None if viewers is None else set(viewers))
+        if scheduled:
+            monkeypatch.setattr(run_state, "_next_run_source", lambda: datetime.now(timezone.utc) + timedelta(hours=12))
+        run_state.reset_run_state()
+        claimer, remembered = FabClaimer.__new__(FabClaimer), []
+        claimer.notify_games = []
+        # Two earlier assets already used both mouse clicks on these buttons.
+        claimer._click_counts = {"add to library (checkout frame)": 2, "accept the waiver (checkout frame)": 2}
+
+        async def nothing(*_a, **_kw):
+            return None
+
+        async def no(*_a, **_kw):
+            return False
+
+        async def yes(*_a, **_kw):
+            return True
+
+        async def empty(*_a, **_kw):
+            return set()
+
+        async def state(*_a, **_kw):
+            return {}
+
+        async def checkout(_title):
+            claimer.counts_at_checkout = dict(claimer._click_counts)
+            claimer._puzzle_asked = asked
+            return True
+
+        async def remember(*args):
+            remembered.append(args)
+
+        claimer.page = type("Page", (), {"get": staticmethod(nothing)})()
+        for name, stub in (("sleep", nothing), ("_human_challenge_present", no), ("_page_state", state),
+                           ("_owned_uids", empty), ("_already_recorded", no), ("_read_lately", no), ("_click_buy_now", yes),
+                           ("_accept_eula", yes), ("_complete_checkout", checkout), ("_remember", remember)):
+            monkeypatch.setattr(claimer, name, stub)
+        monkeypatch.setattr(claimer, "_is_free_now", lambda _state: True)
+        try:
+            asyncio.run(claimer._claim_listing({"title": "Dragon Cave", "uid": "abc", "url": "https://www.fab.com/listings/abc"}))
+            return claimer, remembered, run_state.waits_for_nobody("fab"), (run_state.waiting_for_you(), run_state.booked())
+        finally:
+            run_state.reset_run_state()
+
+    def test_an_asset_missing_after_your_puzzle_is_a_captcha_left_for_the_next_run(self, monkeypatch):
+        claimer, remembered, nobody, waiting = self._claim(monkeypatch, asked=True)
+        # The rest of the run waits, instead of drawing a puzzle and a ping for every asset.
+        assert claimer._checkout_puzzle is True and nobody is True and remembered == []
+        # With a next run in 12 hours it waits for you in noVNC, listed apart: not failed, not "Needed you".
+        needed, kept = waiting
+        assert claimer.notify_games == [] and needed == {} and [item["title"] for item in kept["fab"]] == ["Dragon Cave"]
+
+    def test_a_single_run_keeps_nothing_and_ends(self, monkeypatch):
+        claimer, _, _, (needed, kept) = self._claim(monkeypatch, asked=True, scheduled=False)
+        assert claimer.notify_games[0]["status"] == "failed:captcha" and kept == {} and needed
+
+    def test_without_novnc_to_watch_it_is_a_captcha_for_the_next_run(self, monkeypatch):
+        claimer, _, _, (needed, kept) = self._claim(monkeypatch, asked=True, viewers=None)
+        assert claimer.notify_games[0]["status"] == "failed:captcha" and kept == {} and needed
+
+    def test_every_asset_gets_its_own_mouse_clicks(self, monkeypatch):
+        # Live 3.11: the third asset found the two clicks per button spent and was clicked by script.
+        claimer, _, _, _ = self._claim(monkeypatch, asked=False)
+        assert claimer.counts_at_checkout == {}
+
+    def test_without_a_puzzle_it_stays_unconfirmed(self, monkeypatch):
+        claimer, remembered, nobody, _ = self._claim(monkeypatch, asked=False)
+        assert claimer.notify_games[0]["status"] == "failed:unconfirmed" and remembered == [] and nobody is False
+
+
+class TestFabClicksLikeAHand:
+    """Fab pressed every button by script (isTrusted false) on the Epic account; now Epic's own mouse loop, script only as a fallback."""
+
+    SOURCE = (Path(__file__).resolve().parent.parent / "src" / "stores" / "epic_fab.py").read_text(encoding="utf-8")
+
+    class _Frame:
+        """Epic's checkout frame at (100, 300) on the page, its button at (50, 20) inside it; reads follow `boxes`."""
+
+        def __init__(self, boxes, hit=True):
+            self.boxes, self.hit, self.calls, self._checkout_iframe = list(boxes), hit, [], object()
+            self.__dict__["_click_counts"] = {}
+
+        logger = __import__("logging").getLogger("test")
+
+        async def sleep(self, seconds):
+            pass
+
+        async def _human_click(self, x, y, w=0, h=0):
+            self.calls.append(("mouse", x, y))
+
+        async def _bring_into_view(self, read, run_js, wheel_point, finder, label):
+            return await read()
+
+        async def _read_box(self, run_js, finder):
+            return self.boxes.pop(0) if len(self.boxes) > 1 else self.boxes[0]
+
+        async def _checkout_eval(self, node, script, *args):
+            if script.startswith("function() {" + chr(10) + "    const f = this"):
+                return {"x": 100, "y": 300, "w": 900, "top": 300, "bottom": 720}
+            if "elementFromPoint" in script:
+                return self.hit
+            if "el.click(); return true" in script:
+                self.calls.append(("script",))
+                return True
+            return None
+
+    def _click(self, frame):
+        from src.core.claimer import BaseClaimer
+        from src.stores.epic_fab import CHECKOUT_ADD_FINDER
+        for name in ("_click_until_taken", "_click_took", "_script_click_js"):
+            setattr(frame, name, getattr(BaseClaimer, name).__get__(frame) if name != "_script_click_js" else BaseClaimer._script_click_js)
+        return asyncio.run(FabClaimer._click_in_checkout(frame, object(), CHECKOUT_ADD_FINDER, "add to library")), frame.calls
+
+    BUTTON = {"x": 50, "y": 20, "key": "BUTTON|Place Order"}
+
+    def test_the_button_is_clicked_with_the_mouse_where_the_frame_puts_it(self):
+        clicked, calls = self._click(self._Frame([self.BUTTON, {"reason": "missing"}]))
+        # The spot in the frame (50, 20) plus where the frame sits on the page (100, 300).
+        assert clicked is True and calls == [("mouse", 150, 320)]
+
+    def test_a_button_the_waiver_covers_after_the_click_counts_as_clicked(self):
+        # An EU account: the waiver opens over Place order, which stays enabled; pressing it again by script was the signal.
+        clicked, calls = self._click(self._Frame([self.BUTTON, {"reason": "covered"}]))
+        assert clicked is True and calls == [("mouse", 150, 320)]
+
+    def test_a_spot_covered_on_the_page_is_never_clicked_through(self):
+        clicked, calls = self._click(self._Frame([self.BUTTON], hit=False))
+        assert clicked is False and calls == []
+
+    def test_a_button_two_mouse_clicks_did_not_move_is_pressed_by_script(self):
+        clicked, calls = self._click(self._Frame([self.BUTTON]))
+        assert calls[:2] == [("mouse", 150, 320), ("mouse", 150, 320)] and calls[-1] == ("script",)
+
+    def test_only_buttons_a_person_can_see_are_picked(self):
+        from src.stores.epic_fab import CHECKOUT_ACCEPT_FINDER, CHECKOUT_ADD_FINDER
+        assert "add to library|place order|get now" in CHECKOUT_ADD_FINDER and "getBoundingClientRect" in CHECKOUT_ADD_FINDER
+        assert "getBoundingClientRect" in CHECKOUT_ACCEPT_FINDER
+
+    @pytest.mark.parametrize("accept,expected", [(False, ("eula", ["Place Order"])), (True, (True, ["Place Order", "waiver"]))])
+    def test_the_waiver_is_pressed_only_with_fab_accept_eula(self, monkeypatch, accept, expected):
+        from src.stores import epic_fab
+
+        monkeypatch.setattr(epic_fab.cfg, "fab_accept_eula", accept)
+        clicked = []
+
+        class Stub:
+            async def sleep(self, seconds):
+                pass
+
+            async def _checkout_document(self):
+                return object()
+
+            async def _clear_checkout_challenge(self, title):
+                return True
+
+            async def _checkout_eval(self, document, script, *args):
+                if script == CHECKOUT_STATE_JS:
+                    return {"text": "Dragon Cave Price 0.00 Total 0.00", "buttons": ["Place Order"]}
+                return script == CHECKOUT_CONSENT_OPEN_JS
+
+            async def _click_in_checkout(self, document, finder, label):
+                clicked.append("waiver" if "accept" in label else "Place Order")
+                return True
+
+        result = asyncio.run(FabClaimer._complete_checkout(Stub(), "Dragon Cave"))
+        assert (result, clicked) == expected
