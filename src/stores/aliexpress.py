@@ -150,6 +150,30 @@ _TOMORROW_KEY_RE = re.compile(
     r"|(coin|reward|amount|point|num).{0,12}?(tomorrow|next_?day)", re.I)
 
 
+def use_google_login(mode: str, email: str | None, password: str | None) -> bool:
+    """AE_LOGIN=google forces the Google button, =password never uses it; empty means Google
+    whenever there is no password to type, since the login page offers nothing else to automate."""
+    mode = (mode or "").strip().lower()
+    if mode == "google":
+        return True
+    if mode == "password":
+        return False
+    return not (email and password)
+
+
+def pick_google_account(accounts: list[str], wanted: str | None) -> int | None:
+    """Index of the Google account chooser entry to click: the one matching `wanted`
+    (case-insensitive), else the only/first saved account. None when the chooser lists none."""
+    if not accounts:
+        return None
+    if wanted:
+        w = wanted.strip().lower()
+        for i, acc in enumerate(accounts):
+            if (acc or "").strip().lower() == w:
+                return i
+    return 0
+
+
 def _flatten_payload(obj, prefix: str = "", depth: int = 0, out: dict | None = None) -> dict:
     """Flatten a mtop JSON payload into {path: scalar}.
 
@@ -1207,6 +1231,122 @@ class AliExpressClaimer(BaseClaimer):
         except Exception:
             pass
 
+    async def _google_tab(self, wait: float = 12):
+        """The tab showing Google's sign-in: a popup the button opened, or this page redirected."""
+        loops = max(1, int(wait / 1.5))
+        for i in range(loops):
+            try:
+                await self.browser.update_targets()
+                for tab in reversed(list(self.browser.tabs)):
+                    url = str(getattr(getattr(tab, "target", None), "url", "") or "").lower()
+                    if "accounts.google." in url:
+                        return tab
+            except Exception as e:
+                self.logger.debug("Could not list tabs while looking for Google: %s", e)
+            if i + 1 < loops:
+                await self.sleep(1.5)
+        return None
+
+    async def _pick_google_account(self, tab) -> bool:
+        """On Google's account chooser, click the saved account (AE_EMAIL if set, else the first)."""
+        try:
+            raw = await tab.evaluate(r"""
+                (() => {
+                    const els = [...document.querySelectorAll('[data-identifier], [data-email]')]
+                        .filter(e => e.offsetParent !== null);
+                    els.forEach((e, i) => e.setAttribute('data-fgc-acc', String(i)));
+                    return JSON.stringify(els.map(e => e.getAttribute('data-identifier') || e.getAttribute('data-email') || ''));
+                })()
+            """)
+            accounts = json.loads(raw) if isinstance(raw, str) else []
+        except Exception as e:
+            self.logger.debug("Could not read Google's account chooser: %s", e)
+            return False
+        idx = pick_google_account(accounts, cfg.ae_email)
+        if idx is None:
+            self.logger.debug("Google shows no saved account (signed out of Google?)")
+            return False
+        try:
+            el = await tab.select(f'[data-fgc-acc="{idx}"]', timeout=3)
+            if el:
+                await el.click()
+                self.logger.debug("Picked Google account #%d of %d", idx + 1, len(accounts))
+                return True
+        except Exception as e:
+            self.logger.debug("Could not click the Google account: %s", e)
+        return False
+
+    async def _login_with_google(self) -> bool:
+        """Press AliExpress' "Google" quick-login button and let the saved Google session finish it.
+
+        The button lives under "Sign in quickly with" as ``<a aria-label="google">``. Google
+        either opens a popup or replaces this page; with a live Google session it shows the
+        account chooser (one click) and maybe a "Continue" consent, then hands back to AliExpress.
+        """
+        self.logger.info("Signing in with Google...")
+        main = self.page
+        btn = None
+        for sel in ('a[aria-label="google" i]', '.fm-sns-new-item.google'):
+            try:
+                btn = await self.page.select(sel, timeout=2)
+                if btn:
+                    break
+            except Exception:
+                btn = None
+        try:
+            if btn:
+                await btn.click()
+            elif not await self._click_button_by_text(["Google"]):
+                self.logger.info("No Google button on the login page.")
+                return False
+        except Exception as e:
+            self.logger.debug("Google button click failed: %s", e)
+            return False
+
+        tab = await self._google_tab(wait=12)
+        if tab is None and btn is not None:
+            # A synthetic click may not count as a user gesture for window.open: try a real mouse click.
+            try:
+                await btn.mouse_click()
+            except Exception as e:
+                self.logger.debug("Google button mouse click failed: %s", e)
+            tab = await self._google_tab(wait=8)
+
+        if tab is not None:
+            await self.sleep(2)
+            await self._pick_google_account(tab)
+            await self.sleep(4)
+            # Consent screen ("<app> wants to access your Google Account"), when Google asks for it again.
+            for label in ("Continue", "Continua", "Continuer", "Weiter", "Kontynuuj", "Allow", "Consenti"):
+                try:
+                    b = await tab.find(label, best_match=True, timeout=1)
+                    if b and (getattr(b, "tag_name", "") or "").lower() in ("button", "span", "div"):
+                        await b.click()
+                        break
+                except Exception:
+                    pass
+
+        # Wait for AliExpress to take the session back (popup closes, or the page redirects home).
+        for _ in range(20):
+            await self.sleep(2)
+            try:
+                await self.browser.update_targets()
+                tabs = list(self.browser.tabs)
+                if main not in tabs and tabs:
+                    main = tabs[0]
+            except Exception:
+                pass
+            self.page = main
+            if await self._login_ok():
+                return True
+        # Leave the Google tab in front so a VNC login can finish where it stopped.
+        if tab is not None:
+            try:
+                await tab.bring_to_front()
+            except Exception:
+                pass
+        return False
+
     async def _ensure_logged_in(self) -> bool:
         """Verify login status via direct login link, attempt automated login, or fall back to VNC for OTP code."""
         await self.sleep(2)
@@ -1245,8 +1385,15 @@ class AliExpressClaimer(BaseClaimer):
         except Exception:
             pass
 
-        # 2. Automated login if credentials are configured
-        if cfg.ae_email and cfg.ae_password:
+        # 2a. "Google" button, reusing the Google session saved in this browser profile.
+        if use_google_login(cfg.ae_login, cfg.ae_email, cfg.ae_password):
+            if await self._login_with_google():
+                self.log_signed_in(cfg.ae_email or "AliExpress User")
+                return True
+            self.logger.info("Google sign-in did not finish by itself.")
+
+        # 2b. Automated login if credentials are configured
+        if cfg.ae_email and cfg.ae_password and cfg.ae_login != "google":
             self.logger.info("Attempting automated AliExpress login...")
             try:
                 # First check if a password field is already present (AliExpress remembered the account!)

@@ -389,6 +389,9 @@ class Config:
     # --- AliExpress ---
     ae_email: str | None = os.getenv("AE_EMAIL") or os.getenv("EMAIL")
     ae_password: str | None = os.getenv("AE_PASSWORD") or os.getenv("PASSWORD")
+    # How to sign in: "google" (the Google button, reusing the Google session saved in the browser
+    # profile), "password" (AE_EMAIL + AE_PASSWORD), or empty = Google when no password is set.
+    ae_login: str = (os.getenv("AE_LOGIN") or "").strip().lower()
     # Bot-flag guard: skip collecting under AE_MIN_COINS, then wait AE_FLAG_WAIT (> ~7-min penalty) and retry AE_FLAG_RETRIES times.
     ae_min_coins: int = _int("AE_MIN_COINS", 2)
     ae_flag_retries: int = _int("AE_FLAG_RETRIES", 3)
