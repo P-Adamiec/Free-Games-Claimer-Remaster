@@ -177,3 +177,33 @@ class TestSignedInFromTheApi:
         assert form < api < labels
         # Only this page's answer counts: a calendar from an earlier page must not end a sign-in wait early.
         assert "signed_in_from_payloads(self._coin_payloads)" not in check
+
+
+class TestGoogleLogin:
+    """The login page offers email+password, Passkey, Google and Facebook: without a password
+    the only thing left to automate is the Google button on a profile that kept its Google session."""
+
+    @pytest.mark.parametrize("mode,email,password,expected", [
+        ("", None, None, True),
+        ("", "me@example.com", None, True),
+        ("", "me@example.com", "secret", False),
+        ("google", "me@example.com", "secret", True),
+        ("GOOGLE ", None, None, True),
+        ("password", None, None, False),
+    ])
+    def test_when_google_is_used(self, mode, email, password, expected):
+        from src.stores.aliexpress import use_google_login
+        assert use_google_login(mode, email, password) is expected
+
+    def test_picks_the_matching_account(self):
+        from src.stores.aliexpress import pick_google_account
+        assert pick_google_account(["a@gmail.com", "Me@Gmail.com"], "me@gmail.com") == 1
+
+    def test_falls_back_to_the_first_account(self):
+        from src.stores.aliexpress import pick_google_account
+        assert pick_google_account(["a@gmail.com", "b@gmail.com"], "other@gmail.com") == 0
+        assert pick_google_account(["a@gmail.com"], None) == 0
+
+    def test_no_accounts_means_no_click(self):
+        from src.stores.aliexpress import pick_google_account
+        assert pick_google_account([], "me@gmail.com") is None
