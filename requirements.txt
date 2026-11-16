@@ -13,7 +13,7 @@ sqlalchemy[asyncio]>=2.1.8,<3
 aiosqlite>=0.22.1
 
 # Notifications
-apprise>=2.1.0,<3
+apprise>=2.2.0,<3
 
 # Retry logic
 tenacity>=9.2.1
