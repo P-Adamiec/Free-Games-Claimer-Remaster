@@ -81,8 +81,11 @@ JSON.stringify((() => {
     }
 
     // Epic swaps the whole product page for this sentence when the game is blocked where you are.
+    // Older layouts put it in <h1>, newer ones drop the heading tag altogether.
     const heading = (document.querySelector('h1')?.textContent || '').toLowerCase();
-    if (heading.includes('unavailable in your platform or region')) return { text: '', flow: 'region' };
+    const bodyText = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
+    if (heading.includes('unavailable in your platform or region')
+        || bodyText.includes('unavailable in your platform or region')) return { text: '', flow: 'region' };
 
     return { text: '', flow: 'unknown' };
 })())
@@ -284,7 +287,7 @@ class EpicGamesClaimer(BaseClaimer):
             )
             # Set cookies to bypass age gates and cookie consent popups
             await self._set_cookies()
-            await self.page.get(URL_CLAIM)
+            await self._goto(URL_CLAIM)
             await self.sleep(3)
 
             # Step 1: Make sure we are logged in

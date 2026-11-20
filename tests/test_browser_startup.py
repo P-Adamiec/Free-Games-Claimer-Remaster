@@ -74,6 +74,31 @@ class TestOpenFirstTab:
         assert _open(b) == "tab:about:blank"
         assert b.calls == [("about:blank", "existing"), ("about:blank", "existing")]
 
+    def test_a_stale_target_id_is_retried_not_raised(self):
+        b = FakeBrowser()
+        attempts = 0
+
+        async def get_once(url, new_tab=False, new_window=False):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise Exception("No target with given id found [code: -32602]")
+            return f"tab:{url}"
+
+        b.get = get_once
+        assert _open(b) == "tab:about:blank"
+        assert attempts == 2 and b.updates == 1
+
+    def test_an_unrelated_error_is_still_raised(self):
+        b = FakeBrowser()
+
+        async def get_boom(url, new_tab=False, new_window=False):
+            raise ValueError("something else broke")
+
+        b.get = get_boom
+        with pytest.raises(ValueError, match="something else broke"):
+            _open(b)
+
     def test_a_windowless_chrome_gets_a_window(self):
         # Observed live: Target.createTarget answers "no browser is open" with no window around.
         b = FakeBrowser(tabs_after=99, no_window=True)
@@ -309,3 +334,71 @@ class TestNodriverStillWorksThisWay:
                 cm.uc.util.get_registered_instances().discard(b)
             assert len(found) == 1 and found[0]._process is None
         asyncio.run(run())
+
+
+class TestStaleTargetRecovery:
+    """When Chrome drops or replaces its initial tab target (-32602) right after startup, recover a fresh tab."""
+
+    @pytest.mark.parametrize("msg,expected", [
+        ("No target with given id found [code: -32602]", True),
+        ("ProtocolException: code -32602", True),
+        ("no close frame received or sent", False),
+    ])
+    def test_is_stale_target_error(self, msg, expected):
+        assert cm.is_stale_target_error(Exception(msg)) is expected
+
+    def test_goto_recovers_fresh_tab_on_stale_target(self):
+        stale_exc = Exception("No target with given id found [code: -32602]")
+        events = []
+
+        class DeadPage:
+            async def get(self, url):
+                events.append(("dead_get", url))
+                raise stale_exc
+
+        class FreshPage:
+            async def send(self, cmd):
+                events.append(("page_enable", cmd))
+
+        class Browser:
+            tabs = ["fresh"]
+
+            async def update_targets(self):
+                events.append(("update_targets",))
+
+            async def get(self, url, new_tab=False, new_window=False):
+                events.append(("browser_get", url))
+                return fresh_page
+
+        fresh_page = FreshPage()
+        claimer = cm.BaseClaimer.__new__(cm.BaseClaimer)
+        claimer.store_name = "epic"
+        claimer.page = DeadPage()
+        claimer.browser = Browser()
+
+        asyncio.run(claimer._goto("https://store.epicgames.com/en-US/free-games"))
+        assert claimer.page is fresh_page
+        assert events[0] == ("dead_get", "https://store.epicgames.com/en-US/free-games")
+        assert ("update_targets",) in events
+        assert ("browser_get", "https://store.epicgames.com/en-US/free-games") in events
+        assert any(e[0] == "page_enable" for e in events)
+
+    def test_goto_reraises_unrelated_errors_without_touching_targets(self):
+        events = []
+
+        class BrokenPage:
+            async def get(self, url):
+                raise ValueError("network error")
+
+        class Browser:
+            async def update_targets(self):
+                events.append("update_targets")
+
+        claimer = cm.BaseClaimer.__new__(cm.BaseClaimer)
+        claimer.store_name = "epic"
+        claimer.page = BrokenPage()
+        claimer.browser = Browser()
+
+        with pytest.raises(ValueError, match="network error"):
+            asyncio.run(claimer._goto("https://store.epicgames.com/en-US/free-games"))
+        assert events == []

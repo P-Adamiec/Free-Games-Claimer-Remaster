@@ -469,3 +469,78 @@ class TestFabClicksLikeAHand:
 
         result = asyncio.run(FabClaimer._complete_checkout(Stub(), "Dragon Cave"))
         assert (result, clicked) == expected
+
+
+class TestConfirmInLibrary:
+    """Fab's /i/library/search API can lag behind checkout for several seconds (live 18.11)."""
+
+    @pytest.mark.parametrize("appears_on_poll", [2, 3])
+    def test_library_lag_is_waited_out_before_confirming(self, appears_on_poll):
+        from src.stores.epic_fab import CONFIRM_DELAY
+
+        sleeps, polls = [], 0
+
+        class Stub:
+            async def sleep(self, seconds):
+                sleeps.append(seconds)
+
+            async def _owned_uids(self):
+                nonlocal polls
+                polls += 1
+                return {"abc"} if polls >= appears_on_poll else set()
+
+        assert asyncio.run(FabClaimer._confirm_in_library(Stub(), "abc")) is True
+        assert polls == appears_on_poll
+        assert sleeps == [CONFIRM_DELAY] * (appears_on_poll - 1)
+
+    def _run_listing(self, monkeypatch, uid_sequence):
+        from src.core import run_state
+        from src.stores import epic_fab
+
+        monkeypatch.setattr(epic_fab.cfg, "dryrun", False)
+        run_state.reset_run_state()
+        claimer = FabClaimer.__new__(FabClaimer)
+        claimer.notify_games = []
+        remembered = []
+        remaining = list(uid_sequence)
+
+        async def nothing(*_a, **_kw):
+            return None
+
+        async def no(*_a, **_kw):
+            return False
+
+        async def yes(*_a, **_kw):
+            return True
+
+        async def state(*_a, **_kw):
+            return {}
+
+        async def owned_uids():
+            return remaining.pop(0) if remaining else set()
+
+        async def remember(*args):
+            remembered.append(args)
+
+        claimer.page = type("Page", (), {"get": staticmethod(nothing)})()
+        for name, stub in (("sleep", nothing), ("_human_challenge_present", no), ("_page_state", state),
+                           ("_owned_uids", owned_uids), ("_already_recorded", no), ("_read_lately", no),
+                           ("_click_buy_now", yes), ("_accept_eula", yes), ("_complete_checkout", yes),
+                           ("_remember", remember)):
+            monkeypatch.setattr(claimer, name, stub)
+        monkeypatch.setattr(claimer, "_is_free_now", lambda _state: True)
+        try:
+            asyncio.run(claimer._claim_listing({"title": "Drone System", "uid": "abc", "url": "https://www.fab.com/listings/abc"}))
+            return claimer.notify_games, remembered
+        finally:
+            run_state.reset_run_state()
+
+    def test_claim_listing_confirms_when_library_api_catches_up(self, monkeypatch):
+        games, remembered = self._run_listing(monkeypatch, [set(), set(), {"abc"}])
+        assert games[0]["status"] == "claimed"
+        assert len(remembered) == 1
+
+    def test_claim_listing_still_reports_unconfirmed_after_all_polls(self, monkeypatch):
+        games, remembered = self._run_listing(monkeypatch, [set(), set(), set(), set()])
+        assert games[0]["status"] == "failed:unconfirmed"
+        assert remembered == []

@@ -75,6 +75,12 @@ def chrome_version(path: str | None = None) -> str:
     return match.group(0) if match else ""
 
 
+def is_stale_target_error(exc: BaseException) -> bool:
+    """True when Chrome closed or replaced the tab target before CDP could attach (-32602)."""
+    text = str(exc).lower()
+    return "no target with given id" in text or "-32602" in text
+
+
 async def open_first_tab(browser, url: str = "about:blank", attempts: int = 10, delay: float = 1.0):
     """Hand back a usable tab, even when Chrome has not registered one yet (issue #38).
 
@@ -84,8 +90,10 @@ async def open_first_tab(browser, url: str = "about:blank", attempts: int = 10, 
         if browser.tabs:
             try:
                 return await browser.get(url)
-            except RuntimeError as exc:
-                # StopIteration inside a coroutine: the tab list changed between the check and the call.
+            except Exception as exc:
+                # StopIteration inside a coroutine, or Chrome replaced the target (-32602), between check and get().
+                if not (isinstance(exc, RuntimeError) or is_stale_target_error(exc)):
+                    raise
                 logger.debug("First tab went away before it could be used: %s", exc)
         if delay:
             await asyncio.sleep(delay)
@@ -626,6 +634,21 @@ class BaseClaimer:
         self.logger.debug("Chrome answered %.1fs after nodriver gave up on it, so the bot attached to it instead of starting it again.",
                           waited)
         return browser
+
+    async def _goto(self, url: str) -> None:
+        """Open url, acquiring a fresh tab once if Chrome replaced the initial target right after startup."""
+        try:
+            await self.page.get(url)
+        except Exception as exc:
+            if not (self.browser and is_stale_target_error(exc)):
+                raise
+            self.logger.debug("Tab target vanished (%s), acquiring a fresh tab for %s.", exc, url)
+            await self.browser.update_targets()
+            self.page = await open_first_tab(self.browser, url)
+            try:
+                await self.page.send(uc.cdp.page.enable())
+            except Exception as enable_exc:
+                self.logger.debug("Page.enable after tab recovery failed: %s", enable_exc)
 
     @staticmethod
     def _normalize_title(title: str) -> str:
