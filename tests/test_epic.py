@@ -76,6 +76,11 @@ class TestAGameBlockedInYourRegion:
         # A product page with a button is never mistaken for the blocked one.
         assert PAGE_STATE_JS.index("'region'") > PAGE_STATE_JS.index("'owned'")
 
+    def test_it_reads_the_body_when_epic_drops_the_h1_heading(self):
+        # Live 18.11: redesigned region-block pages no longer wrap the notice in <h1>.
+        region_block = PAGE_STATE_JS.split("'owned'", 1)[1]
+        assert "document.body" in region_block and "unavailable in your platform or region" in region_block
+
     @pytest.mark.parametrize("previous,expected", [
         ("claimed", "existed"), ("existed", "existed"),
         ("unknown", None), ("failed", None), ("skipped:region", None), (None, None),

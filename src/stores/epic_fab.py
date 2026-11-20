@@ -42,6 +42,8 @@ FREE_BLOCK_TYPE = "listings"
 
 # Buy now hands over to Epic's payment frame, which is where the asset is actually acquired.
 CHECKOUT_PATH = "/payment/web/purchase"
+CONFIRM_ATTEMPTS = 3
+CONFIRM_DELAY = 6
 
 CHECKOUT_STATE_JS = """
 function () {
@@ -618,6 +620,15 @@ class FabClaimer(BaseClaimer):
         logger.debug("Fab library holds %d acquired asset(s).", len(uids))
         return uids
 
+    async def _confirm_in_library(self, uid: str, tries: int = CONFIRM_ATTEMPTS, delay: float = CONFIRM_DELAY) -> bool:
+        """Poll Fab's library API a few times, since acquired assets can lag behind checkout."""
+        for attempt in range(tries):
+            if attempt:
+                await self.sleep(delay)
+            if uid in await self._owned_uids():
+                return True
+        return False
+
     async def _claim_listing(self, item: dict) -> None:
         """Open one asset page, confirm it really is free, then claim it."""
         title, uid, url = item["title"], item["uid"], item["url"]
@@ -703,7 +714,7 @@ class FabClaimer(BaseClaimer):
         state = await self._page_state()
         logger.debug("Fab page after the claim click: %r", (state.get("body") or "")[:400])
 
-        if uid in await self._owned_uids():
+        if await self._confirm_in_library(uid):
             logger.info("✓ Claimed '%s' successfully!", title)
             status = "claimed"
             unbook_title(self.store_name, title)
