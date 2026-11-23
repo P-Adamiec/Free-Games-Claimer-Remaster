@@ -9,11 +9,11 @@ psutil>=7.2.2
 browserforge>=1.2.4
 
 # Database
-sqlalchemy[asyncio]>=2.1.8,<3
+sqlalchemy[asyncio]>=2.1.9,<3
 aiosqlite>=0.22.1
 
 # Notifications
-apprise>=2.1.0,<3
+apprise>=2.2.0,<3
 
 # Retry logic
 tenacity>=9.2.1
@@ -23,7 +23,7 @@ APScheduler>=3.11.3,<4
 tzdata>=2026.6
 
 # OTP / 2FA
-pyotp>=2.10.0
+pyotp>=2.12.1
 
 # Configuration
 python-dotenv>=1.2.4
